@@ -6,7 +6,7 @@ __version__ = "0.1.0"
 # policy changes (docs/12_EXPERIMENT_PROTOCOL.md). Phase B added the
 # Hardening modified Prompt Template / Validation / Recovery Context wiring;
 # Phase D2 introduced the real Web Tool Policy and bounded external I/O -> HV-0.5.
-HARNESS_VERSION = "HV-0.6"
+HARNESS_VERSION = "HV-0.7"
 
 # Default dataset / context-policy labels used by experiment records.
 DEFAULT_DATASET_VERSION = "RUNTIME-V0.1"

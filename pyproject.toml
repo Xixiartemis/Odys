@@ -17,6 +17,9 @@ dev = [
 live = [
     "pypdf>=5,<6",
 ]
+agent = [
+    "openai-agents>=0.19,<0.20",
+]
 
 [project.scripts]
 lhas = "lhas.cli:app"

@@ -9,10 +9,20 @@ from lhas.planning.models import (
     PlanStep,
     PlanStepStatus,
 )
-from lhas.planning.service import PlanExecutionService
-from lhas.planning.scheduler import TaskGraphScheduler, build_step_dependency_context
 
 __all__ = [
     "CapabilitySpec", "Goal", "Plan", "PlanMode", "PlanStatus",
-    "PlanStep", "PlanStepStatus", "PlanExecutionService", "TaskGraphScheduler", "build_step_dependency_context",
+    "PlanStep", "PlanStepStatus",
+    "PlanExecutionService", "TaskGraphScheduler", "build_step_dependency_context",
 ]
+
+def __getattr__(name):
+    # Lazy imports preserve the E1 public API without introducing the
+    # tools.protocol <-> planning.service initialization cycle.
+    if name == "PlanExecutionService":
+        from lhas.planning.service import PlanExecutionService
+        return PlanExecutionService
+    if name in {"TaskGraphScheduler", "build_step_dependency_context"}:
+        from lhas.planning.scheduler import TaskGraphScheduler, build_step_dependency_context
+        return {"TaskGraphScheduler": TaskGraphScheduler, "build_step_dependency_context": build_step_dependency_context}[name]
+    raise AttributeError(name)
