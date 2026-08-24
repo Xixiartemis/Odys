@@ -1,4 +1,4 @@
-import fnmatch
+import fnmatch, hashlib
 from pathlib import Path, PureWindowsPath
 from .errors import WorkspacePathEscape, BinaryFileError
 from .models import WorkspaceLimits
@@ -41,7 +41,7 @@ class LocalReadOnlyWorkspace:
         if b"\x00" in data: raise BinaryFileError("BINARY_FILE")
         text=data.decode("utf-8")
         lines=text.splitlines(); begin=max(1, start_line or 1); finish=min(len(lines), end_line or len(lines)); content="\n".join(lines[begin-1:finish])
-        return {"path": Path(path).as_posix(), "content": content, "start_line": begin, "end_line": finish, "total_lines": len(lines), "truncated": finish < len(lines)}
+        return {"path": Path(path).as_posix(), "content": content, "start_line": begin, "end_line": finish, "total_lines": len(lines), "truncated": finish < len(lines), "sha256": hashlib.sha256(data).hexdigest()}
     async def search_text(self, query, path=".", glob=None, max_matches=100, context_lines=1):
         if not isinstance(query, str) or not query: raise ValueError("INVALID_ARGUMENTS")
         base=self.resolve_path(path); matches=[]; scanned=0; truncated=False

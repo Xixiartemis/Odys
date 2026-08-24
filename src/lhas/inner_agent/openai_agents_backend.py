@@ -33,7 +33,11 @@ class OpenAIAgentsBackend:
             agent=Agent(name="OdysInnerAgent",instructions=self._instructions(request),tools=tools,model=self.config.model)
             result=await runner.run(agent,self._instructions(request),context=context,max_turns=request.max_turns,hooks=hooks,run_config=run_config)
             output=getattr(result,"final_output",None); usage=getattr(getattr(result,"context_wrapper",None),"usage",None)
-            return InnerAgentResult(status=InnerAgentStatus.SUCCESS,final_output=str(output) if output is not None else None,completion_claim=output is not None,turn_count=hooks.turn_count,tool_call_count=hooks.tool_call_count,usage=usage_data(usage),trace=trace.items,provider_metadata={**metadata(),"base_url_configured":bool(self.config.base_url),"api_key_configured":bool(self.config.api_key)})
+            changes=[item for item in trace.items if item.get("event") == "WORKSPACE_CHANGE"]
+            patch=next((item for item in trace.items if item.get("event") == "WORKSPACE_PATCH"), None)
+            artifacts={"workspace_changes": changes} if changes else {}
+            if patch: artifacts["workspace_patch"] = patch.get("patch", {})
+            return InnerAgentResult(status=InnerAgentStatus.SUCCESS,final_output=str(output) if output is not None else None,completion_claim=output is not None,turn_count=hooks.turn_count,tool_call_count=hooks.tool_call_count,usage=usage_data(usage),artifacts=artifacts,trace=trace.items,provider_metadata={**metadata(),"base_url_configured":bool(self.config.base_url),"api_key_configured":bool(self.config.api_key)})
         except Exception as exc:
             kind="AGENT_TURN_LIMIT" if exc.__class__.__name__=="MaxTurnsExceeded" else type(exc).__name__
             run_data = getattr(exc, "run_data", None)
