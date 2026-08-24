@@ -45,6 +45,7 @@ from lhas.persistence.phaseb_repos import (
     ValidationResultRepository,
 )
 from lhas.recovery import DefaultRecoveryPolicy, RecoveryAction, RecoveryPolicy
+from lhas.checkpoint import CheckpointService
 from lhas.validation import RuleValidator, ValidationResult, Validator
 
 logger = logging.getLogger("lhas.orchestrator_v2")
@@ -79,6 +80,7 @@ class RecoveringOrchestrator(Orchestrator):
         self.validation_repo = ValidationResultRepository(db)
         self.failure_repo = FailureReportRepository(db)
         self.action_repo = RecoveryActionRepository(db)
+        self.checkpoint_service = CheckpointService(db)
 
     # ------------------------------------------------------------------ API
 
@@ -144,6 +146,7 @@ class RecoveringOrchestrator(Orchestrator):
                         EventType.VALIDATION_PASSED, task=task, run=run, attempt=attempt,
                         payload={"evidence": validation.evidence},
                     )
+                    self.checkpoint_service.create_checkpoint(task, run.id, attempt.id, n)
                     return self._complete(task, run, attempt, result, validation)
                 self._emit(
                     EventType.VALIDATION_FAILED, task=task, run=run, attempt=attempt,
@@ -186,6 +189,7 @@ class RecoveringOrchestrator(Orchestrator):
                     "added_context": action.added_context,
                 },
             )
+            self.checkpoint_service.create_checkpoint(task, run.id, attempt.id, n)
 
             if action.action_type == RecoveryActionType.ESCALATE:
                 run.status = RunStatus.ESCALATED

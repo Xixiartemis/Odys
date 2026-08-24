@@ -26,6 +26,14 @@ def allowed_tools(registry, request, trace=None):
                     runtime_context = request.context
                 result=await registry.resolve(_name).execute(ToolRequest(tool_call_id=getattr(ctx,"tool_call_id", "inner-tool"),task_id=request.task_id,run_id=request.run_id,attempt_id=request.attempt_id,capability=_name,arguments=args,context=runtime_context,metadata=request.metadata))
                 if trace is not None:
+                    output=result.output if isinstance(result.output, dict) else {}
+                    summary={"capability":_name,"status":result.status.value}
+                    if _name == "workspace.read": summary.update({k:output.get(k) for k in ("path","sha256","truncated") if k in output})
+                    elif _name == "workspace.search": summary.update({"match_count":len(output.get("matches",[])),"matched_paths":list(dict.fromkeys(m.get("path") for m in output.get("matches",[]) if isinstance(m,dict) and m.get("path")))[:100],"truncated":output.get("truncated",False)})
+                    elif _name == "workspace.edit": summary.update({k:output.get(k) for k in ("path","before_sha256","after_sha256") if k in output})
+                    elif _name == "workspace.diff": summary.update({k:output.get(k) for k in ("changed_files","files_changed","lines_added","lines_removed","truncated") if k in output})
+                    elif _name == "cli.exec": summary.update({k:output.get(k) for k in ("exit_code","timed_out","duration_ms","stdout_truncated","stderr_truncated") if k in output}); summary["command_name"]=args.get("argv",[None])[0]
+                    trace.add("TOOL_OBSERVATION_SUMMARY", **summary)
                     trace.add("TOOL_ACCOUNTING", tool_name=_name, usage=result.usage)
                     if _name in {"workspace.edit", "workspace.diff", "workspace.restore"} and isinstance(result.output, dict):
                         safe_keys = {k: result.output[k] for k in ("path", "changed_files", "files_changed", "lines_added", "lines_removed", "truncated", "before_sha256", "after_sha256", "bytes_before", "bytes_after", "restored") if k in result.output}

@@ -80,6 +80,16 @@ class EventStore:
         with self._db.session() as session:
             return session.execute(select(func.count(EventRow.id))).scalar_one()
 
+    def latest_sequence(self, run_id: str) -> int:
+        with self._db.session() as session:
+            value = session.execute(select(func.max(EventRow.id)).where(EventRow.run_id == run_id)).scalar_one()
+            return int(value or 0)
+
+    def list_for_run_after(self, run_id: str, after_event_id: int) -> list[Event]:
+        with self._db.session() as session:
+            rows = session.execute(select(EventRow).where(EventRow.run_id == run_id, EventRow.id > after_event_id).order_by(EventRow.id.asc())).scalars().all()
+            return [self._from_row(r) for r in rows]
+
     def _from_row(self, r: EventRow) -> Event:
         return Event(
             id=r.id, task_id=r.task_id, run_id=r.run_id, attempt_id=r.attempt_id,

@@ -37,7 +37,7 @@ class ContextSnapshotRepository:
                     id=snapshot.id, task_id=snapshot.task_id, run_id=snapshot.run_id,
                     attempt_id=snapshot.attempt_id, attempt_number=snapshot.attempt_number,
                     policy=snapshot.policy, sections=json_dumps(snapshot.sections),
-                    raw_text=snapshot.raw_text, created_at=snapshot.created_at,
+                    raw_text=snapshot.raw_text, created_at=snapshot.created_at, metrics=json_dumps(snapshot.metrics), context_sha256=snapshot.context_sha256,
                 )
             )
         return snapshot
@@ -51,7 +51,7 @@ class ContextSnapshotRepository:
                 id=row.id, task_id=row.task_id, run_id=row.run_id, attempt_id=row.attempt_id,
                 attempt_number=row.attempt_number, policy=row.policy,
                 sections=json_loads(row.sections) or {}, raw_text=row.raw_text or "",
-                created_at=row.created_at,
+                created_at=row.created_at, metrics=json_loads(row.metrics) or {}, context_sha256=row.context_sha256 or "",
             )
 
     def list_for_attempt(self, attempt_id: str) -> list[ContextSnapshot]:
@@ -66,6 +66,7 @@ class ContextSnapshotRepository:
             id=r.id, task_id=r.task_id, run_id=r.run_id, attempt_id=r.attempt_id,
             attempt_number=r.attempt_number, policy=r.policy,
             sections=json_loads(r.sections) or {}, raw_text=r.raw_text or "", created_at=r.created_at,
+            metrics=json_loads(r.metrics) or {}, context_sha256=r.context_sha256 or "",
         )
 
 
