@@ -114,3 +114,6 @@ Only LINEAR plans are executable. SIMPLE_DEPENDENCY is explicitly unsupported un
 ## Phase E1 — deterministic TaskGraph runtime
 
 `SIMPLE_DEPENDENCY` plans now execute serially through a pure scheduler with READY/BLOCKED semantics, dependency-closure context, independent-branch continuation, and same-Plan approval resume. Parallel execution and dynamic replanning remain out of scope. Harness version: HV-0.6.
+## Phase E2 — Inner Agent Runtime
+
+E1 is complete. E2 adds the provider-neutral inner-agent backend boundary and the first optional OpenAI Agents SDK backend without rewiring the macro TaskGraph.

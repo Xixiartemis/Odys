@@ -12,5 +12,5 @@ jobs:
       - uses: astral-sh/setup-uv@v6
         with:
           enable-cache: true
-      - run: uv sync --extra dev --extra live
+      - run: uv sync --extra dev --extra live --extra agent
       - run: uv run pytest
