@@ -1,4 +1,4 @@
-import json
+import json, hashlib
 from typing import Any
 from lhas.tools.protocol import ToolRequest, ToolResultStatus
 
@@ -26,6 +26,8 @@ def allowed_tools(registry, request, trace=None):
                     runtime_context = request.context
                 result=await registry.resolve(_name).execute(ToolRequest(tool_call_id=getattr(ctx,"tool_call_id", "inner-tool"),task_id=request.task_id,run_id=request.run_id,attempt_id=request.attempt_id,capability=_name,arguments=args,context=runtime_context,metadata=request.metadata))
                 if trace is not None:
+                    normalized_args=json.dumps(args, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+                    trace.add("TOOL_INVOCATION_SIGNATURE", capability=_name, args_sha256=hashlib.sha256(normalized_args.encode()).hexdigest())
                     output=result.output if isinstance(result.output, dict) else {}
                     summary={"capability":_name,"status":result.status.value}
                     if _name == "workspace.read": summary.update({k:output.get(k) for k in ("path","sha256","truncated") if k in output})

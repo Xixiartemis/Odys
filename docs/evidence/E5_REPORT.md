@@ -22,6 +22,10 @@ Canonical `E5-CONTEXT-001` used 120 safe history events, checkpoint cursor 100, 
 
 The full deterministic suite contains 210 passing tests. Live model evaluation is `SKIPPED_CONFIG`; no token or duration claim is made.
 
+## Live Model Evaluation
+
+`scripts/e5_live_model_smoke.py` is a manual entrypoint that uses the real `OpenAIAgentsBackend` and SDK Runner with a temporary staged fixture. It writes `evals/runs/E5-LIVE-001.json` only when configuration is present and sanitizes metrics; with no `ODYS_AGENT_MODEL`/`ODYS_AGENT_API_KEY`, it prints `STATUS=SKIPPED_CONFIG` and creates no fabricated pass record. Deterministic CI remains offline.
+
 ## Design Decisions
 
 - Checkpoint is durable state, not Memory; no transcript, raw file content, stdout/stderr, secrets, or reasoning is persisted.

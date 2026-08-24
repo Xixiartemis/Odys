@@ -25,3 +25,8 @@ data/
 Thumbs.db
 .idea/
 .vscode/
+
+# Local credentials — never commit
+.env
+.env.*
+!.env.example
