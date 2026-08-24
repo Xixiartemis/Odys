@@ -117,3 +117,5 @@ Only LINEAR plans are executable. SIMPLE_DEPENDENCY is explicitly unsupported un
 ## Phase E2 — Inner Agent Runtime
 
 E1 is complete. E2 adds the provider-neutral inner-agent backend boundary and the first optional OpenAI Agents SDK backend without rewiring the macro TaskGraph.
+
+E2 PASS. E3 is current: read-only Workspace inspection and policy-constrained Safe CLI execution.
