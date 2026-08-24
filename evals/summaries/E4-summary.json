@@ -1,0 +1,33 @@
+{
+  "phase": "E4",
+  "harness_version": "HV-0.9",
+  "engineering": {
+    "test_count": 200,
+    "ci_status": "PENDING",
+    "pr_number": 8,
+    "base_sha": "4223bd31421d4b14f4db9c840e6eaf589c7a1bb6",
+    "changed_files": 16,
+    "additions": 229,
+    "deletions": 14,
+    "metrics_scope": "implementation_diff_before_evidence (origin/main...E4 HEAD; evidence files excluded)"
+  },
+  "deterministic_eval": {
+    "scenario": "calculator_fail_edit_pass",
+    "runs": 1,
+    "successes": 1,
+    "success_rate": 1.0,
+    "outer_attempts": 1,
+    "inner_tool_calls": 6,
+    "files_modified": 1,
+    "tests_before": "FAIL",
+    "tests_after": "PASS",
+    "source_repo_unchanged": true
+  },
+  "live_model_eval": {
+    "status": "SKIPPED_CONFIG",
+    "turn_count": null,
+    "tool_calls": null,
+    "tokens": null,
+    "duration_ms": null
+  }
+}
