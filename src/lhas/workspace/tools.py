@@ -2,6 +2,11 @@ from lhas.planning.models import CapabilitySpec
 from lhas.tools.protocol import ToolResult, ToolResultStatus
 from .errors import BinaryFileError, WorkspacePathEscape
 from .safe_cli import SafeCli
+_OBJECT = {"type": "object", "additionalProperties": False}
+_LIST_SCHEMA = {**_OBJECT, "properties": {"path": {"type": "string"}, "recursive": {"type": "boolean"}, "max_entries": {"type": "integer"}}}
+_READ_SCHEMA = {**_OBJECT, "properties": {"path": {"type": "string"}, "start_line": {"type": "integer"}, "end_line": {"type": "integer"}}, "required": ["path"]}
+_SEARCH_SCHEMA = {**_OBJECT, "properties": {"query": {"type": "string"}, "path": {"type": "string"}, "glob": {"type": "string"}, "max_matches": {"type": "integer"}, "context_lines": {"type": "integer"}}, "required": ["query"]}
+_CLI_SCHEMA = {**_OBJECT, "properties": {"argv": {"type": "array", "items": {"type": "string"}, "minItems": 1}, "cwd": {"type": "string"}, "timeout_seconds": {"type": "number"}}, "required": ["argv"]}
 def _result(fn):
     async def run(self, request):
         try: return ToolResult(status=ToolResultStatus.SUCCESS, output=await fn(self, request))
@@ -12,25 +17,27 @@ def _result(fn):
         except ValueError as exc: return ToolResult(status=ToolResultStatus.FAILURE, error_type="INVALID_ARGUMENTS", error_message=str(exc))
     return run
 class WorkspaceListTool:
-    capability=CapabilitySpec(name="workspace.list", description="List workspace files", input_schema={"type":"object"})
+    capability=CapabilitySpec(name="workspace.list", description="List workspace files", input_schema=_LIST_SCHEMA)
     def __init__(self, workspace): self.workspace=workspace
     execute=_result(lambda self, request: self.workspace.list_files(**request.arguments))
 class WorkspaceReadTool:
-    capability=CapabilitySpec(name="workspace.read", description="Read a workspace text file", input_schema={"type":"object"})
+    capability=CapabilitySpec(name="workspace.read", description="Read a workspace text file", input_schema=_READ_SCHEMA)
     def __init__(self, workspace): self.workspace=workspace
     execute=_result(lambda self, request: self.workspace.read_file(**request.arguments))
 class WorkspaceSearchTool:
-    capability=CapabilitySpec(name="workspace.search", description="Search workspace text", input_schema={"type":"object"})
+    capability=CapabilitySpec(name="workspace.search", description="Search workspace text", input_schema=_SEARCH_SCHEMA)
     def __init__(self, workspace): self.workspace=workspace
     execute=_result(lambda self, request: self.workspace.search_text(**request.arguments))
 class SafeCliTool:
-    capability=CapabilitySpec(name="cli.exec", description="Execute an explicitly allowed command", input_schema={"type":"object"})
+    capability=CapabilitySpec(name="cli.exec", description="Execute an explicitly allowed command", input_schema=_CLI_SCHEMA)
     def __init__(self, workspace, policy): self.cli=SafeCli(workspace, policy)
     async def execute(self, request):
         args=request.arguments
         try: output,error=await self.cli.execute(args.get("argv"), args.get("cwd", "."), args.get("timeout_seconds"))
         except WorkspacePathEscape: return ToolResult(status=ToolResultStatus.FAILURE,error_type="WORKSPACE_PATH_ESCAPE",error_message="cwd outside workspace")
-        if error: return ToolResult(status=ToolResultStatus.FAILURE,error_type=error,error_message=error)
+        if error:
+            error_type, error_message = error if isinstance(error, tuple) else (error, error)
+            return ToolResult(status=ToolResultStatus.FAILURE,error_type=error_type,error_message=error_message)
         return ToolResult(status=ToolResultStatus.SUCCESS,output=output)
 def register_workspace_tools(registry, workspace, command_policy):
     for tool in (WorkspaceListTool(workspace), WorkspaceReadTool(workspace), WorkspaceSearchTool(workspace), SafeCliTool(workspace, command_policy)): registry.register(tool)
