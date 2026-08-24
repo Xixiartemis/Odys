@@ -68,7 +68,7 @@ def test_safe_cli_secret_environment_filter(monkeypatch, tmp_path):
 
 def test_harness_version():
     from lhas import HARNESS_VERSION
-    assert HARNESS_VERSION == "HV-0.9"
+    assert HARNESS_VERSION == "HV-1.0"
 
 def test_inner_agent_function_tools_workspace_sequence(tmp_path):
     from types import SimpleNamespace

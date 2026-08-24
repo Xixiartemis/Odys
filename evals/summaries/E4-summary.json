@@ -3,14 +3,15 @@
   "harness_version": "HV-0.9",
   "engineering": {
     "test_count": 203,
-    "ci_status": "SUCCESS (verified closeout commit; current patch pending)",
+    "ci_status": "SUCCESS",
     "ci_verified_commit": "40d4c53aed0b04a7c1131f5163f620c13c42cfbf",
     "pr_number": 8,
     "base_sha": "4223bd31421d4b14f4db9c840e6eaf589c7a1bb6",
     "changed_files": 16,
     "additions": 384,
     "deletions": 14,
-    "metrics_scope": "implementation_diff_before_evidence (origin/main...E4 HEAD; evidence files excluded)"
+    "metrics_scope": "implementation_diff_before_evidence (origin/main...E4 HEAD; evidence files excluded)",
+    "final_pr_diff": {"changed_files": 19, "additions": 483, "deletions": 16, "metrics_scope": "final merged PR #8 diff at merge commit 0b981ff"}
   },
   "deterministic_eval": {
     "scenario": "calculator_fail_edit_pass",
