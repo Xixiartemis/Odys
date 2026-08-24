@@ -20,7 +20,9 @@ Checkpoint + event delta -> ContextReconstructionService -> ContextBuilder (sole
 
 Canonical `E5-CONTEXT-001` used 120 safe history events, checkpoint cursor 100, and replayed 20 delta events. It selected 20 recent events, dropped 0 within the configured recent-event window, produced 4,420 bytes of history input and a 2,249-byte context under a 4,096-byte budget. Replay reduction was `1 - 20/120 = 0.8333333333333334`; this is event replay reduction, not token reduction. One checkpoint was created and restart reconstruction was equal.
 
-The full deterministic suite contains 210 passing tests. Live model evaluation is `SKIPPED_CONFIG`; no token or duration claim is made.
+The full deterministic suite contains 225 passing tests. Live model evaluation is `SKIPPED_CONFIG`; no token or duration claim is made.
+
+The later real run `E5-LIVE-004` is preserved as immutable evidence: the model repaired the fixture (`FAIL → PASS`) but reached the 20-turn limit before producing a completion claim. Its closeout classification and the separate functional/agent/task state decision are recorded in `E5_LIVE_004_CLOSEOUT.md`; it is not relabeled as success.
 
 ## Live Model Evaluation
 
