@@ -2,12 +2,13 @@
   "phase": "E4",
   "harness_version": "HV-0.9",
   "engineering": {
-    "test_count": 200,
-    "ci_status": "PENDING",
+    "test_count": 203,
+    "ci_status": "SUCCESS (verified closeout commit; current patch pending)",
+    "ci_verified_commit": "40d4c53aed0b04a7c1131f5163f620c13c42cfbf",
     "pr_number": 8,
     "base_sha": "4223bd31421d4b14f4db9c840e6eaf589c7a1bb6",
     "changed_files": 16,
-    "additions": 229,
+    "additions": 384,
     "deletions": 14,
     "metrics_scope": "implementation_diff_before_evidence (origin/main...E4 HEAD; evidence files excluded)"
   },

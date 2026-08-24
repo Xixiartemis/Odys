@@ -16,10 +16,11 @@ Source -> StagedWorkspace -> Edit/Test/Diff -> ChangeSet Artifact -> Outer Valid
 
 ## Quantitative Evidence
 
-- Full deterministic suite: 200 passed.
+- Full deterministic suite: 203 passed.
 - Calculator scenario: 1 run, 1 success, 1 outer attempt, 6 inner tool calls, 1 modified file.
 - Test observation before edit: FAIL; after edit: PASS.
 - Source repository SHA remained unchanged.
+- CI was verified SUCCESS for closeout commit `40d4c53aed0b04a7c1131f5163f620c13c42cfbf`; this metrics-boundary patch requires its own CI run.
 - Live model evaluation: `SKIPPED_CONFIG`; no tokens or duration are claimed.
 
 ## Design Decisions
