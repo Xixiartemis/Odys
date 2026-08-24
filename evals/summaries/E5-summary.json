@@ -6,9 +6,9 @@
     "ci_status": "PENDING",
     "pr_number": 9,
     "base_sha": "0b981ff45e68f2b408cebd0ae59fdb1de3ace2f8",
-    "changed_files": 11,
-    "additions": 270,
-    "deletions": 7,
+    "changed_files": 14,
+    "additions": 277,
+    "deletions": 9,
     "metrics_scope": "implementation_diff_before_evidence (origin/main...E5 HEAD; evidence files excluded)"
   },
   "deterministic_eval": {
