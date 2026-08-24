@@ -4,6 +4,16 @@ from .provider_compat import MimoModelProvider, ProviderCompatProfile, resolve_p
 from .tool_adapter import allowed_tools
 from .trace import InnerAgentTrace, OdysAgentsRunHooks
 
+
+def _workspace_artifacts(trace):
+    """Project bounded workspace evidence on both success and failure paths."""
+    changes=[item for item in trace.items if item.get("event") == "WORKSPACE_CHANGE"]
+    patches=[item.get("patch") for item in trace.items if item.get("event") == "WORKSPACE_PATCH" and isinstance(item.get("patch"), dict)]
+    artifacts={"workspace_changes": changes} if changes else {}
+    if patches:
+        artifacts["workspace_patch"] = patches[-1]
+    return artifacts
+
 class AgentsSdkModelConfig:
     def __init__(self, model=None, api_key=None, base_url=None, api_mode=None, provider_profile=None):
         self.model=model or os.getenv("ODYS_AGENT_MODEL"); self.api_key=api_key or os.getenv("ODYS_AGENT_API_KEY"); self.base_url=base_url or os.getenv("ODYS_AGENT_BASE_URL")
@@ -22,7 +32,7 @@ class AgentsSdkModelConfig:
 class OpenAIAgentsBackend:
     name="openai-agents"
     def __init__(self, registry, config=None, runner=None, provider_factory=None, run_config_factory=None): self.registry=registry; self.config=config or AgentsSdkModelConfig(); self.runner=runner; self.provider_factory=provider_factory; self.run_config_factory=run_config_factory
-    def _instructions(self, r): return "Complete the current subgoal. Tool failures are observations; adjust strategy. Do not claim uncalled work or expand permissions. Final output is a candidate completion claim; an outer validator independently verifies it.\nObjective: "+r.objective+"\nConstraints: "+str(r.constraints)+"\nAcceptance: "+str(r.acceptance_criteria)+"\nContext: "+str(r.context)
+    def _instructions(self, r): return "Complete the current subgoal. Tool failures are observations; adjust strategy. Do not claim uncalled work or expand permissions. Once acceptance evidence has been obtained, stop exploratory tool calls and return a concise completion claim. For SWE tasks, when relevant tests pass and required validation evidence is collected, do not continue unrelated exploration. Final output is a candidate completion claim; an outer validator independently verifies it.\nObjective: "+r.objective+"\nConstraints: "+str(r.constraints)+"\nAcceptance: "+str(r.acceptance_criteria)+"\nContext: "+str(r.context)
     async def run(self, request):
         trace = InnerAgentTrace()
         hooks = OdysAgentsRunHooks(trace)
@@ -51,13 +61,10 @@ class OpenAIAgentsBackend:
             agent=Agent(name="OdysInnerAgent",instructions=self._instructions(request),tools=tools,model=self.config.model)
             result=await runner.run(agent,self._instructions(request),context=context,max_turns=request.max_turns,hooks=hooks,run_config=run_config)
             output=getattr(result,"final_output",None); usage=getattr(getattr(result,"context_wrapper",None),"usage",None)
-            changes=[item for item in trace.items if item.get("event") == "WORKSPACE_CHANGE"]
-            patch=next((item for item in trace.items if item.get("event") == "WORKSPACE_PATCH"), None)
-            artifacts={"workspace_changes": changes} if changes else {}
-            if patch: artifacts["workspace_patch"] = patch.get("patch", {})
+            artifacts=_workspace_artifacts(trace)
             return InnerAgentResult(status=InnerAgentStatus.SUCCESS,final_output=str(output) if output is not None else None,completion_claim=output is not None,turn_count=hooks.turn_count,tool_call_count=hooks.tool_call_count,usage=usage_data(usage),artifacts=artifacts,trace=trace.items,provider_metadata={**metadata(),"base_url_configured":bool(self.config.base_url),"api_key_configured":bool(self.config.api_key)})
         except Exception as exc:
             kind="AGENT_TURN_LIMIT" if exc.__class__.__name__=="MaxTurnsExceeded" else type(exc).__name__
             run_data = getattr(exc, "run_data", None)
             failure_usage = usage_data(getattr(getattr(run_data, "context_wrapper", None), "usage", None))
-            return InnerAgentResult(status=InnerAgentStatus.FAILURE,error_type=kind,error_message=str(exc),turn_count=hooks.turn_count,tool_call_count=hooks.tool_call_count,usage=failure_usage,trace=trace.items,provider_metadata=metadata())
+            return InnerAgentResult(status=InnerAgentStatus.FAILURE,error_type=kind,error_message=str(exc),turn_count=hooks.turn_count,tool_call_count=hooks.tool_call_count,usage=failure_usage,artifacts=_workspace_artifacts(trace),trace=trace.items,provider_metadata=metadata())

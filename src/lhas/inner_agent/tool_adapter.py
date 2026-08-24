@@ -15,7 +15,11 @@ def allowed_tools(registry, request, trace=None):
         if spec.requires_human_approval or (spec.side_effect and name not in request.allowed_side_effect_capabilities): filtered.append(name); continue
         async def invoke(ctx, raw, _name=name, _spec=spec):
             try: args=json.loads(raw) if isinstance(raw,str) else raw
-            except (TypeError,json.JSONDecodeError): return {"status":"FAILURE","error_type":"INVALID_ARGUMENTS","error_message":"arguments must be valid JSON","output":None}
+            except (TypeError,json.JSONDecodeError):
+                if trace is not None:
+                    trace.add("TOOL_INVOCATION_SIGNATURE", capability=_name, args_sha256=None)
+                    trace.add("TOOL_OBSERVATION_SUMMARY", capability=_name, status="FAILURE", error_type="INVALID_ARGUMENTS")
+                return {"status":"FAILURE","error_type":"INVALID_ARGUMENTS","error_message":"arguments must be valid JSON","output":None}
             try:
                 if trace is not None and _name == "workspace.edit":
                     trace.add("WORKSPACE_EDIT_STARTED", relative_path=args.get("path"), status="STARTED")
@@ -35,6 +39,7 @@ def allowed_tools(registry, request, trace=None):
                     elif _name == "workspace.edit": summary.update({k:output.get(k) for k in ("path","before_sha256","after_sha256") if k in output})
                     elif _name == "workspace.diff": summary.update({k:output.get(k) for k in ("changed_files","files_changed","lines_added","lines_removed","truncated") if k in output})
                     elif _name == "cli.exec": summary.update({k:output.get(k) for k in ("exit_code","timed_out","duration_ms","stdout_truncated","stderr_truncated") if k in output}); summary["command_name"]=args.get("argv",[None])[0]
+                    if result.status.value == "FAILURE": summary["error_type"] = result.error_type or "UNKNOWN"
                     trace.add("TOOL_OBSERVATION_SUMMARY", **summary)
                     trace.add("TOOL_ACCOUNTING", tool_name=_name, usage=result.usage)
                     if _name in {"workspace.edit", "workspace.diff", "workspace.restore"} and isinstance(result.output, dict):
@@ -47,6 +52,9 @@ def allowed_tools(registry, request, trace=None):
                         trace.add("WORKSPACE_EDIT_FAILED", relative_path=args.get("path"), status=result.status.value, error_type=result.error_type)
                 return {"status":result.status.value,"output":result.output,"artifacts":result.artifacts,"metadata":result.metadata,"error_type":result.error_type,"error_message":result.error_message}
             except Exception as exc:
+                if trace is not None:
+                    trace.add("TOOL_INVOCATION_SIGNATURE", capability=_name, args_sha256=None)
+                    trace.add("TOOL_OBSERVATION_SUMMARY", capability=_name, status="FAILURE", error_type="TOOL_ADAPTER_ERROR")
                 if trace is not None and _name == "workspace.edit": trace.add("WORKSPACE_EDIT_FAILED", relative_path=args.get("path"), status="FAILURE", error_type=str(exc) if str(exc) in {"WORKSPACE_PATH_ESCAPE","BINARY_FILE","STALE_FILE_VERSION","EDIT_TARGET_NOT_FOUND","EDIT_TARGET_AMBIGUOUS"} else "TOOL_ADAPTER_ERROR")
                 return {"status":"FAILURE","error_type":"TOOL_ADAPTER_ERROR","error_message":str(exc),"output":None}
         allowed.append(FunctionTool(name=spec.name,description=spec.description,params_json_schema=spec.input_schema or {"type":"object","additionalProperties":False},on_invoke_tool=invoke))
