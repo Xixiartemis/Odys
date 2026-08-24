@@ -1,0 +1,36 @@
+{
+  "phase": "E5",
+  "harness_version": "HV-1.0",
+  "engineering": {
+    "test_count": 210,
+    "ci_status": "PENDING",
+    "pr_number": 9,
+    "base_sha": "0b981ff45e68f2b408cebd0ae59fdb1de3ace2f8",
+    "changed_files": 11,
+    "additions": 270,
+    "deletions": 7,
+    "metrics_scope": "implementation_diff_before_evidence (origin/main...E5 HEAD; evidence files excluded)"
+  },
+  "deterministic_eval": {
+    "scenario": "E5-CONTEXT-001",
+    "run_id": "canonical-e5",
+    "total_history_events": 120,
+    "checkpoint_event_cursor": 100,
+    "delta_events_replayed": 20,
+    "selected_recent_events": 20,
+    "dropped_recent_events": 0,
+    "history_input_bytes": 4420,
+    "context_output_bytes": 2249,
+    "context_budget_bytes": 4096,
+    "event_replay_reduction_ratio": 0.8333333333333334,
+    "checkpoint_count": 1,
+    "restart_reconstruction_equal": true
+  },
+  "live_model_eval": {
+    "status": "SKIPPED_CONFIG",
+    "input_tokens": null,
+    "output_tokens": null,
+    "total_tokens": null,
+    "duration_ms": null
+  }
+}
