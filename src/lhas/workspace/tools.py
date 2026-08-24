@@ -9,7 +9,7 @@ _READ_SCHEMA = {**_OBJECT, "properties": {"path": {"type": "string"}, "start_lin
 _SEARCH_SCHEMA = {**_OBJECT, "properties": {"query": {"type": "string"}, "path": {"type": "string"}, "glob": {"type": "string"}, "max_matches": {"type": "integer"}, "context_lines": {"type": "integer"}}, "required": ["query"]}
 _CLI_SCHEMA = {**_OBJECT, "properties": {"argv": {"type": "array", "items": {"type": "string"}, "minItems": 1}, "cwd": {"type": "string"}, "timeout_seconds": {"type": "number"}}, "required": ["argv"]}
 _EDIT_SCHEMA = {**_OBJECT, "properties": {"path": {"type": "string"}, "old_text": {"type": "string"}, "new_text": {"type": "string"}, "expected_sha256": {"type": "string"}}, "required": ["path", "old_text", "new_text"]}
-_DIFF_SCHEMA = {**_OBJECT, "properties": {"path": {"type": "string"}, "max_diff_bytes": {"type": "integer"}}}
+_DIFF_SCHEMA = {**_OBJECT, "properties": {"path": {"type": "string"}, "max_diff_bytes": {"type": "integer", "minimum": 1, "maximum": 131072}}}
 _RESTORE_SCHEMA = {**_OBJECT, "properties": {"path": {"type": "string"}}, "required": ["path"]}
 def _result(fn):
     async def run(self, request):
@@ -55,7 +55,10 @@ class WorkspaceEditTool:
 class WorkspaceDiffTool:
     capability=CapabilitySpec(name="workspace.diff", description="Show staged workspace changes", input_schema=_DIFF_SCHEMA)
     def __init__(self, workspace): self.workspace=workspace
-    async def execute(self, request): return ToolResult(status=ToolResultStatus.SUCCESS, output=await self.workspace.diff(**request.arguments))
+    async def execute(self, request):
+        try: return ToolResult(status=ToolResultStatus.SUCCESS, output=await self.workspace.diff(**request.arguments))
+        except WorkspacePathEscape: return ToolResult(status=ToolResultStatus.FAILURE,error_type="WORKSPACE_PATH_ESCAPE",error_message="path outside workspace")
+        except ValueError as exc: return ToolResult(status=ToolResultStatus.FAILURE,error_type="INVALID_ARGUMENTS",error_message=str(exc))
 class WorkspaceRestoreTool:
     capability=CapabilitySpec(name="workspace.restore", description="Restore staged file to baseline", input_schema=_RESTORE_SCHEMA, risk_level="MEDIUM", side_effect=True)
     def __init__(self, workspace): self.workspace=workspace

@@ -146,3 +146,50 @@ def test_executor_openai_backend_carries_candidate_patch_and_events(db, tmp_path
     from lhas.domain.enums import EventType
     types=[e.event_type for e in EventStore(db).list_for_run("r")]
     assert EventType.WORKSPACE_EDIT_STARTED in types and EventType.WORKSPACE_EDIT_COMPLETED in types
+
+def test_auto_staging_success_is_disjoint_and_source_unchanged(tmp_path):
+    source=source_repo(tmp_path); before=(source / "src/calculator.py").read_bytes(); stage=StagedWorkspace.create(source)
+    assert stage.root.exists() and stage.root != source and (stage.root / "src/calculator.py").exists()
+    assert (source / "src/calculator.py").read_bytes() == before
+
+def test_diff_runtime_hard_limit_and_patch_artifact_through_executor(tmp_path):
+    source=source_repo(tmp_path); stage=StagedWorkspace.create(source, tmp_path / "stage", WorkspaceLimits(max_diff_bytes=100)); reg=ToolRegistry(); register_staged_workspace_tools(reg, stage, CommandPolicy())
+    class Runner:
+        async def run(self, agent, input, **kwargs):
+            ctx=SimpleNamespace(tool_call_id="c")
+            async def call(name,args):
+                tool=next(x for x in agent.tools if x.name == name); return await tool.on_invoke_tool(ctx,json.dumps(args))
+            await call("workspace.edit", {"path":"src/calculator.py","old_text":"return a - b","new_text":"return a + b"})
+            await call("workspace.diff", {"max_diff_bytes": 99999999})
+            return SimpleNamespace(final_output="fixed", context_wrapper=SimpleNamespace(usage={}))
+    from lhas.executors.protocol import ExecutionRequest
+    result=asyncio.run(InnerAgentExecutor(OpenAIAgentsBackend(reg, AgentsSdkModelConfig(model="m",api_key="k"),runner=Runner()), allowed_side_effect_capabilities=["workspace.edit"]).execute(ExecutionRequest(task_id="t",run_id="r",attempt_id="a",attempt_number=1,task={"objective":"x","allowed_capabilities":["workspace.edit","workspace.diff"],"allowed_side_effect_capabilities":["workspace.edit"]})))
+    # Requesting an oversized limit is clamped by the staged workspace hard bound.
+    patch=asyncio.run(stage.diff(max_diff_bytes=99999999)); assert len(patch["diff"].encode()) <= 100 and patch["truncated"] is True
+    assert result.status.value == "SUCCESS" and len(result.artifacts["workspace_patch"]["diff"].encode()) <= 100 and result.artifacts["workspace_patch"]["truncated"] is True
+
+def test_canonical_e4_eval_through_inner_executor(tmp_path):
+    source=source_repo(tmp_path); source_sha=hashlib.sha256((source / "src/calculator.py").read_bytes()).hexdigest(); stage=StagedWorkspace.create(source); reg=ToolRegistry(); register_staged_workspace_tools(reg, stage, CommandPolicy())
+    calls=[]; cli_calls=[]; outcomes=[]
+    async def fake_cli(argv, cwd=".", timeout_seconds=None):
+        cli_calls.append(argv); exit_code=1 if len(cli_calls) == 1 else 0; outcomes.append(exit_code)
+        return ({"exit_code":exit_code,"stdout":"","stderr":"","timed_out":False,"duration_ms":1,"stdout_truncated":False,"stderr_truncated":False}, None)
+    reg.resolve("cli.exec").cli.execute=fake_cli
+    class Runner:
+        async def run(self, agent, input, **kwargs):
+            ctx=SimpleNamespace(tool_call_id="canonical")
+            async def call(name,args):
+                calls.append(name); tool=next(x for x in agent.tools if x.name == name); return await tool.on_invoke_tool(ctx,json.dumps(args))
+            await call("workspace.read", {"path":"src/calculator.py"})
+            before=await call("cli.exec", {"argv":["test"]}); assert before["output"]["exit_code"] == 1
+            await call("workspace.search", {"query":"return a - b"})
+            edit=await call("workspace.edit", {"path":"src/calculator.py","old_text":"return a - b","new_text":"return a + b"}); assert edit["status"] == "SUCCESS"
+            after=await call("cli.exec", {"argv":["test"]}); assert after["output"]["exit_code"] == 0
+            diff=await call("workspace.diff", {}); assert diff["output"]["files_changed"] == 1
+            return SimpleNamespace(final_output="candidate", context_wrapper=SimpleNamespace(usage={}))
+    from lhas.executors.protocol import ExecutionRequest
+    result=asyncio.run(InnerAgentExecutor(OpenAIAgentsBackend(reg, AgentsSdkModelConfig(model="m",api_key="k"),runner=Runner()), allowed_side_effect_capabilities=["workspace.edit"]).execute(ExecutionRequest(task_id="t",run_id="r",attempt_id="a",attempt_number=1,task={"objective":"fix","allowed_capabilities":["workspace.read","workspace.search","workspace.edit","workspace.diff","cli.exec"],"allowed_side_effect_capabilities":["workspace.edit"]})))
+    assert result.status.value == "SUCCESS" and len(calls) == 6
+    assert result.artifacts["workspace_patch"]["files_changed"] == 1 and "+    return a + b" in result.artifacts["workspace_patch"]["diff"]
+    assert outcomes == [1,0]
+    assert hashlib.sha256((source / "src/calculator.py").read_bytes()).hexdigest() == source_sha

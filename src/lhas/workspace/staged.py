@@ -21,9 +21,9 @@ class StagedWorkspace(LocalReadOnlyWorkspace):
         target=Path(staging_root).resolve() if staging_root else Path(tempfile.mkdtemp(prefix="odys-stage-"))
         if target == source or target in source.parents or source in target.parents:
             raise StagingRootConflict("STAGING_ROOT_CONFLICT")
-        if target.exists() and any(target.iterdir()): raise StagingRootConflict("STAGING_ROOT_CONFLICT")
+        if not auto_target and target.exists(): raise StagingRootConflict("STAGING_ROOT_CONFLICT")
         target_parent=target.parent; target_parent.mkdir(parents=True, exist_ok=True)
-        build=Path(tempfile.mkdtemp(prefix=".odys-stage-build-", dir=str(target_parent)))
+        build=target if auto_target else Path(tempfile.mkdtemp(prefix=".odys-stage-build-", dir=str(target_parent)))
         count=0; total=0
         excluded=limits.excluded_dirs
         try:
@@ -38,7 +38,7 @@ class StagedWorkspace(LocalReadOnlyWorkspace):
                 if count > getattr(limits, "max_files", 10000) or total > getattr(limits, "max_total_bytes", 256*1024*1024) or size > getattr(limits, "max_file_bytes_copy", 4*1024*1024):
                     raise StagingLimitExceeded("STAGING_LIMIT_EXCEEDED")
                 (build / rel).parent.mkdir(parents=True, exist_ok=True); shutil.copyfile(item, build / rel)
-            os.replace(build, target)
+            if not auto_target: os.replace(build, target)
         except Exception:
             shutil.rmtree(build, ignore_errors=True)
             if auto_target: shutil.rmtree(target, ignore_errors=True)
@@ -83,7 +83,10 @@ class StagedWorkspace(LocalReadOnlyWorkspace):
         finally:
             if tmp: Path(tmp).unlink(missing_ok=True)
         return {"path":Path(path).as_posix(),"restored":True,"sha256":self._sha(data)}
-    async def diff(self, path=None, max_diff_bytes=128*1024):
+    async def diff(self, path=None, max_diff_bytes=None):
+        requested=self.limits.max_diff_bytes if max_diff_bytes is None else int(max_diff_bytes)
+        if requested <= 0: raise ValueError("INVALID_ARGUMENTS")
+        max_diff_bytes=min(requested, self.limits.max_diff_bytes)
         paths=[path] if path else sorted(self._baseline)
         chunks=[]; changed=[]; added=removed=0; truncated=False
         for rel in paths:
