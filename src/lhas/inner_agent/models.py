@@ -19,6 +19,14 @@ class InnerAgentRequest(BaseModel):
     max_turns: int=Field(default=12,ge=1)
     metadata: dict[str,Any]=Field(default_factory=dict)
 
+class OdysAgentRunContext(BaseModel):
+    """Runtime context passed to the SDK, never serialized into model text."""
+    task_id: str
+    run_id: str
+    attempt_id: str
+    execution_context: dict[str, Any] = Field(default_factory=dict)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
 class InnerAgentResult(BaseModel):
     model_config=ConfigDict(extra="forbid")
     status: InnerAgentStatus
