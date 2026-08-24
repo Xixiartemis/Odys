@@ -5,8 +5,8 @@ __version__ = "0.1.0"
 # Harness version: bump whenever Recovery / Context / Validation / Orchestration
 # policy changes (docs/12_EXPERIMENT_PROTOCOL.md). Phase B added the
 # Hardening modified Prompt Template / Validation / Recovery Context wiring;
-# Phase E3 introduced read-only Workspace and policy-constrained Safe CLI -> HV-0.8.
-HARNESS_VERSION = "HV-0.8"
+# Phase E4 introduced staged mutable Workspace and controlled edit/test loop -> HV-0.9.
+HARNESS_VERSION = "HV-0.9"
 
 # Default dataset / context-policy labels used by experiment records.
 DEFAULT_DATASET_VERSION = "RUNTIME-V0.1"

@@ -16,6 +16,7 @@ class InnerAgentRequest(BaseModel):
     acceptance_criteria: list[str]=Field(default_factory=list)
     context: dict[str,Any]=Field(default_factory=dict)
     allowed_capabilities: list[str]=Field(default_factory=list)
+    allowed_side_effect_capabilities: list[str]=Field(default_factory=list)
     max_turns: int=Field(default=12,ge=1)
     metadata: dict[str,Any]=Field(default_factory=dict)
 
