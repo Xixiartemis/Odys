@@ -114,3 +114,52 @@ def test_explicit_empty_allowlist_denies_all():
     task = {"objective": "x", "allowed_capabilities": ["safe.a"]}
     asyncio.run(InnerAgentExecutor(Backend(), allowed_capabilities=[]).execute(ExecutionRequest(task_id="t", run_id="r", attempt_id="a", attempt_number=1, task=task)))
     assert captured[0].allowed_capabilities == []
+
+
+def test_real_backend_tool_accounting_keeps_usage_out_of_observation():
+    reg = ToolRegistry(); cap = CapabilitySpec(name="repo.search", description="search")
+    reg.register(FakeTool(cap, lambda req: ToolResult(status=ToolResultStatus.SUCCESS, output={"ok": True}, usage={"requests": 2})))
+    class Runner:
+        async def run(self, agent, input, **kwargs):
+            observation = await agent.tools[0].on_invoke_tool(SimpleNamespace(tool_call_id="call-1", context=kwargs["context"]), "{}")
+            assert "usage" not in observation
+            return SimpleNamespace(final_output="done", context_wrapper=SimpleNamespace(usage={}))
+    backend = OpenAIAgentsBackend(reg, AgentsSdkModelConfig(model="m", api_key="k"), runner=Runner())
+    result = asyncio.run(backend.run(_request(allowed_capabilities=["repo.search"])))
+    accounting = [item for item in result.trace if item["event"] == "TOOL_ACCOUNTING"]
+    assert accounting and accounting[0]["tool_name"] == "repo.search" and accounting[0]["usage"] == {"requests": 2}
+
+
+def test_failure_preserves_hooks_trace_and_public_usage():
+    from agents import MaxTurnsExceeded
+    class Runner:
+        async def run(self, agent, input, **kwargs):
+            hooks = kwargs["hooks"]; ctx = SimpleNamespace(tool_call_id="call-f")
+            await hooks.on_llm_start(None, None, None, None); await hooks.on_llm_end(None, None, None, None)
+            await hooks.on_llm_start(None, None, None, None); await hooks.on_llm_end(None, None, None, None)
+            await hooks.on_tool_start(ctx, None, SimpleNamespace(name="repo.search")); await hooks.on_tool_end(ctx, None, SimpleNamespace(name="repo.search"), None)
+            exc = MaxTurnsExceeded("limit")
+            exc.run_data = SimpleNamespace(context_wrapper=SimpleNamespace(usage={"requests": 2, "input_tokens": 50, "output_tokens": 20, "total_tokens": 70}))
+            raise exc
+    backend = OpenAIAgentsBackend(ToolRegistry(), AgentsSdkModelConfig(model="m", api_key="k"), runner=Runner())
+    result = asyncio.run(backend.run(_request()))
+    assert result.status == InnerAgentStatus.FAILURE and result.error_type == "AGENT_TURN_LIMIT"
+    assert result.turn_count == 2 and result.tool_call_count == 1 and result.trace
+    assert result.usage == {"requests": 2, "input_tokens": 50, "output_tokens": 20, "total_tokens": 70}
+
+
+def test_failure_lifecycle_events_include_nonzero_counters(db):
+    from lhas.executors.protocol import ExecutionRequest
+    from lhas.persistence.event_store import EventStore
+    from lhas.domain.enums import EventType
+    from agents import MaxTurnsExceeded
+    class Backend:
+        name = "fake"
+        async def run(self, request):
+            return InnerAgentResult(status=InnerAgentStatus.FAILURE, error_type="AGENT_TURN_LIMIT", turn_count=2, tool_call_count=1, trace=[{"event": "LLM_TURN_STARTED", "turn_number": 1}, {"event": "TOOL_STARTED", "tool_name": "repo.search", "tool_call_id": "c"}])
+    asyncio.run(InnerAgentExecutor(Backend(), db=db).execute(ExecutionRequest(task_id="t", run_id="r", attempt_id="a", attempt_number=1, task={"objective": "x"})))
+    events = EventStore(db).list_for_run("r")
+    types = [e.event_type for e in events]
+    failed = [e for e in events if e.event_type == EventType.INNER_AGENT_FAILED][-1]
+    assert EventType.INNER_AGENT_LLM_TURN_STARTED in types and EventType.INNER_AGENT_TOOL_STARTED in types
+    assert failed.payload["turn_count"] == 2 and failed.payload["tool_call_count"] == 1

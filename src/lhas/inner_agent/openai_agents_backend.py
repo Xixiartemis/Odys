@@ -15,20 +15,27 @@ class OpenAIAgentsBackend:
     def __init__(self, registry, config=None, runner=None, provider_factory=None, run_config_factory=None): self.registry=registry; self.config=config or AgentsSdkModelConfig(); self.runner=runner; self.provider_factory=provider_factory; self.run_config_factory=run_config_factory
     def _instructions(self, r): return "Complete the current subgoal. Tool failures are observations; adjust strategy. Do not claim uncalled work or expand permissions. Final output is a candidate completion claim; an outer validator independently verifies it.\nObjective: "+r.objective+"\nConstraints: "+str(r.constraints)+"\nAcceptance: "+str(r.acceptance_criteria)+"\nContext: "+str(r.context)
     async def run(self, request):
+        trace = InnerAgentTrace()
+        hooks = OdysAgentsRunHooks(trace)
+        filtered = []
+        def usage_data(value):
+            if value is None: return {}
+            return value.model_dump() if hasattr(value, "model_dump") else (dict(value) if isinstance(value, dict) else {})
+        metadata = lambda: {"model": self.config.model or "", "api_mode": self.config.api_mode, "tracing_enabled": self.config.tracing_enabled, "filtered_capabilities": filtered}
         try:
             self.config.validate()
             from agents import Agent, Runner, OpenAIProvider, RunConfig
             runner=self.runner or Runner
-            tools,filtered=allowed_tools(self.registry,request)
+            tools,filtered=allowed_tools(self.registry,request,trace=trace)
             provider = (self.provider_factory or OpenAIProvider)(api_key=self.config.api_key, base_url=self.config.base_url, use_responses=self.config.api_mode == "responses")
-            trace = InnerAgentTrace(); hooks = OdysAgentsRunHooks(trace)
             run_config = (self.run_config_factory or RunConfig)(model=self.config.model, model_provider=provider, tracing_disabled=not self.config.tracing_enabled, trace_include_sensitive_data=False)
             context = OdysAgentRunContext(task_id=request.task_id, run_id=request.run_id, attempt_id=request.attempt_id, execution_context=request.context, metadata=request.metadata)
             agent=Agent(name="OdysInnerAgent",instructions=self._instructions(request),tools=tools,model=self.config.model)
             result=await runner.run(agent,self._instructions(request),context=context,max_turns=request.max_turns,hooks=hooks,run_config=run_config)
             output=getattr(result,"final_output",None); usage=getattr(getattr(result,"context_wrapper",None),"usage",None)
-            usage_data = usage.model_dump() if hasattr(usage,"model_dump") else (usage or {})
-            return InnerAgentResult(status=InnerAgentStatus.SUCCESS,final_output=str(output) if output is not None else None,completion_claim=output is not None,turn_count=hooks.turn_count,tool_call_count=hooks.tool_call_count,usage=usage_data,trace=trace.items,provider_metadata={"model":self.config.model,"api_mode":self.config.api_mode,"tracing_enabled":self.config.tracing_enabled,"filtered_capabilities":filtered,"base_url_configured":bool(self.config.base_url),"api_key_configured":bool(self.config.api_key)})
+            return InnerAgentResult(status=InnerAgentStatus.SUCCESS,final_output=str(output) if output is not None else None,completion_claim=output is not None,turn_count=hooks.turn_count,tool_call_count=hooks.tool_call_count,usage=usage_data(usage),trace=trace.items,provider_metadata={**metadata(),"base_url_configured":bool(self.config.base_url),"api_key_configured":bool(self.config.api_key)})
         except Exception as exc:
             kind="AGENT_TURN_LIMIT" if exc.__class__.__name__=="MaxTurnsExceeded" else type(exc).__name__
-            return InnerAgentResult(status=InnerAgentStatus.FAILURE,error_type=kind,error_message=str(exc),provider_metadata={"model":self.config.model or ""})
+            run_data = getattr(exc, "run_data", None)
+            failure_usage = usage_data(getattr(getattr(run_data, "context_wrapper", None), "usage", None))
+            return InnerAgentResult(status=InnerAgentStatus.FAILURE,error_type=kind,error_message=str(exc),turn_count=hooks.turn_count,tool_call_count=hooks.tool_call_count,usage=failure_usage,trace=trace.items,provider_metadata=metadata())
