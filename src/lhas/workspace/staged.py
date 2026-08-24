@@ -5,6 +5,7 @@ from .models import WorkspaceLimits
 from .errors import BinaryFileError, WorkspacePathEscape
 
 class StagingLimitExceeded(Exception): pass
+class StagingRootConflict(Exception): pass
 
 class StagedWorkspace(LocalReadOnlyWorkspace):
     """Mutable workspace backed by a private copy; never writes source_root."""
@@ -16,21 +17,32 @@ class StagedWorkspace(LocalReadOnlyWorkspace):
     @classmethod
     def create(cls, source_root, staging_root=None, limits=None):
         source=Path(source_root).resolve(); limits=limits or WorkspaceLimits()
+        auto_target = staging_root is None
         target=Path(staging_root).resolve() if staging_root else Path(tempfile.mkdtemp(prefix="odys-stage-"))
-        target.mkdir(parents=True, exist_ok=True)
+        if target == source or target in source.parents or source in target.parents:
+            raise StagingRootConflict("STAGING_ROOT_CONFLICT")
+        if target.exists() and any(target.iterdir()): raise StagingRootConflict("STAGING_ROOT_CONFLICT")
+        target_parent=target.parent; target_parent.mkdir(parents=True, exist_ok=True)
+        build=Path(tempfile.mkdtemp(prefix=".odys-stage-build-", dir=str(target_parent)))
         count=0; total=0
         excluded=limits.excluded_dirs
-        for item in source.rglob("*"):
-            rel=item.relative_to(source)
-            if any(part in excluded for part in rel.parts): continue
-            if item.is_symlink(): continue
-            if item.is_dir(): (target / rel).mkdir(parents=True, exist_ok=True); continue
-            if not item.is_file(): continue
-            size=item.stat().st_size
-            count += 1; total += size
-            if count > getattr(limits, "max_files", 10000) or total > getattr(limits, "max_total_bytes", 256*1024*1024) or size > getattr(limits, "max_file_bytes_copy", 4*1024*1024):
-                raise StagingLimitExceeded("STAGING_LIMIT_EXCEEDED")
-            (target / rel).parent.mkdir(parents=True, exist_ok=True); shutil.copyfile(item, target / rel)
+        try:
+            for item in source.rglob("*"):
+                rel=item.relative_to(source)
+                if any(part in excluded for part in rel.parts): continue
+                if item.is_symlink(): continue
+                if item.is_dir(): (build / rel).mkdir(parents=True, exist_ok=True); continue
+                if not item.is_file(): continue
+                size=item.stat().st_size
+                count += 1; total += size
+                if count > getattr(limits, "max_files", 10000) or total > getattr(limits, "max_total_bytes", 256*1024*1024) or size > getattr(limits, "max_file_bytes_copy", 4*1024*1024):
+                    raise StagingLimitExceeded("STAGING_LIMIT_EXCEEDED")
+                (build / rel).parent.mkdir(parents=True, exist_ok=True); shutil.copyfile(item, build / rel)
+            os.replace(build, target)
+        except Exception:
+            shutil.rmtree(build, ignore_errors=True)
+            if auto_target: shutil.rmtree(target, ignore_errors=True)
+            raise
         return cls(source, target, limits)
     def _iter_files(self):
         for p in self.root.rglob("*"):

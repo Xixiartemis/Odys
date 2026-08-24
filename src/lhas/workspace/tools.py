@@ -61,7 +61,9 @@ class WorkspaceRestoreTool:
     def __init__(self, workspace): self.workspace=workspace
     async def execute(self, request):
         try: return ToolResult(status=ToolResultStatus.SUCCESS, output=await self.workspace.restore_file(**request.arguments))
-        except Exception as exc: return ToolResult(status=ToolResultStatus.FAILURE,error_type="RESTORE_FAILED",error_message=str(exc))
+        except WorkspacePathEscape: return ToolResult(status=ToolResultStatus.FAILURE,error_type="WORKSPACE_PATH_ESCAPE",error_message="path outside workspace")
+        except FileNotFoundError: return ToolResult(status=ToolResultStatus.FAILURE,error_type="RESTORE_FAILED",error_message="baseline unavailable")
+        except Exception: return ToolResult(status=ToolResultStatus.FAILURE,error_type="RESTORE_FAILED",error_message="restore failed")
 def register_workspace_tools(registry, workspace, command_policy):
     for tool in (WorkspaceListTool(workspace), WorkspaceReadTool(workspace), WorkspaceSearchTool(workspace), SafeCliTool(workspace, command_policy)): registry.register(tool)
 def register_staged_workspace_tools(registry, workspace, command_policy):

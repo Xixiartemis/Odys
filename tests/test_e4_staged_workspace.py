@@ -3,12 +3,13 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from lhas.inner_agent import InnerAgentRequest, OpenAIAgentsBackend, AgentsSdkModelConfig
+from lhas.inner_agent.executor import InnerAgentExecutor
 from lhas.inner_agent.tool_adapter import allowed_tools
 from lhas.planning.models import CapabilitySpec
 from lhas.tools.registry import ToolRegistry
 from lhas.tools.protocol import ToolRequest
 from lhas.workspace import (CommandPolicy, CommandRule, LocalReadOnlyWorkspace, StagedWorkspace,
-                            StagingLimitExceeded, WorkspaceLimits, register_staged_workspace_tools)
+                            StagingLimitExceeded, StagingRootConflict, WorkspaceLimits, register_staged_workspace_tools)
 from lhas.workspace.tools import WorkspaceEditTool
 
 def source_repo(tmp_path):
@@ -96,3 +97,52 @@ def test_full_fail_edit_pass_diff_inner_run(tmp_path):
 def test_edit_tool_output_is_bounded_audit(tmp_path):
     stage=StagedWorkspace.create(source_repo(tmp_path), tmp_path / "stage"); result=asyncio.run(WorkspaceEditTool(stage).execute(req("workspace.edit", {"path":"src/calculator.py","old_text":"return a - b","new_text":"return a + b"})))
     assert result.status.value == "SUCCESS" and "after_sha256" in result.output and "content" not in result.output
+
+def test_executor_wires_side_effect_grant(tmp_path):
+    stage=StagedWorkspace.create(source_repo(tmp_path), tmp_path / "stage"); reg=ToolRegistry(); register_staged_workspace_tools(reg, stage, CommandPolicy())
+    seen=[]
+    class Backend:
+        name="capture"
+        async def run(self, request):
+            seen.append(request); return __import__("lhas.inner_agent.models", fromlist=["InnerAgentResult"]).InnerAgentResult(status="SUCCESS")
+    from lhas.executors.protocol import ExecutionRequest
+    task={"objective":"x","allowed_capabilities":["workspace.read","workspace.edit"],"allowed_side_effect_capabilities":["workspace.edit"]}
+    asyncio.run(InnerAgentExecutor(Backend(), allowed_side_effect_capabilities=None).execute(ExecutionRequest(task_id="t",run_id="r",attempt_id="a",attempt_number=1,task=task)))
+    assert seen[0].allowed_side_effect_capabilities == ["workspace.edit"]
+    seen.clear(); asyncio.run(InnerAgentExecutor(Backend(), allowed_side_effect_capabilities=[]).execute(ExecutionRequest(task_id="t",run_id="r",attempt_id="a",attempt_number=1,task=task)))
+    assert seen[0].allowed_side_effect_capabilities == []
+
+def test_staging_root_conflict_before_copy(tmp_path):
+    source=source_repo(tmp_path); before=hashlib.sha256((source / "src/calculator.py").read_bytes()).hexdigest()
+    for target in (source, source / ".odys-stage"):
+        try: StagedWorkspace.create(source, target); assert False
+        except StagingRootConflict as exc: assert str(exc) == "STAGING_ROOT_CONFLICT"
+    assert hashlib.sha256((source / "src/calculator.py").read_bytes()).hexdigest() == before
+
+def test_failed_staging_limit_cleans_auto_directory(tmp_path, monkeypatch):
+    source=source_repo(tmp_path); from lhas.workspace import staged
+    created=[]; real=staged.tempfile.mkdtemp
+    def make(*args, **kwargs):
+        result=real(*args, **kwargs); created.append(Path(result)); return result
+    monkeypatch.setattr(staged.tempfile, "mkdtemp", make)
+    try: StagedWorkspace.create(source, None, WorkspaceLimits(max_files=0)); assert False
+    except StagingLimitExceeded: pass
+    assert all(not p.exists() for p in created)
+
+def test_executor_openai_backend_carries_candidate_patch_and_events(db, tmp_path):
+    source=source_repo(tmp_path); stage=StagedWorkspace.create(source, tmp_path / "stage"); reg=ToolRegistry(); register_staged_workspace_tools(reg, stage, CommandPolicy())
+    class Runner:
+        async def run(self, agent, input, **kwargs):
+            ctx=SimpleNamespace(tool_call_id="c")
+            async def call(name,args):
+                tool=next(x for x in agent.tools if x.name == name); await kwargs["hooks"].on_tool_start(ctx,agent,tool); out=await tool.on_invoke_tool(ctx,json.dumps(args)); await kwargs["hooks"].on_tool_end(ctx,agent,tool,out); return out
+            await call("workspace.read", {"path":"src/calculator.py"}); await call("workspace.edit", {"path":"src/calculator.py","old_text":"return a - b","new_text":"return a + b"}); await call("workspace.diff", {})
+            return SimpleNamespace(final_output="fixed", context_wrapper=SimpleNamespace(usage={}))
+    backend=OpenAIAgentsBackend(reg, AgentsSdkModelConfig(model="m",api_key="k"), runner=Runner())
+    from lhas.executors.protocol import ExecutionRequest
+    result=asyncio.run(InnerAgentExecutor(backend, allowed_side_effect_capabilities=["workspace.edit"], db=db).execute(ExecutionRequest(task_id="t",run_id="r",attempt_id="a",attempt_number=1,task={"objective":"x","allowed_capabilities":["workspace.read","workspace.edit","workspace.diff"]})))
+    assert result.status.value == "SUCCESS" and "workspace_patch" in result.artifacts and "+    return a + b" in result.artifacts["workspace_patch"]["diff"]
+    from lhas.persistence.event_store import EventStore
+    from lhas.domain.enums import EventType
+    types=[e.event_type for e in EventStore(db).list_for_run("r")]
+    assert EventType.WORKSPACE_EDIT_STARTED in types and EventType.WORKSPACE_EDIT_COMPLETED in types
