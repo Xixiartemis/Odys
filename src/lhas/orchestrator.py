@@ -25,6 +25,7 @@ from lhas.executors.protocol import AgentExecutor, ExecutionRequest, ExecutionRe
 from lhas.persistence.database import Database
 from lhas.persistence.event_store import EventStore
 from lhas.persistence.repositories import AttemptRepository, RunRepository, TaskRepository
+from lhas.resume import CrashPoint, NoOpCrashInjector, invoke_crash_injector
 
 logger = logging.getLogger("lhas.orchestrator")
 
@@ -67,6 +68,7 @@ class Orchestrator:
         executor_factory: Optional[Callable[[], AgentExecutor]] = None,
         workspace_executor_factory: Optional[Callable[[Any], AgentExecutor]] = None,
         workspace_manager: Any = None,
+        crash_injector: Any = None,
         recovery_policy: Optional[DeterministicRecoveryPolicy] = None,
         executor_type: str = "MockExecutor",
         provider: str = "mock",
@@ -87,6 +89,7 @@ class Orchestrator:
         self.workspace_executor_factory = workspace_executor_factory
         self.workspace_manager = workspace_manager
         self._workspace_session = None
+        self.crash_injector = crash_injector or NoOpCrashInjector()
         self.recovery_policy = recovery_policy or DeterministicRecoveryPolicy()
         self.executor_type = executor_type
         self.provider = provider
@@ -95,6 +98,9 @@ class Orchestrator:
         self.context_policy_version = context_policy_version
         self.dataset_version = dataset_version
         self.experiment_id = experiment_id
+
+    def _crash(self, point: CrashPoint, **context: Any) -> None:
+        invoke_crash_injector(self.crash_injector, point, **context)
 
     # ------------------------------------------------------------------ API
 

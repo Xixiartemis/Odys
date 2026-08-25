@@ -6,8 +6,10 @@ __version__ = "0.1.0"
 # policy changes (docs/12_EXPERIMENT_PROTOCOL.md). Phase B added the
 # Hardening modified Prompt Template / Validation / Recovery Context wiring;
 # Phase E5 introduced durable checkpoints and bounded context reconstruction;
-# E6-B adds manual process-resume wiring and durable run/workspace bindings -> HV-1.1.
-HARNESS_VERSION = "HV-1.1"
+# E6-C adds deterministic crash-window-aware resume and generalized continuation -> HV-1.2.
+HARNESS_VERSION = "HV-1.2"
+
+from .resume import CrashPoint, NoOpCrashInjector, ResumeAction, ResumeDecision, ResumeDecisionService, ResumeInspection
 
 # Default dataset / context-policy labels used by experiment records.
 DEFAULT_DATASET_VERSION = "RUNTIME-V0.1"

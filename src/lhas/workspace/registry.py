@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import hashlib
 from pathlib import Path
 from typing import Optional
 
@@ -45,17 +46,48 @@ class RunWorkspaceManager:
         return source
 
     def create_for_run(self, task, run):
-        self.sessions_root.mkdir(parents=True, exist_ok=True)
+        """Create or complete the deterministic two-phase run binding."""
+        return self.ensure_for_run(task, run)
+
+    def _identity(self, task, run):
+        session_id = hashlib.sha256(f"{run.id}:{task.id}".encode("utf-8")).hexdigest()[:32]
         session_root = self.sessions_root / run.id
-        session = DurableWorkspaceSession.create(
-            self._resolve_source(task), session_root, limits=self.limits,
-            run_id=run.id, task_id=task.id,
-        )
-        self.bindings.create(WorkspaceSessionBinding(
-            session_id=session.manifest.session_id, run_id=run.id,
-            task_id=task.id, session_root=str(session.root), state="OPEN",
-        ))
-        return session
+        return session_id, session_root
+
+    def ensure_for_run(self, task, run):
+        self.sessions_root.mkdir(parents=True, exist_ok=True)
+        session_id, session_root = self._identity(task, run)
+        binding = self.bindings.get_by_run(run.id)
+        if binding is None:
+            binding = self.bindings.create(WorkspaceSessionBinding(
+                session_id=session_id, run_id=run.id, task_id=task.id,
+                session_root=str(session_root.resolve()), state="CREATING",
+            ))
+        elif binding.task_id != task.id or binding.run_id != run.id:
+            raise WorkspaceSessionBindingMismatch("WORKSPACE_SESSION_BINDING_MISMATCH")
+        if binding.session_id != session_id or Path(binding.session_root).resolve() != session_root.resolve():
+            raise WorkspaceSessionBindingMismatch("WORKSPACE_SESSION_BINDING_MISMATCH")
+        if binding.state == "CREATING":
+            if session_root.exists():
+                # An existing root is adopted only after strict manifest
+                # identity/integrity validation; corrupt partial state fails.
+                session = DurableWorkspaceSession.reopen(session_root)
+                if (
+                    session.manifest.session_id != session_id
+                    or session.manifest.run_id != run.id
+                    or session.manifest.task_id != task.id
+                ):
+                    raise WorkspaceSessionBindingMismatch("WORKSPACE_SESSION_BINDING_MISMATCH")
+            else:
+                session = DurableWorkspaceSession.create(
+                    self._resolve_source(task), session_root, limits=self.limits,
+                    session_id=session_id, run_id=run.id, task_id=task.id,
+                )
+            binding = self.bindings.update_state(binding.session_id, "OPEN")
+            return session
+        if binding.state not in {"OPEN", "COMPLETED"}:
+            raise WorkspaceSessionError("WORKSPACE_SESSION_NOT_RESUMABLE")
+        return self.reopen_for_run(task, run)
 
     def reopen_for_run(self, task, run):
         binding = self.bindings.get_by_run(run.id)
