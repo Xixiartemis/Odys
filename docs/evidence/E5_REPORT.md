@@ -24,6 +24,29 @@ The full deterministic suite contains 225 passing tests. Live model evaluation i
 
 The later real run `E5-LIVE-004` is preserved as immutable evidence: the model repaired the fixture (`FAIL → PASS`) but reached the 20-turn limit before producing a completion claim. Its closeout classification and the separate functional/agent/task state decision are recorded in `E5_LIVE_004_CLOSEOUT.md`; it is not relabeled as success.
 
+## Real Model Calibration
+
+The preserved MiMo calibration progression is recorded as evidence, not as a benchmark:
+
+- **A — authentication:** the initial live probe failed authentication.
+- **B — provider connection:** a subsequent probe failed at provider connection.
+- **C — MiMo semantics:** the provider required explicit OpenAI-compatible request/reasoning compatibility handling.
+- **D — profile:** the `mimo` profile made the provider mode and model configuration explicit.
+- **E — sustained autonomous SWE:** the first sustained run inspected, edited, tested, and validated the calculator fixture.
+- **F — bounded completion:** both E5-LIVE-004 and E5-LIVE-005 achieved `FAIL → PASS` functional validation but ended at the 20-turn limit without an agent completion claim.
+
+Design findings from this progression:
+
+1. OpenAI-compatible APIs do not guarantee identical multi-turn semantics.
+2. A bounded compatibility layer is safer than embedding provider behavior in planning or validation.
+3. Functional validation, agent completion, and harness/task state are separate dimensions.
+4. Inner `FINAL` is not equivalent to Task `COMPLETED`.
+5. Inner `FAILURE` is not equivalent to Task `FAILURE` when the outer validator passes.
+6. Prompt guidance reduced waste but did not solve termination.
+7. Acceptance-based early stopping is a future efficiency hypothesis only; it was not implemented or claimed here.
+
+The exact run comparison is in `PROJECT_METRICS.md`; E5-LIVE-004 remains byte-for-byte immutable and E5-LIVE-005 records only the supplied sanitized run facts, with unavailable fields left null.
+
 ## Live Model Evaluation
 
 `scripts/e5_live_model_smoke.py` is a manual entrypoint that uses the real `OpenAIAgentsBackend` and SDK Runner with a temporary staged fixture. It allocates the next exclusive `evals/runs/E5-LIVE-NNN.json` path only when configuration is present, records the selected provider profile and sanitized diagnostics, and never persists reasoning or credentials. With no `ODYS_AGENT_MODEL`/`ODYS_AGENT_API_KEY`, it prints `STATUS=SKIPPED_CONFIG` and creates no fabricated pass record. Deterministic CI remains offline. The MiMo probe finding is recorded separately in `E5_PROVIDER_COMPAT_FINDING.md`; the E5 summary remains `SKIPPED_CONFIG`.
@@ -47,11 +70,11 @@ Working state is intentionally a compact projection. It can omit historical deta
 
 ## Known Limitations
 
-There is no automatic process resume, crash-time workspace recreation, LLM summarization, vector memory, or live-model benchmark. Existing orchestrator checkpoint timing is terminal-attempt based; full process lifecycle resume is deferred.
+MiMo termination remains unreliable in this fixture: both real runs reached the 20-turn maximum. Tokens were unavailable, and the evidence is not a latency benchmark. There is no automatic process resume, crash-time workspace recreation, dynamic replan, formal benchmark suite, or larger-than-tiny fixture. Existing orchestrator checkpoint timing is terminal-attempt based; full process lifecycle resume is deferred.
 
 ## Next Hypothesis
 
-E6 should test process-level resume semantics using durable checkpoints without replaying or duplicating completed side effects.
+When a failed or interrupted Inner Agent leaves useful state, reconstruct and validate that state: a validated PASS should finish without retry, while a validated FAIL should recover, retry, or resume. E6 may test this across process restart/resume without replaying or duplicating completed side effects. This is a hypothesis only; it is not implemented in E5.
 
 ## Roadmap Decision Record
 

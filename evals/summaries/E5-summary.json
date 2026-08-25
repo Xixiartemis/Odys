@@ -2,8 +2,8 @@
   "phase": "E5",
   "harness_version": "HV-1.0",
   "engineering": {
-    "test_count": 210,
-    "ci_status": "PENDING",
+    "test_count": 225,
+    "ci_status": "PASS",
     "pr_number": 9,
     "base_sha": "0b981ff45e68f2b408cebd0ae59fdb1de3ace2f8",
     "changed_files": 14,
@@ -32,5 +32,25 @@
     "output_tokens": null,
     "total_tokens": null,
     "duration_ms": null
+  },
+  "live_calibration": {
+    "model": "mimo-v2.5",
+    "provider_profile": "mimo",
+    "api_mode": "chat_completions",
+    "live_runs_recorded": 2,
+    "functional_repairs_passed": 2,
+    "agent_completions_passed": 0,
+    "turn_limit_runs": 2,
+    "functional_validation_rate": {
+      "passed": 2,
+      "total": 2,
+      "label": "2/2 fixture runs"
+    },
+    "agent_completion_rate": {
+      "passed": 0,
+      "total": 2,
+      "label": "0/2 fixture runs"
+    },
+    "scope": "E5 calculator fixture calibration only"
   }
 }
