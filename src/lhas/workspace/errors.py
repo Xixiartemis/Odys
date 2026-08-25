@@ -17,3 +17,7 @@ class WorkspaceBaselineCorrupt(WorkspaceSessionError):
 
 class WorkspaceSourceDrift(WorkspaceSessionError):
     pass
+
+
+class WorkspaceSessionBindingMismatch(WorkspaceSessionError):
+    pass

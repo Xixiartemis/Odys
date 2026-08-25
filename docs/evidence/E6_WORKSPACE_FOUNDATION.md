@@ -5,8 +5,9 @@
 E6-A makes the E4 staged workspace truthful across object destruction and a
 later process reopen. It does not implement `resume_run()`, automatic run
 discovery, provider conversation continuation, dynamic replan, or any live
-model behavior. Harness remains `HV-1.0` until the outer process-resume path is
-integrated and validated.
+model behavior. The later E6-B process-resume integration is recorded separately
+under `E6_PROCESS_RESUME.md` and uses Harness `HV-1.1`; this historical E6-A
+artifact remains labeled with the version under which it was produced.
 
 ## Design decisions
 
@@ -49,8 +50,8 @@ integrated and validated.
 
 ## Known limitations
 
-- No outer run resume exists yet; E6-A only supplies the durable workspace
-  primitive.
+- E6-A alone does not resume an outer run; E6-B adds that path without claiming
+  provider-internal conversation restoration.
 - No process restart discovery, side-effect replay, or provider-internal
   conversation restoration is implemented.
 - A caller that manually mutates `baseline/` is detected on reopen; the

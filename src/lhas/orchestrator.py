@@ -64,7 +64,9 @@ class Orchestrator:
         run_repo: Optional[RunRepository] = None,
         attempt_repo: Optional[AttemptRepository] = None,
         event_store: Optional[EventStore] = None,
-        executor_factory: Callable[[], AgentExecutor],
+        executor_factory: Optional[Callable[[], AgentExecutor]] = None,
+        workspace_executor_factory: Optional[Callable[[Any], AgentExecutor]] = None,
+        workspace_manager: Any = None,
         recovery_policy: Optional[DeterministicRecoveryPolicy] = None,
         executor_type: str = "MockExecutor",
         provider: str = "mock",
@@ -79,7 +81,12 @@ class Orchestrator:
         self.run_repo = run_repo or RunRepository(db)
         self.attempt_repo = attempt_repo or AttemptRepository(db)
         self.event_store = event_store or EventStore(db)
+        if executor_factory is None and workspace_executor_factory is None:
+            raise ValueError("executor_factory or workspace_executor_factory is required")
         self.executor_factory = executor_factory
+        self.workspace_executor_factory = workspace_executor_factory
+        self.workspace_manager = workspace_manager
+        self._workspace_session = None
         self.recovery_policy = recovery_policy or DeterministicRecoveryPolicy()
         self.executor_type = executor_type
         self.provider = provider
@@ -338,6 +345,13 @@ class Orchestrator:
             "acceptance_criteria": task.acceptance_criteria,
             "attempt_number": attempt.attempt_number,
         }
+
+    def _make_executor(self) -> AgentExecutor:
+        if self.workspace_executor_factory is not None and self._workspace_session is not None:
+            return self.workspace_executor_factory(self._workspace_session.workspace)
+        if self.executor_factory is None:
+            raise ValueError("executor_factory is not configured")
+        return self.executor_factory()
 
     def _executor_task_payload(self, task: Task) -> dict[str, Any]:
         """Return the task snapshot exposed to an executor.

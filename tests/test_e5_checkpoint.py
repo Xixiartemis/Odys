@@ -63,7 +63,7 @@ def test_context_budget_rejects_oversized_mandatory_goal():
     try: ContextBuilder(policy="CP-3").build(task=huge,attempt_number=1,budget=ContextBudget(max_total_bytes=100)) ; assert False
     except ContextBudgetExceeded: pass
 
-def test_harness_version_cp3(): assert HARNESS_VERSION == "HV-1.0"
+def test_harness_version_cp3(): assert HARNESS_VERSION == "HV-1.1"
 
 
 def test_cp3_recent_history_projects_allowlisted_fields_only():
