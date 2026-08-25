@@ -47,6 +47,11 @@ Design findings from this progression:
 
 The exact run comparison is in `PROJECT_METRICS.md`; E5-LIVE-004 remains byte-for-byte immutable and E5-LIVE-005 records only the supplied sanitized run facts, with unavailable fields left null.
 
+Evidence manifest (SHA-256):
+
+- `evals/runs/E5-LIVE-004.json`: `E838EB668DCC6FD21A489833C2830D43FA7E546CA8C40C43DE950471BFBF8EB8`
+- `evals/runs/E5-LIVE-005.json`: `E924A15A5A50F810243C7B0FC4CB866C0AA279D1834488505483382CCB521C1B`
+
 ## Live Model Evaluation
 
 `scripts/e5_live_model_smoke.py` is a manual entrypoint that uses the real `OpenAIAgentsBackend` and SDK Runner with a temporary staged fixture. It allocates the next exclusive `evals/runs/E5-LIVE-NNN.json` path only when configuration is present, records the selected provider profile and sanitized diagnostics, and never persists reasoning or credentials. With no `ODYS_AGENT_MODEL`/`ODYS_AGENT_API_KEY`, it prints `STATUS=SKIPPED_CONFIG` and creates no fabricated pass record. Deterministic CI remains offline. The MiMo probe finding is recorded separately in `E5_PROVIDER_COMPAT_FINDING.md`; the E5 summary remains `SKIPPED_CONFIG`.
