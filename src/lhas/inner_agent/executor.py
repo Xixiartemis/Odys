@@ -20,7 +20,7 @@ class InnerAgentExecutor:
             if self.db: EventStore(self.db).append(EventType.INNER_AGENT_FAILED,task_id=request.task_id,run_id=request.run_id,attempt_id=request.attempt_id,payload={"error_type":type(exc).__name__})
             raise
         if self.db:
-            mapping = {"LLM_TURN_STARTED": EventType.INNER_AGENT_LLM_TURN_STARTED, "LLM_TURN_COMPLETED": EventType.INNER_AGENT_LLM_TURN_COMPLETED, "TOOL_STARTED": EventType.INNER_AGENT_TOOL_STARTED, "TOOL_COMPLETED": EventType.INNER_AGENT_TOOL_COMPLETED, "WORKSPACE_EDIT_STARTED": EventType.WORKSPACE_EDIT_STARTED, "WORKSPACE_EDIT_COMPLETED": EventType.WORKSPACE_EDIT_COMPLETED, "WORKSPACE_EDIT_FAILED": EventType.WORKSPACE_EDIT_FAILED, "WORKSPACE_RESTORED": EventType.WORKSPACE_RESTORED}
+            mapping = {"LLM_TURN_STARTED": EventType.INNER_AGENT_LLM_TURN_STARTED, "LLM_TURN_COMPLETED": EventType.INNER_AGENT_LLM_TURN_COMPLETED, "TOOL_STARTED": EventType.INNER_AGENT_TOOL_STARTED, "TOOL_COMPLETED": EventType.INNER_AGENT_TOOL_COMPLETED, "TOOL_OBSERVATION_SUMMARY": EventType.INNER_AGENT_TOOL_OBSERVATION, "WORKSPACE_EDIT_STARTED": EventType.WORKSPACE_EDIT_STARTED, "WORKSPACE_EDIT_COMPLETED": EventType.WORKSPACE_EDIT_COMPLETED, "WORKSPACE_EDIT_FAILED": EventType.WORKSPACE_EDIT_FAILED, "WORKSPACE_RESTORED": EventType.WORKSPACE_RESTORED}
             for item in result.trace:
                 if item.get("event") in mapping:
                     EventStore(self.db).append(mapping[item["event"]], task_id=request.task_id, run_id=request.run_id, attempt_id=request.attempt_id, payload={k:v for k,v in item.items() if k not in {"event", "diff"}})

@@ -148,6 +148,21 @@ class ContextSnapshotRow(Base):
     sections: Mapped[str | None] = _json_col()
     raw_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    metrics: Mapped[str | None] = _json_col()
+    context_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+class CheckpointRow(Base):
+    __tablename__ = "checkpoints"
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    schema_version: Mapped[str] = mapped_column(String(32), nullable=False)
+    task_id: Mapped[str] = mapped_column(String(32), nullable=False)
+    run_id: Mapped[str] = mapped_column(String(32), nullable=False)
+    attempt_id: Mapped[str] = mapped_column(String(32), nullable=False)
+    attempt_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    event_cursor: Mapped[int] = mapped_column(Integer, nullable=False)
+    working_state_json: Mapped[str] = _json_col()
+    state_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
 class ValidationResultRow(Base):

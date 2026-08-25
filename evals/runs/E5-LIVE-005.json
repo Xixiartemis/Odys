@@ -1,0 +1,97 @@
+{
+  "run_id": "d3e492abc908423593d32da2bdac48ae",
+  "timestamp": 1787564443.0178635,
+  "git_sha": "57debbfe811c147812e9228d6d8d515b89112d3f",
+  "harness_version": "HV-1.0",
+  "model": "mimo-v2.5",
+  "provider_profile": "mimo",
+  "status": "FAILURE",
+  "agent_status": "FAILURE",
+  "functional_validation_passed": true,
+  "validator_passed": true,
+  "completion_claim_present": false,
+  "termination_status": "TURN_LIMIT",
+  "duration_ms": 252234,
+  "turn_count": 20,
+  "tool_call_count": 23,
+  "tool_calls_by_capability": {
+    "workspace.list": 4,
+    "workspace.read": 4,
+    "workspace.edit": 5,
+    "workspace.search": 4,
+    "cli.exec": 5,
+    "workspace.diff": 1
+  },
+  "tool_sequence": [
+    "workspace.list",
+    "workspace.read",
+    "workspace.read",
+    "workspace.edit",
+    "workspace.read",
+    "workspace.search",
+    "cli.exec",
+    "workspace.edit",
+    "workspace.search",
+    "workspace.read",
+    "workspace.edit",
+    "workspace.diff",
+    "cli.exec",
+    "workspace.list",
+    "workspace.list",
+    "workspace.list",
+    "cli.exec",
+    "workspace.search",
+    "workspace.edit",
+    "workspace.search",
+    "cli.exec",
+    "workspace.edit",
+    "cli.exec"
+  ],
+  "tool_failures": [
+    "EDIT_TARGET_NOT_FOUND",
+    "COMMAND_NOT_ALLOWED",
+    "EDIT_TARGET_NOT_FOUND",
+    "EDIT_TARGET_NOT_FOUND",
+    "EDIT_TARGET_NOT_FOUND"
+  ],
+  "tool_failure_count": 5,
+  "tool_failures_by_type": {
+    "EDIT_TARGET_NOT_FOUND": 4,
+    "COMMAND_NOT_ALLOWED": 1
+  },
+  "tool_failures_by_capability": {
+    "workspace.edit": 4,
+    "cli.exec": 1
+  },
+  "files_inspected": [
+    "src/calculator.py",
+    "tests/test_calculator.py"
+  ],
+  "files_modified": [
+    "src/calculator.py"
+  ],
+  "agent_candidate_patch_files": [
+    "src/calculator.py"
+  ],
+  "validator_final_patch_files": [
+    "src/calculator.py"
+  ],
+  "validator_final_files_changed": 1,
+  "validator_final_lines_added": 1,
+  "validator_final_lines_removed": 1,
+  "validator_final_patch_sha256": "9acbab971bc4450bc8e71a0f8432b149cc3ad68c82bc2819ad0f5dd1efaa16a3",
+  "test_before": "FAIL",
+  "test_after": "PASS",
+  "source_repo_unchanged": true,
+  "final_output": null,
+  "error_type": "AGENT_TURN_LIMIT",
+  "error_message": "Max turns (20) exceeded",
+  "provider_api_mode": "chat_completions",
+  "base_url_configured": true,
+  "api_key_configured": true,
+  "provider_failure_stage": "TOOL_EXECUTION",
+  "failure_layer": "AGENT_TURN_LIMIT",
+  "input_tokens": null,
+  "output_tokens": null,
+  "total_tokens": null
+}

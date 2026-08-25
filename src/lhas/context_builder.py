@@ -17,6 +17,8 @@ failure analysis.
 from __future__ import annotations
 
 import json
+import hashlib
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -31,9 +33,10 @@ class ContextPolicy(str):
     CP_0 = "CP-0"
     CP_1 = "CP-1"
     CP_2 = "CP-2"
+    CP_3 = "CP-3"
 
     def __ge__(self, other: "ContextPolicy") -> bool:
-        order = {ContextPolicy.CP_0: 0, ContextPolicy.CP_1: 1, ContextPolicy.CP_2: 2}
+        order = {ContextPolicy.CP_0: 0, ContextPolicy.CP_1: 1, ContextPolicy.CP_2: 2, ContextPolicy.CP_3: 3}
         return order[self] >= order[other]
 
 
@@ -49,6 +52,22 @@ class ContextSnapshot(BaseModel):
     sections: dict[str, str] = Field(default_factory=dict)
     raw_text: str = ""
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    metrics: dict[str, Any] = Field(default_factory=dict)
+    context_sha256: str = ""
+
+@dataclass(frozen=True)
+class ContextBudget:
+    max_total_bytes: int = 32 * 1024
+    max_working_state_bytes: int = 8 * 1024
+    max_recent_history_bytes: int = 12 * 1024
+    max_recent_events: int = 20
+
+class ContextBudgetExceeded(ValueError): pass
+
+def bounded_utf8(text: str, max_bytes: int) -> str:
+    raw=text.encode("utf-8")
+    if len(raw)<=max_bytes: return text
+    return raw[:max_bytes].decode("utf-8", "ignore")
 
 
 class ContextBuilder:
@@ -69,6 +88,9 @@ class ContextBuilder:
         recovery_action: Optional[RecoveryAction] = None,
         run_id: Optional[str] = None,
         attempt_id: Optional[str] = None,
+        working_state: Optional[dict[str, Any]] = None,
+        recent_history: Optional[list[dict[str, Any]]] = None,
+        budget: Optional[ContextBudget] = None,
     ) -> ContextSnapshot:
         sections: dict[str, str] = {}
 
@@ -118,7 +140,24 @@ class ContextBuilder:
                     guidance_parts.append(f"failure_type: {failure_report.failure_type.value}")
                 sections["recovery_guidance"] = "\n".join(guidance_parts)
 
+        if self.policy >= ContextPolicy.CP_3:
+            budget=budget or ContextBudget()
+            state_text=json.dumps(working_state or {}, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            history_text=json.dumps(recent_history or [], ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            sections["working_state"]="working_state:\n" + bounded_utf8(state_text,budget.max_working_state_bytes)
+            sections["recent_history"]="recent_history:\n" + bounded_utf8(history_text,budget.max_recent_history_bytes)
+
         raw_text = self._render_raw(sections)
+        if budget is not None:
+            mandatory="\n\n".join(sections[k] for k in ("goal","task") if k in sections)
+            if len(mandatory.encode("utf-8")) > budget.max_total_bytes: raise ContextBudgetExceeded("CONTEXT_BUDGET_EXCEEDED")
+            if len(raw_text.encode("utf-8")) > budget.max_total_bytes:
+                for key in ("recent_history","working_state","previous_attempts","profile"):
+                    if key in sections:
+                        sections[key]=bounded_utf8(sections[key], max(0,budget.max_total_bytes-len("\n\n".join(v for k,v in sections.items() if k!=key).encode("utf-8"))))
+                raw_text=self._render_raw(sections)
+            if len(raw_text.encode("utf-8")) > budget.max_total_bytes: raise ContextBudgetExceeded("CONTEXT_BUDGET_EXCEEDED")
+        context_sha=hashlib.sha256(raw_text.encode("utf-8")).hexdigest()
         return ContextSnapshot(
             task_id=task.id,
             run_id=run_id,
@@ -127,6 +166,7 @@ class ContextBuilder:
             policy=self.policy,
             sections=sections,
             raw_text=raw_text,
+            context_sha256=context_sha,
         )
 
     def to_executor_context(self, snapshot: ContextSnapshot) -> dict[str, Any]:
@@ -140,7 +180,7 @@ class ContextBuilder:
     @staticmethod
     def _render_raw(sections: dict[str, str]) -> str:
         lines: list[str] = []
-        for key in ["goal", "profile", "task", "previous_attempts", "failure", "recovery_guidance"]:
+        for key in ["goal", "profile", "task", "previous_attempts", "failure", "recovery_guidance", "working_state", "recent_history"]:
             if key in sections:
                 lines.append(sections[key])
         return "\n\n".join(lines)

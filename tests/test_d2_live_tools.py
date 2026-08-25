@@ -86,7 +86,7 @@ def test_dedup_expiration_and_evidence():
     assert shortlist_record(rows[0])["evidence"][0]["source_url"]
 
 def test_d2_harness_version():
-    assert HARNESS_VERSION == "HV-0.9"
+    assert HARNESS_VERSION == "HV-1.0"
 
 def test_semantic_pipeline_e2e(db,tmp_path,monkeypatch):
     resume=tmp_path/"resume.txt"; resume.write_text("React TypeScript Python Agent",encoding="utf-8")

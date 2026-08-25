@@ -121,3 +121,5 @@ E1 is complete. E2 adds the provider-neutral inner-agent backend boundary and th
 E2 PASS. E3 is current: read-only Workspace inspection and policy-constrained Safe CLI execution.
 
 E3 PASS. E4 is current: staged mutable Workspace with controlled edit, diff, restore, and test-fix-test loop.
+
+E4 PASS. E5 is current: durable checkpoints, incremental event projection, and bounded CP-3 context reconstruction.
