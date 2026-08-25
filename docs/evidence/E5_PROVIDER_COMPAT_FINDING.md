@@ -11,4 +11,4 @@ The supplied MiMo probe established:
 
 The compatibility profile therefore uses the Agents SDK Chat Completions model for MiMo, replays reasoning only when the origin model exactly matches the configured destination model, omits unsupported `tool_choice`, supplies the required assistant content for tool-call messages, and sends `thinking.type=enabled` through the supported `extra_body` surface. It does not use server-managed continuation.
 
-No credential, authorization header, hidden reasoning text, or complete provider response body is recorded here. Existing E5 summary status remains `SKIPPED_CONFIG` until another real manual run supplies evidence.
+No credential, authorization header, hidden reasoning text, or complete provider response body is recorded here. E5 now has two preserved real calibration runs; this remains a provider-compatibility record, not a benchmark, and the phase benchmark status is `NOT_RUN`.

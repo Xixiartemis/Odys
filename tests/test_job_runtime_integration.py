@@ -95,7 +95,8 @@ def test_job_failure_recovery_runs_through_runtime(make_task, db, tmp_path):
     assert FailureReportRepository(db).list_for_attempt(attempts[0].id)[0].failure_type.value == "WRONG_MATCH"
     assert ValidationResultRepository(db).list_for_attempt(attempts[0].id)[0].attempt_id == attempts[0].id
     assert ValidationResultRepository(db).list_for_attempt(attempts[1].id)[0].passed is True
-    assert all(s.policy == "CP-2" for a in attempts for s in ContextSnapshotRepository(db).list_for_attempt(a.id))
+    assert ContextSnapshotRepository(db).list_for_attempt(attempts[0].id)[0].policy == "CP-2"
+    assert ContextSnapshotRepository(db).list_for_attempt(attempts[1].id)[0].policy == "CP-3"
     event_types = [e.event_type for e in EventStore(db).list_for_task(task.id)]
     assert EventType.FAILURE_CLASSIFIED in event_types
     assert EventType.RECOVERY_STARTED in event_types

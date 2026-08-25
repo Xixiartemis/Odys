@@ -20,7 +20,7 @@ Checkpoint + event delta -> ContextReconstructionService -> ContextBuilder (sole
 
 Canonical `E5-CONTEXT-001` used 120 safe history events, checkpoint cursor 100, and replayed 20 delta events. It selected 20 recent events, dropped 0 within the configured recent-event window, produced 4,420 bytes of history input and a 2,249-byte context under a 4,096-byte budget. Replay reduction was `1 - 20/120 = 0.8333333333333334`; this is event replay reduction, not token reduction. One checkpoint was created and restart reconstruction was equal.
 
-The full deterministic suite contains 225 passing tests. Live model evaluation is `SKIPPED_CONFIG`; no token or duration claim is made.
+The full deterministic suite contains 228 passing tests. Live model evaluation is `CALIBRATION_RECORDED`; benchmark status is `NOT_RUN`, and no token or duration claim is made.
 
 The later real run `E5-LIVE-004` is preserved as immutable evidence: the model repaired the fixture (`FAIL → PASS`) but reached the 20-turn limit before producing a completion claim. Its closeout classification and the separate functional/agent/task state decision are recorded in `E5_LIVE_004_CLOSEOUT.md`; it is not relabeled as success.
 
@@ -50,11 +50,11 @@ The exact run comparison is in `PROJECT_METRICS.md`; E5-LIVE-004 remains byte-fo
 Evidence manifest (SHA-256):
 
 - `evals/runs/E5-LIVE-004.json`: `E838EB668DCC6FD21A489833C2830D43FA7E546CA8C40C43DE950471BFBF8EB8`
-- `evals/runs/E5-LIVE-005.json`: `E924A15A5A50F810243C7B0FC4CB866C0AA279D1834488505483382CCB521C1B`
+- `evals/runs/E5-LIVE-005.json`: `EA622D7C36E36EE3AEF6DC8EC0C54FB2A58314CE796AA284DB2BEDAB2D149B7E`
 
 ## Live Model Evaluation
 
-`scripts/e5_live_model_smoke.py` is a manual entrypoint that uses the real `OpenAIAgentsBackend` and SDK Runner with a temporary staged fixture. It allocates the next exclusive `evals/runs/E5-LIVE-NNN.json` path only when configuration is present, records the selected provider profile and sanitized diagnostics, and never persists reasoning or credentials. With no `ODYS_AGENT_MODEL`/`ODYS_AGENT_API_KEY`, it prints `STATUS=SKIPPED_CONFIG` and creates no fabricated pass record. Deterministic CI remains offline. The MiMo probe finding is recorded separately in `E5_PROVIDER_COMPAT_FINDING.md`; the E5 summary remains `SKIPPED_CONFIG`.
+`scripts/e5_live_model_smoke.py` is a manual entrypoint that uses the real `OpenAIAgentsBackend` and SDK Runner with a temporary staged fixture. It allocates the next exclusive `evals/runs/E5-LIVE-NNN.json` path only when configuration is present, records the selected provider profile and sanitized diagnostics, and never persists reasoning or credentials. Deterministic CI remains offline. The MiMo probe finding is recorded separately in `E5_PROVIDER_COMPAT_FINDING.md`; the phase evidence is the two-run calibration record and its benchmark status remains `NOT_RUN`.
 
 ## Design Decisions
 
@@ -62,6 +62,7 @@ Evidence manifest (SHA-256):
 - Event cursor enables incremental replay instead of full-history replay.
 - `WorkingStateProjector` consumes only bounded safe observation events.
 - `ContextBuilder` remains the sole Outer→Executor context assembly boundary; reconstruction only supplies structured CP-3 inputs.
+- Retry attempts use `ContextReconstructionService` to feed checkpoint working state and a safe event delta back through `ContextBuilder(policy=CP-3)`; no second prompt builder exists.
 - UTF-8 byte budgets and deterministic SHA-256 make reconstruction comparable and bounded.
 - E5 does not implement process resume, subprocess continuation, or workspace restoration after a crash.
 

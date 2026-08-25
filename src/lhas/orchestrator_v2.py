@@ -45,7 +45,7 @@ from lhas.persistence.phaseb_repos import (
     ValidationResultRepository,
 )
 from lhas.recovery import DefaultRecoveryPolicy, RecoveryAction, RecoveryPolicy
-from lhas.checkpoint import CheckpointService
+from lhas.checkpoint import CheckpointService, ContextReconstructionService
 from lhas.validation import RuleValidator, ValidationResult, Validator
 
 logger = logging.getLogger("lhas.orchestrator_v2")
@@ -81,6 +81,13 @@ class RecoveringOrchestrator(Orchestrator):
         self.failure_repo = FailureReportRepository(db)
         self.action_repo = RecoveryActionRepository(db)
         self.checkpoint_service = CheckpointService(db)
+        # Retry attempts use the durable CP-3 reconstruction service.  The
+        # first attempt retains the ordinary initial-context path.
+        self.context_reconstruction_service = ContextReconstructionService(
+            db, builder=ContextBuilder(
+                policy="CP-3", profile=getattr(self.context_builder, "profile", None)
+            )
+        )
 
     # ------------------------------------------------------------------ API
 
@@ -109,16 +116,29 @@ class RecoveringOrchestrator(Orchestrator):
             attempt.started_at = self._now()
             self.attempt_repo.update(attempt)
 
-            # --- Context (CP-2: previous attempts + failure evidence + recovery) ---
-            snapshot = self.context_builder.build(
-                task=task,
-                attempt_number=n,
-                previous_attempts=prior_attempts,
-                failure_report=last_report,
-                recovery_action=last_action,
-                run_id=run.id,
-                attempt_id=attempt.id,
-            )
+            # First attempt uses the ordinary context path.  Every retry is
+            # reconstructed from the latest checkpoint plus the event delta;
+            # ContextBuilder remains the sole assembly boundary in both paths.
+            if n == 1:
+                snapshot = self.context_builder.build(
+                    task=task,
+                    attempt_number=n,
+                    previous_attempts=prior_attempts,
+                    failure_report=last_report,
+                    recovery_action=last_action,
+                    run_id=run.id,
+                    attempt_id=attempt.id,
+                )
+            else:
+                snapshot, _reconstruction_metrics = self.context_reconstruction_service.reconstruct(
+                    task=task,
+                    run_id=run.id,
+                    attempt_id=attempt.id,
+                    attempt_number=n,
+                    previous_attempts=prior_attempts,
+                    failure_report=last_report,
+                    recovery_action=last_action,
+                )
             self.snapshot_repo.create(snapshot)
             attempt.context_snapshot_id = snapshot.id
             self.attempt_repo.update(attempt)

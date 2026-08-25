@@ -2,14 +2,21 @@
   "phase": "E5",
   "harness_version": "HV-1.0",
   "engineering": {
-    "test_count": 225,
-    "ci_status": "PASS",
+    "test_count": 228,
+    "ci_status": "PASS (PR merge-result workflow)",
     "pr_number": 9,
     "base_sha": "0b981ff45e68f2b408cebd0ae59fdb1de3ace2f8",
-    "changed_files": 14,
-    "additions": 277,
-    "deletions": 9,
-    "metrics_scope": "implementation_diff_before_evidence (origin/main...E5 HEAD; evidence files excluded)"
+    "checkpoint_core_initial_diff": {
+      "changed_files": 14,
+      "additions": 277,
+      "deletions": 9,
+      "scope": "initial checkpoint core diff before evidence"
+    },
+    "final_pr_changed_files": 34,
+    "final_pr_additions": 1523,
+    "final_pr_deletions": 40,
+    "final_pr_commits": 14,
+    "metrics_scope": "final PR scope is measured from origin/main to the final E5 HEAD; evidence files are included"
   },
   "deterministic_eval": {
     "scenario": "E5-CONTEXT-001",
@@ -27,7 +34,9 @@
     "restart_reconstruction_equal": true
   },
   "live_model_eval": {
-    "status": "SKIPPED_CONFIG",
+    "status": "CALIBRATION_RECORDED",
+    "benchmark_status": "NOT_RUN",
+    "scope": "E5 calculator fixture calibration only",
     "input_tokens": null,
     "output_tokens": null,
     "total_tokens": null,
@@ -41,6 +50,9 @@
     "functional_repairs_passed": 2,
     "agent_completions_passed": 0,
     "turn_limit_runs": 2,
+    "functional_validation": "2/2 fixture runs",
+    "agent_completion": "0/2 fixture runs",
+    "turn_limit": "2/2 fixture runs",
     "functional_validation_rate": {
       "passed": 2,
       "total": 2,

@@ -13,3 +13,15 @@
 ## Deferred efficiency hypothesis
 
 `tool_use_behavior` and acceptance-based early stopping remain future efficiency optimizations. They were not enabled or inferred from these runs because both runs still terminated at the 20-turn limit.
+
+## DD-E5-CP3-RETRY-RECONSTRUCTION
+
+Retry attempts now reconstruct context from the latest durable checkpoint and
+events after its cursor, then pass the structured state through
+`ContextBuilder(policy=CP-3)`. The first attempt retains the ordinary initial
+context path. ContextBuilder remains the sole context assembly boundary; this
+does not implement process restart or resume.
+
+Recent history is an explicit allowlisted projection. Unknown event payloads
+are not copied into executor context, and reconstruction failures emit only a
+bounded error type in `CONTEXT_RECONSTRUCTION_FAILED`.

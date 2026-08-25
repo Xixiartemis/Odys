@@ -101,6 +101,53 @@ class WorkingStateProjector:
             elif event.event_type == EventType.RECOVERY_DECIDED: state.last_recovery_action=payload.get("action_type")
         return state.bounded()
 
+
+# Recent history is an executor-facing projection, not an event dump.  Keep
+# this allowlist deliberately small: event payloads can contain provider/tool
+# output, and unknown event types must never inherit a new field implicitly.
+_SAFE_EVENT_FIELDS = {
+    EventType.INNER_AGENT_TOOL_OBSERVATION: {
+        "capability", "status", "error_type", "path", "sha256", "truncated",
+        "matched_paths", "match_count", "exit_code", "timed_out", "duration_ms",
+        "stdout_truncated", "stderr_truncated", "command_name",
+    },
+    EventType.ATTEMPT_STARTED: {"attempt_number"},
+    EventType.ATTEMPT_FAILED: {"attempt_number", "reason", "error_type"},
+    EventType.ATTEMPT_TIMED_OUT: {"attempt_number", "reason", "error_type"},
+    EventType.ATTEMPT_CRASHED: {"attempt_number", "reason", "error_type"},
+    EventType.ATTEMPT_COMPLETED: {"attempt_number"},
+    EventType.FAILURE_CLASSIFIED: {"failure_type", "failure_class", "suggested_recovery"},
+    EventType.RECOVERY_DECIDED: {"action", "attempt_to"},
+    EventType.RECOVERY_STARTED: {"action", "next_attempt"},
+    EventType.VALIDATION_FAILED: {"passed"},
+    EventType.VALIDATION_PASSED: {"passed"},
+}
+
+
+def _bounded_safe_value(key: str, value: Any) -> Any:
+    """Return only bounded scalar/path summaries suitable for recent history."""
+    if key == "matched_paths" and isinstance(value, list):
+        return [str(item)[:512] for item in value if isinstance(item, (str, int))][:100]
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value if not isinstance(value, str) else value[:512]
+    return None
+
+
+def safe_event_projection(event) -> dict[str, Any]:
+    """Project one event without exposing arbitrary payload fields."""
+    allowed = _SAFE_EVENT_FIELDS.get(event.event_type, set())
+    projected = {"event_type": event.event_type.value}
+    if event.id is not None:
+        projected["event_id"] = event.id
+    payload = event.payload if isinstance(event.payload, dict) else {}
+    for key in allowed:
+        if key not in payload:
+            continue
+        value = _bounded_safe_value(key, payload[key])
+        if value is not None:
+            projected[key] = value
+    return projected
+
 class CheckpointService:
     def __init__(self, db): self.db=db; self.events=EventStore(db); self.repo=CheckpointRepository(db); self.projector=WorkingStateProjector()
     def create_checkpoint(self, task, run_id, attempt_id, attempt_number):
@@ -112,12 +159,18 @@ class CheckpointService:
 
 class ContextReconstructionService:
     def __init__(self, db, builder=None, budget=None): self.db=db; self.repo=CheckpointRepository(db); self.events=EventStore(db); self.projector=WorkingStateProjector(); self.builder=builder or ContextBuilder(policy="CP-3"); self.budget=budget or ContextBudget()
-    def reconstruct(self, task: Task, run_id, attempt_id, attempt_number, failure_report=None, recovery_action=None):
-        self.events.append(EventType.CONTEXT_RECONSTRUCTION_STARTED, task_id=task.id, run_id=run_id, attempt_id=attempt_id, payload={"checkpoint_used": self.repo.latest_for_run(run_id) is not None})
-        checkpoint=self.repo.latest_for_run(run_id); cursor=checkpoint.event_cursor if checkpoint else 0; infrastructure={EventType.CHECKPOINT_CREATED,EventType.CONTEXT_RECONSTRUCTION_STARTED,EventType.CONTEXT_RECONSTRUCTION_COMPLETED,EventType.CONTEXT_RECONSTRUCTION_FAILED}; all_events=[e for e in self.events.list_for_run(run_id) if e.event_type not in infrastructure]; delta=[e for e in all_events if (e.id or 0)>cursor]; previous=checkpoint.working_state if checkpoint else WorkingState(task_id=task.id,run_id=run_id); state=self.projector.project(previous,delta)
-        recent=[{"event_type":e.event_type.value,"payload":e.payload} for e in delta[-self.budget.max_recent_events:]]
-        snapshot=self.builder.build(task=task,attempt_number=attempt_number,run_id=run_id,attempt_id=attempt_id,failure_report=failure_report,recovery_action=recovery_action,working_state=state.model_dump(mode="json"),recent_history=recent,budget=self.budget)
-        metrics={"checkpoint_used":checkpoint is not None,"source_checkpoint_id":checkpoint.id if checkpoint else None,"raw_history_event_count":len(all_events),"checkpoint_event_cursor":cursor,"delta_event_count":len(delta),"eligible_recent_events":len(delta),"selected_recent_events":len(recent),"dropped_recent_events":max(0,len(delta)-len(recent)),"history_input_bytes":len(json.dumps(recent,ensure_ascii=False).encode()),"context_output_bytes":len(snapshot.raw_text.encode()),"context_budget_bytes":self.budget.max_total_bytes,"event_replay_reduction_ratio":1-(len(delta)/len(all_events) if all_events else 0)}
-        snapshot.metrics=metrics
-        self.events.append(EventType.CONTEXT_RECONSTRUCTION_COMPLETED, task_id=task.id, run_id=run_id, attempt_id=attempt_id, payload={"checkpoint_id":checkpoint.id if checkpoint else None,"checkpoint_used":checkpoint is not None,"delta_event_count":len(delta),"selected_event_count":len(recent),"dropped_event_count":max(0,len(delta)-len(recent)),"context_output_bytes":len(snapshot.raw_text.encode()),"context_sha256":snapshot.context_sha256})
-        return snapshot, metrics
+    def reconstruct(self, task: Task, run_id, attempt_id, attempt_number, failure_report=None, recovery_action=None, previous_attempts=None):
+        self.events.append(EventType.CONTEXT_RECONSTRUCTION_STARTED, task_id=task.id, run_id=run_id, attempt_id=attempt_id, payload={"checkpoint_used": False})
+        try:
+            checkpoint=self.repo.latest_for_run(run_id); cursor=checkpoint.event_cursor if checkpoint else 0; infrastructure={EventType.CHECKPOINT_CREATED,EventType.CONTEXT_RECONSTRUCTION_STARTED,EventType.CONTEXT_RECONSTRUCTION_COMPLETED,EventType.CONTEXT_RECONSTRUCTION_FAILED}; all_events=[e for e in self.events.list_for_run(run_id) if e.event_type not in infrastructure]; delta=[e for e in all_events if (e.id or 0)>cursor]; previous=checkpoint.working_state if checkpoint else WorkingState(task_id=task.id,run_id=run_id); state=self.projector.project(previous,delta)
+            recent=[safe_event_projection(e) for e in delta[-self.budget.max_recent_events:]]
+            snapshot=self.builder.build(task=task,attempt_number=attempt_number,run_id=run_id,attempt_id=attempt_id,previous_attempts=previous_attempts,failure_report=failure_report,recovery_action=recovery_action,working_state=state.model_dump(mode="json"),recent_history=recent,budget=self.budget)
+            metrics={"checkpoint_used":checkpoint is not None,"source_checkpoint_id":checkpoint.id if checkpoint else None,"raw_history_event_count":len(all_events),"checkpoint_event_cursor":cursor,"delta_event_count":len(delta),"eligible_recent_events":len(delta),"selected_recent_events":len(recent),"dropped_recent_events":max(0,len(delta)-len(recent)),"history_input_bytes":len(json.dumps(recent,ensure_ascii=False).encode()),"context_output_bytes":len(snapshot.raw_text.encode()),"context_budget_bytes":self.budget.max_total_bytes,"event_replay_reduction_ratio":1-(len(delta)/len(all_events) if all_events else 0)}
+            snapshot.metrics=metrics
+            self.events.append(EventType.CONTEXT_RECONSTRUCTION_COMPLETED, task_id=task.id, run_id=run_id, attempt_id=attempt_id, payload={"checkpoint_id":checkpoint.id if checkpoint else None,"checkpoint_used":checkpoint is not None,"delta_event_count":len(delta),"selected_event_count":len(recent),"dropped_event_count":max(0,len(delta)-len(recent)),"context_output_bytes":len(snapshot.raw_text.encode()),"context_sha256":snapshot.context_sha256})
+            return snapshot, metrics
+        except Exception as exc:
+            # Persist only a stable exception type; exception text may contain
+            # provider responses, command output, or other sensitive material.
+            self.events.append(EventType.CONTEXT_RECONSTRUCTION_FAILED, task_id=task.id, run_id=run_id, attempt_id=attempt_id, payload={"error_type":type(exc).__name__})
+            raise
