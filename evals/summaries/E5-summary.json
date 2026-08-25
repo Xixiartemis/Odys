@@ -13,9 +13,9 @@
       "scope": "initial checkpoint core diff before evidence"
     },
     "final_pr_changed_files": 34,
-    "final_pr_additions": 1523,
-    "final_pr_deletions": 40,
-    "final_pr_commits": 14,
+    "final_pr_additions": 1524,
+    "final_pr_deletions": 41,
+    "final_pr_commits": 15,
     "metrics_scope": "final PR scope is measured from origin/main to the final E5 HEAD; evidence files are included"
   },
   "deterministic_eval": {
