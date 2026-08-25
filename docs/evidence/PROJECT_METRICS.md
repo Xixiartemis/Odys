@@ -14,9 +14,9 @@ Metric semantics are explicit: implementation and deterministic test facts are n
 ## E6 final PR scale
 
 Measured from `origin/main` to the final E6 PR head after the closeout patch:
-the final commit count, changed files, additions, and deletions are recorded
-in the delivery report and PR metadata. The deterministic evidence contains
-13 traceable scenarios: 10 crash windows plus 3 CREATING-root binding cases.
+the final PR has **5 commits**, **29 changed files**, **2039 additions**, and
+**176 deletions**. The deterministic evidence contains 13 traceable scenarios:
+10 crash windows plus 3 CREATING-root binding cases.
 
 ## E5 real-run comparison
 
