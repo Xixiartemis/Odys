@@ -213,6 +213,79 @@ def test_resume_continues_multiple_recovery_attempts_after_interruption(tmp_path
         db.close()
 
 
+def test_w5_validation_pass_persisted_is_resumed_without_revalidation(tmp_path):
+    """W5 crashes after a durable pass; resume must only complete the run."""
+    db_path, task_id, run_id, _source_root, _root, _calls, _validator = _start_crashed_run(
+        tmp_path, CrashPoint.AFTER_VALIDATION_PERSISTED, {1: True}
+    )
+    db = Database(db_path)
+    db.init_db()
+    try:
+        attempt = AttemptRepository(db).list_for_run(run_id)[0]
+        assert attempt.status is AttemptStatus.COMPLETED
+        assert ValidationResultRepository(db).get_for_attempt(attempt.id).passed is True
+        assert RunRepository(db).get(run_id).status is RunStatus.RUNNING
+        assert len(AttemptRepository(db).list_for_run(run_id)) == 1
+    finally:
+        db.close()
+
+    db, run, calls, validator_calls = _resume(tmp_path, db_path, run_id, {1: True})
+    try:
+        assert run.status is RunStatus.COMPLETED
+        assert calls == []
+        assert validator_calls == []
+        before = _counts(db, run_id)
+        second = asyncio.run(RecoveringOrchestrator(
+            db,
+            workspace_executor_factory=lambda workspace: ScriptedExecutor(workspace, []),
+            workspace_manager=RunWorkspaceManager(db, tmp_path / "sessions"),
+            validator=ScriptedValidator({1: True}),
+            harness_version=HARNESS_VERSION,
+        ).resume_run(run_id))
+        assert second.status is RunStatus.COMPLETED
+        assert _counts(db, run_id) == before
+    finally:
+        db.close()
+
+
+def test_w7_missing_checkpoint_is_created_before_next_attempt(tmp_path):
+    """A persisted retry action cannot start attempt N+1 until checkpoint N exists."""
+    outcomes = {1: False, 2: True}
+    db_path, _task_id, run_id, _source_root, _root, _calls, _validator = _start_crashed_run(
+        tmp_path, CrashPoint.AFTER_RECOVERY_DECIDED, outcomes
+    )
+    db = Database(db_path)
+    db.init_db()
+    try:
+        attempt = AttemptRepository(db).list_for_run(run_id)[0]
+        assert ValidationResultRepository(db).get_for_attempt(attempt.id).passed is False
+        assert FailureReportRepository(db).get_for_attempt(attempt.id) is not None
+        assert RecoveryActionRepository(db).get_for_attempt(attempt.id) is not None
+        assert CheckpointRepository(db).list_for_run(run_id) == []
+    finally:
+        db.close()
+
+    db, run, calls, validator_calls = _resume(tmp_path, db_path, run_id, outcomes)
+    try:
+        assert run.status is RunStatus.COMPLETED
+        checkpoints = CheckpointRepository(db).list_for_run(run_id)
+        assert len(checkpoints) == 1
+        assert checkpoints[0].attempt_id == attempt.id
+        assert checkpoints[0].attempt_number == 1
+        attempts = AttemptRepository(db).list_for_run(run_id)
+        assert [a.attempt_number for a in attempts] == [1, 2]
+        assert calls == [2]
+        assert validator_calls == [2]
+        snapshot = ContextSnapshotRepository(db).get(attempts[1].context_snapshot_id)
+        assert snapshot is not None and snapshot.policy == "CP-3"
+        events = __import__("lhas.persistence.event_store", fromlist=["EventStore"]).EventStore(db).list_for_run(run_id)
+        checkpoint_event = next(e for e in events if e.event_type.value == "CHECKPOINT_CREATED")
+        attempt_two_event = next(e for e in events if e.event_type.value == "ATTEMPT_STARTED" and e.payload.get("attempt_number") == 2)
+        assert checkpoint_event.id < attempt_two_event.id
+    finally:
+        db.close()
+
+
 def test_creating_workspace_binding_recovers_absent_and_valid_existing_roots(tmp_path):
     db_path, task_id, run_id, source, _root, _calls, _validator = _start_crashed_run(tmp_path, CrashPoint.AFTER_RUN_STARTED, {1: True})
     db = Database(db_path)

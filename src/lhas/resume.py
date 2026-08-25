@@ -158,6 +158,18 @@ class ResumeDecisionService:
             RecoveryActionType.RETRY_WITH_FAILURE_CONTEXT,
             RecoveryActionType.RETRY_WITH_EXPANDED_CONTEXT,
         }:
+            checkpoint = state.checkpoint
+            checkpoint_matches_current = (
+                checkpoint is not None
+                and checkpoint.attempt_id == latest.id
+                and checkpoint.attempt_number == latest.attempt_number
+            )
+            if not checkpoint_matches_current:
+                return ResumeDecision(
+                    ResumeAction.CONTINUE_PERSISTED_RECOVERY,
+                    "persisted retry action requires an exact checkpoint for the current attempt",
+                    latest.id,
+                )
             next_number = latest.attempt_number + 1
             if not any(a.attempt_number == next_number for a in state.attempts):
                 return ResumeDecision(ResumeAction.START_NEXT_ATTEMPT, "persisted retry action has no next attempt", latest.id)

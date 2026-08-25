@@ -30,10 +30,22 @@ classification/recovery continuation, `START_NEXT_ATTEMPT`, or
 `RETURN_TERMINAL`). `resume_run()` executes one action and re-inspects durable
 state, so a crash after any persisted phase cannot cause that phase to repeat.
 
+The retry safety invariant is explicit: for a retry action on attempt N,
+`RecoveryDecision(N) -> Checkpoint(N) -> Attempt(N+1)` is the only legal order.
+The checkpoint must match both the current `attempt_id` and
+`attempt_number`; an older checkpoint is not sufficient. If the recovery
+action is durable but that exact checkpoint is absent, resume returns
+`CONTINUE_PERSISTED_RECOVERY` and creates the checkpoint before starting the
+next attempt.
+
 Events are audit evidence, not the sole state authority: a crash can happen
 after a DB row commits but before its next event append, or after an event
 append but before the next row update. Resume decisions therefore consult
 durable repositories first.
+
+`RECOVERY_DECIDED.payload.action` is the canonical recovery action field.
+The projector accepts historical `action_type` payloads as a read-compatible
+fallback so older event history remains reconstructable.
 
 ## IDEMPOTENCY_CONTRACT
 
@@ -94,6 +106,9 @@ durable repositories first.
 - the same restart first fails validation, writes a checkpoint, reconstructs
   CP-3, executes attempt 2 in the same workspace, and completes;
 - a manifest/run identity mismatch is rejected before workspace use;
+- a W5 pass persisted after validation is completed without revalidation;
+- a W7 recovery action with a missing checkpoint creates the exact current
+  attempt checkpoint before attempt 2 and reconstructs CP-3 context;
 - all W1–W8 crash points, CREATING-root absent/valid/corrupt handling,
   per-phase idempotency, and a three-attempt resume/recovery continuation.
 

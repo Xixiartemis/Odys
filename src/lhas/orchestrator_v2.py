@@ -317,7 +317,11 @@ class RecoveringOrchestrator(Orchestrator):
                                 "attempt_to": action.attempt_to, "added_context": action.added_context})
             self._crash(CrashPoint.AFTER_RECOVERY_DECIDED, task=state.task, run=state.run, attempt=attempt)
         checkpoint = self.checkpoint_service.repo.latest_for_run(state.run.id)
-        if checkpoint is None or checkpoint.attempt_id != attempt.id:
+        if (
+            checkpoint is None
+            or checkpoint.attempt_id != attempt.id
+            or checkpoint.attempt_number != attempt.attempt_number
+        ):
             self.checkpoint_service.create_checkpoint(state.task, state.run.id, attempt.id, attempt.attempt_number)
             self._crash(CrashPoint.AFTER_CHECKPOINT_CREATED, task=state.task, run=state.run, attempt=attempt)
         if action.action_type in {RecoveryActionType.RETRY_WITH_FAILURE_CONTEXT, RecoveryActionType.RETRY_WITH_EXPANDED_CONTEXT}:
