@@ -14,6 +14,41 @@
 
 `tool_use_behavior` and acceptance-based early stopping remain future efficiency optimizations. They were not enabled or inferred from these runs because both runs still terminated at the 20-turn limit.
 
+## DD-HV12-LIVE-001-OUTCOME-ARBITRATION
+
+**Design decision.** HV12-LIVE-001 demonstrates that executor outcome and task
+outcome must remain separate. A durable workspace can contain useful work even
+when the Inner Agent ends with `FAILURE`, `TIMEOUT`, or `TURN_LIMIT`. The
+Outer Validator must arbitrate task completion before failure recovery consumes
+another attempt when durable workspace state may satisfy acceptance criteria.
+
+**Tradeoff.** Running validation after a non-successful executor outcome adds a
+bounded validator call and may spend time on a workspace that is still
+incomplete. It can also avoid an unnecessary retry when the durable patch is
+already sufficient. The validator remains the acceptance authority; the Inner
+Agent completion claim is not upgraded by this decision.
+
+**Failed approach.** In the canonical HV-1.2 run, Attempts 2 and 3 ended at
+`AGENT_TURN_LIMIT` and entered failure/recovery handling. The durable workspace
+was not validator-arbitrated after each non-success outcome before another
+attempt was consumed. Attempt 2's post-attempt pytest state was not measured,
+so this closeout does not claim that Attempt 2 was already correct.
+
+**Known limitation.** HV12-LIVE-001 proves the lifecycle gap and records final
+pytest PASS, but it does not prove which intermediate workspace state would
+have passed acceptance. No runtime semantics are changed in this closeout, and
+Dynamic Replan remains out of scope.
+
+**Next hypothesis.** E6-D / HV-1.3 should implement post-non-success outcome
+arbitration:
+
+```text
+Inner Agent FAILURE / TIMEOUT / TURN_LIMIT
+→ Outer Validator
+→ Validator PASS → Task COMPLETED without an unnecessary next Attempt
+→ Validator FAIL → classify failure, recover, checkpoint, next Attempt
+```
+
 ## DD-E5-CP3-RETRY-RECONSTRUCTION
 
 Retry attempts now reconstruct context from the latest durable checkpoint and
