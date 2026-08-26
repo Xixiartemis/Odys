@@ -20,6 +20,7 @@
       "completion_claim_present": null,
       "context_policy": "CP-2",
       "duration_ms": null,
+      "error_type": "PROCESS_INTERRUPTED",
       "inner_agent_status": null,
       "input_tokens": null,
       "output_tokens": null,
@@ -40,7 +41,8 @@
       "checkpoint_used": true,
       "completion_claim_present": null,
       "context_policy": "CP-3",
-      "duration_ms": 15,
+      "duration_ms": 0,
+      "error_type": null,
       "inner_agent_status": null,
       "input_tokens": null,
       "output_tokens": null,
@@ -58,6 +60,7 @@
   "cli_policy": [
     "pytest"
   ],
+  "code_commit_clean": true,
   "crash": {
     "post_crash_state": {
       "attempt_count": 1,
@@ -68,14 +71,14 @@
       "latest_attempt_status": "RUNNING",
       "patch_sha256": "0a33f72bce9761e9ac8a75329c8adbbe21657852b75d84b05adb4cb5d327332b",
       "run_status": "RUNNING",
-      "source_tree_sha": "7be0f4fce670826443b9fd39d0db24af3c904278571d6246893358ea3528dc74",
+      "source_tree_sha": "4e090a7c20fed9e655f75c9a7b4cc9ca19a8f1f14bb80a55835a3db46cd1b168",
       "task_status": "RUNNING",
-      "work_tree_sha": "b89fff8bb629bfb4734fc241ee40b1fb2e5abe0b55de0375ce07f902353188e3",
-      "workspace_session_id": "c1a56e22af70c1c0ecc77047cc2c049d"
+      "work_tree_sha": "1767d1ca1af8a64fc4c7d08721661ce8f0c3ec7336d26da92f91bec919e4b1f0",
+      "workspace_session_id": "9e008f76a1ec610a6a7fd7e815586c3e"
     },
     "process_a_exit_code": 1,
     "process_a_forced_termination": true,
-    "process_a_pid": 30128,
+    "process_a_pid": 14448,
     "process_a_termination_mechanism": "subprocess.Popen.terminate",
     "trigger": "DURABLE_MUTATION_STABLE"
   },
@@ -89,16 +92,19 @@
     "raw_tool_arguments_persisted": false
   },
   "final_tests": {
-    "duration_ms": 625,
+    "duration_ms": 562,
     "exit_code": 0,
     "status": "PASS",
     "timed_out": false
   },
   "fixture": "evals/fixtures/hv12_session_lifecycle",
+  "fixture_source_sha": "4e090a7c20fed9e655f75c9a7b4cc9ca19a8f1f14bb80a55835a3db46cd1b168",
+  "fixture_version": "HV12-SESSION-LIFECYCLE-1",
   "functional_validation_passed": true,
+  "git_sha": "a685f4e981bd8281875021e0393f6626976a8f87",
   "harness_version": "HV-1.2",
   "initial_tests": {
-    "duration_ms": 687,
+    "duration_ms": 765,
     "exit_code": 1,
     "status": "FAIL",
     "timed_out": false
@@ -110,6 +116,7 @@
   "mode": "deterministic_process_recovery_fixture",
   "outer_harness_metrics": {
     "attempts_before_crash": 1,
+    "attempts_before_resume": 1,
     "attempts_total": 2,
     "checkpoints_created": 1,
     "cp3_attempts": 1,
@@ -128,13 +135,16 @@
     "patch_sha_at_crash": "0a33f72bce9761e9ac8a75329c8adbbe21657852b75d84b05adb4cb5d327332b",
     "process_a_forced_termination": true,
     "process_instances": 3,
+    "repository_fixture_unchanged": true,
     "resume_validation_passed": false,
     "same_workspace_session_after_restart": true,
     "source_unchanged": true,
+    "temporary_source_snapshot_unchanged": true,
     "validator_calls_after_resume": 2,
-    "workspace_session_id": "c1a56e22af70c1c0ecc77047cc2c049d"
+    "workspace_session_id": "9e008f76a1ec610a6a7fd7e815586c3e"
   },
   "outer_task_completed": true,
+  "phase": "HV12_LONGTASK_BASELINE",
   "pre_crash_tool_trace_complete": false,
   "process_recovery_passed": true,
   "provider": {
@@ -144,11 +154,15 @@
     "model": "scripted-process-recovery",
     "provider_profile": "deterministic"
   },
-  "run_id": "da0ffa412b2e4cc9af6baefa1f4344e8",
+  "repository_fixture_unchanged": true,
+  "run_id": "14b806c260844ee8bd490b6bb6b071e8",
   "source_repository_unchanged": true,
+  "source_snapshot_sha_after": "4e090a7c20fed9e655f75c9a7b4cc9ca19a8f1f14bb80a55835a3db46cd1b168",
+  "source_snapshot_sha_before": "4e090a7c20fed9e655f75c9a7b4cc9ca19a8f1f14bb80a55835a3db46cd1b168",
   "status": "PASS",
-  "task_id": "67cc8029318b41d9810ffbfa0c5a9ce6",
-  "total_wall_duration_ms": 8891,
+  "task_id": "7a506846e7d8472c9f501b051d3018b5",
+  "temporary_source_snapshot_unchanged": true,
+  "total_wall_duration_ms": 9500,
   "validator_final_patch_nonempty": true,
   "worker_error_types": {}
 }

@@ -1,8 +1,9 @@
 # HV-1.2 Long-Task Recovery Baseline
 
 Harness: `HV-1.2`
-Evaluation: `HV12-LIVE-001` (manual, future live run)
+Evaluation: `HV12-DRY-001` (offline deterministic evidence; live remains manual)
 Offline artifact: `evals/runs/HV12-DRY-001.json`
+Fixture version: `HV12-SESSION-LIFECYCLE-1`
 
 ## PURPOSE
 
@@ -42,6 +43,23 @@ The offline dry run uses scripted executor behavior in the same outer state
 machine. It is classified as `mode=deterministic_process_recovery_fixture`,
 not as a live-model result.
 
+## DRY_RUN_RESULT
+
+The regenerated artifact is `PASS` from clean code commit
+`a685f4e981bd8281875021e0393f6626976a8f87`. It records `initial_tests=FAIL`,
+`final_tests=PASS`, stable durable mutation before OS-level termination,
+`subprocess.Popen.terminate` for Process A, and a fresh Process B that calls
+`resume_run(run_id)`. The durable attempt count is 1 before resume and 2 at
+finalization, so `new_attempts_after_resume=2-1=1`; the post-resume executor
+call list contains attempt 2. Validator-before-retry is observed with one
+CP-3 retry, the workspace session id is reused, and all duplicate durable-row
+counts are zero.
+
+The artifact records both `repository_fixture_unchanged=true` and
+`temporary_source_snapshot_unchanged=true`, with separate before/after hashes
+for the copied source snapshot. It also records `evaluation_id`, `phase`,
+`git_sha`, `harness_version`, and `fixture_version` at the top level.
+
 ## CRASH_TRIGGER
 
 The parent polls only local SQLite rows, the workspace manifest, the baseline,
@@ -69,7 +87,8 @@ Strict final success requires all of:
 - final pytest is `PASS`;
 - final Run and Task are `COMPLETED`;
 - the final validator patch is non-empty;
-- the source fixture remains unchanged;
+- the repository fixture remains unchanged;
+- the temporary copied source snapshot remains unchanged;
 - the same durable workspace session id is observed before and after restart;
 - Process A was forcibly terminated after the stable mutation trigger;
 - Process B completed through `resume_run(run_id)`.
@@ -90,9 +109,10 @@ Each attempt records, where durable evidence exists:
 
 Outer metrics record process instances, Process A pid and termination
 mechanism, crash trigger, crash-time changed files and patch hash, attempts
-before/after restart, crashed attempts, resume validation, checkpoint and
-CP-3 counts, workspace-session reuse, post-resume executor/validator calls,
-duplicate durable records, source immutability, and wall duration.
+before/after restart using the observed durable pre-resume count, crashed
+attempts, resume validation, checkpoint and CP-3 counts, workspace-session
+reuse, post-resume executor/validator calls, duplicate durable records, the
+two source immutability checks, and wall duration.
 
 The pre-crash Inner trace is allowed to be incomplete. If the backend had not
 returned before the OS termination, turn/tool metrics are `null` rather than
@@ -110,6 +130,12 @@ authoritative and is represented by bounded paths/counts/hashes only.
 - The source checkout is never handed to the Agent. A temporary source copy
   and the durable session baseline/work split make source immutability
   independently checkable.
+- Worker A and Worker B are launched with the active evaluation interpreter
+  (`sys.executable`); live executor calls are counted by an evaluation-only
+  recorder shared by factory-created executors in a resumed process.
+- Completion claims are extracted from the persisted `ExecutionResult.raw`
+  `InnerAgentResult` when present. Termination status preserves forced process
+  termination, turn-limit, successful completion, and stable failure types.
 - Validator-before-retry is exercised by running pytest during recovery before
   CP-3 and a possible next attempt are created.
 - The live result path is exclusive: a pre-existing
