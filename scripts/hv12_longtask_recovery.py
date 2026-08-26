@@ -65,6 +65,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 FIXTURE_ROOT = REPO_ROOT / "evals" / "fixtures" / "hv12_session_lifecycle"
 DEFAULT_DRY_OUTPUT = REPO_ROOT / "evals" / "runs" / "HV12-DRY-001.json"
 DEFAULT_LIVE_OUTPUT = REPO_ROOT / "evals" / "runs" / "HV12-LIVE-001.json"
+PHASE = "HV12_LONGTASK_BASELINE"
+FIXTURE_VERSION = "HV12-SESSION-LIFECYCLE-1"
 MAX_ATTEMPTS = 3
 INNER_TURN_BUDGET = 20
 CAPABILITIES = [
@@ -190,12 +192,15 @@ async def _replace_if_present(workspace, path: str, old_text: str, new_text: str
 class DryRunCrashExecutor:
     name = "DeterministicProcessRecoveryExecutor-A"
 
-    def __init__(self, workspace):
+    def __init__(self, workspace, recorder: ExecutorCallRecorder | None = None):
         self.workspace = workspace
         self.calls: list[int] = []
+        self.recorder = recorder
 
     async def execute(self, request: ExecutionRequest) -> ExecutionResult:
         self.calls.append(request.attempt_number)
+        if self.recorder is not None:
+            self.recorder.record(request.attempt_number)
         await _replace_if_present(
             self.workspace,
             "src/session_store.py",
@@ -211,12 +216,15 @@ class DryRunCrashExecutor:
 class DryRunResumeExecutor:
     name = "DeterministicProcessRecoveryExecutor-B"
 
-    def __init__(self, workspace):
+    def __init__(self, workspace, recorder: ExecutorCallRecorder | None = None):
         self.workspace = workspace
         self.calls: list[int] = []
+        self.recorder = recorder
 
     async def execute(self, request: ExecutionRequest) -> ExecutionResult:
         self.calls.append(request.attempt_number)
+        if self.recorder is not None:
+            self.recorder.record(request.attempt_number)
         await _replace_if_present(
             self.workspace,
             "src/message_router.py",
@@ -226,22 +234,40 @@ class DryRunResumeExecutor:
         return ExecutionResult(status=ExecutionStatus.SUCCESS, output="deterministic continuation complete")
 
 
+class ExecutorCallRecorder:
+    """Shared evaluation-only call accounting across factory-created executors."""
+
+    def __init__(self) -> None:
+        self.attempt_numbers: list[int] = []
+
+    def record(self, attempt_number: int) -> None:
+        self.attempt_numbers.append(attempt_number)
+
+
 class BudgetedInnerAgentExecutor:
     """Evaluation adapter that fixes the per-attempt budget at exactly 20 turns."""
 
     name = "InnerAgentExecutor"
 
-    def __init__(self, inner: InnerAgentExecutor):
+    def __init__(self, inner: InnerAgentExecutor, recorder: ExecutorCallRecorder | None = None):
         self.inner = inner
+        self.recorder = recorder
 
     async def execute(self, request: ExecutionRequest) -> ExecutionResult:
+        if self.recorder is not None:
+            self.recorder.record(request.attempt_number)
         request = request.model_copy(
             update={"metadata": {**request.metadata, "max_turns": INNER_TURN_BUDGET}}
         )
         return await self.inner.execute(request)
 
 
-def _live_executor_factory(workspace, db: Database, config: AgentsSdkModelConfig):
+def _live_executor_factory(
+    workspace,
+    db: Database,
+    config: AgentsSdkModelConfig,
+    recorder: ExecutorCallRecorder,
+):
     registry = ToolRegistry()
     policy = CommandPolicy([CommandRule(["pytest"], allow_extra_args=True)])
     register_workspace_tools(registry, workspace, policy)
@@ -254,7 +280,7 @@ def _live_executor_factory(workspace, db: Database, config: AgentsSdkModelConfig
         allowed_side_effect_capabilities=SIDE_EFFECT_CAPABILITIES,
         db=db,
     )
-    return BudgetedInnerAgentExecutor(inner)
+    return BudgetedInnerAgentExecutor(inner, recorder)
 
 
 def _task_objective() -> tuple[str, list[str], list[str]]:
@@ -289,22 +315,15 @@ def _new_orchestrator(
 ):
     manager = RunWorkspaceManager(db, sessions_root)
     validator = FixturePytestValidator(sessions_root)
+    recorder = ExecutorCallRecorder()
     if mode == "deterministic_process_recovery_fixture":
         if worker == "a":
-            executors: dict[str, Any] = {}
-
             def factory(workspace):
-                executor = DryRunCrashExecutor(workspace)
-                executors["current"] = executor
-                return executor
+                return DryRunCrashExecutor(workspace, recorder)
 
         else:
-            executors = {}
-
             def factory(workspace):
-                executor = DryRunResumeExecutor(workspace)
-                executors["current"] = executor
-                return executor
+                return DryRunResumeExecutor(workspace, recorder)
 
         executor_type = "ScriptedProcessRecoveryExecutor"
         provider = "deterministic"
@@ -313,9 +332,8 @@ def _new_orchestrator(
         config = AgentsSdkModelConfig(provider_profile="mimo", api_mode="chat_completions")
 
         def factory(workspace):
-            return _live_executor_factory(workspace, db, config)
+            return _live_executor_factory(workspace, db, config, recorder)
 
-        executors = {}
         executor_type = "InnerAgentExecutor"
         provider = "mimo"
         model = config.model or ""
@@ -334,7 +352,7 @@ def _new_orchestrator(
         dataset_version="HV12-SESSION-LIFECYCLE-1",
         experiment_id="HV12-LONGTASK-BASELINE",
     )
-    return orchestrator, validator, executors
+    return orchestrator, validator, recorder
 
 
 def _worker_a(args: argparse.Namespace) -> int:
@@ -344,7 +362,7 @@ def _worker_a(args: argparse.Namespace) -> int:
         task = TaskRepository(db).get(args.task_id)
         if task is None:
             return 2
-        orchestrator, _validator, _executors = _new_orchestrator(
+        orchestrator, _validator, _recorder = _new_orchestrator(
             db,
             task=task,
             sessions_root=Path(args.sessions_root),
@@ -370,7 +388,7 @@ def _worker_b(args: argparse.Namespace) -> int:
     db = Database(args.db_path)
     db.init_db()
     validator: FixturePytestValidator | None = None
-    executors: dict[str, Any] = {}
+    recorder: ExecutorCallRecorder | None = None
     try:
         run = RunRepository(db).get(args.run_id)
         if run is None:
@@ -378,7 +396,7 @@ def _worker_b(args: argparse.Namespace) -> int:
         task = TaskRepository(db).get(run.task_id)
         if task is None:
             return 2
-        orchestrator, validator, executors = _new_orchestrator(
+        orchestrator, validator, recorder = _new_orchestrator(
             db,
             task=task,
             sessions_root=Path(args.sessions_root),
@@ -387,11 +405,10 @@ def _worker_b(args: argparse.Namespace) -> int:
             worker="b",
         )
         resumed = asyncio.run(orchestrator.resume_run(run.id))
-        current = executors.get("current")
         summary = {
             "run_status": resumed.status.value,
             "validator_calls": validator.calls if validator else None,
-            "executor_calls": list(getattr(current, "calls", [])) if current else [],
+            "executor_calls": list(recorder.attempt_numbers) if recorder else [],
         }
         Path(args.control_dir).mkdir(parents=True, exist_ok=True)
         (Path(args.control_dir) / "process-b-summary.json").write_text(
@@ -412,21 +429,21 @@ def _worker_b(args: argparse.Namespace) -> int:
 def _child_env() -> dict[str, str]:
     env = os.environ.copy()
     entries = [str(REPO_ROOT / "src"), str(REPO_ROOT)]
-    venv_site_packages = Path(sys.prefix) / "Lib" / "site-packages"
-    if venv_site_packages.is_dir():
-        entries.append(str(venv_site_packages))
     if env.get("PYTHONPATH"):
         entries.append(env["PYTHONPATH"])
     env["PYTHONPATH"] = os.pathsep.join(entries)
     return env
 
 
+def _worker_python_command() -> list[str]:
+    """Return the active evaluation interpreter, including under uv on Linux."""
+
+    return [sys.executable]
+
+
 def _spawn_worker(role: str, args: argparse.Namespace, *, run_id: str | None = None) -> subprocess.Popen:
-    executable = Path(sys.executable)
-    base_executable = Path(getattr(sys, "_base_executable", ""))
-    python_command = [str(base_executable)] if base_executable.is_file() else [sys.executable]
     command = [
-        *python_command,
+        *_worker_python_command(),
         str(Path(__file__).resolve()),
         "--role",
         f"worker-{role}",
@@ -578,6 +595,34 @@ def _safe_usage(raw: Any) -> dict[str, int | None]:
     return result
 
 
+def _persisted_completion_claim(persisted_result: dict[str, Any]) -> bool | None:
+    """Read the claim from the nested InnerAgentResult when available."""
+
+    candidates = [persisted_result]
+    raw = persisted_result.get("raw")
+    if isinstance(raw, dict):
+        candidates.append(raw)
+    for candidate in candidates:
+        value = candidate.get("completion_claim")
+        if isinstance(value, bool):
+            return value
+    return None
+
+
+def _termination_status(attempt, inner_event) -> str:
+    if attempt.error_type == "PROCESS_INTERRUPTED":
+        return "FORCED_PROCESS_TERMINATION"
+    if attempt.error_type == "AGENT_TURN_LIMIT":
+        return "TURN_LIMIT"
+    if attempt.status is AttemptStatus.COMPLETED:
+        return "COMPLETED"
+    if attempt.error_type:
+        return attempt.error_type
+    if inner_event is not None and inner_event.event_type.value == "INNER_AGENT_COMPLETED":
+        return "COMPLETED"
+    return attempt.status.value
+
+
 def _attempt_metrics(db: Database, run_id: str) -> list[dict[str, Any]]:
     attempts = AttemptRepository(db).list_for_run(run_id)
     events = EventStore(db).list_for_run(run_id)
@@ -628,11 +673,8 @@ def _attempt_metrics(db: Database, run_id: str) -> list[dict[str, Any]]:
                 "inner_agent_status": (
                     "SUCCESS" if completed else "FAILURE" if failed else None
                 ),
-                "termination_status": (
-                    "FORCED_PROCESS_TERMINATION"
-                    if attempt.error_type == "PROCESS_INTERRUPTED"
-                    else attempt.status.value
-                ),
+                "error_type": attempt.error_type,
+                "termination_status": _termination_status(attempt, inner_event),
                 "turn_count": inner_payload.get("turn_count", safe_result.get("turn_count")) if trace_complete else None,
                 "tool_call_count": inner_payload.get("tool_call_count", safe_result.get("tool_call_count")) if trace_complete else None,
                 "tool_calls_by_capability": by_capability if trace_complete else None,
@@ -641,7 +683,7 @@ def _attempt_metrics(db: Database, run_id: str) -> list[dict[str, Any]]:
                 "tool_failures_by_capability": failure_by_capability if trace_complete else None,
                 "duration_ms": attempt.duration_ms,
                 **_safe_usage(usage),
-                "completion_claim_present": safe_result.get("completion_claim") if trace_complete else None,
+                "completion_claim_present": _persisted_completion_claim(safe_result),
                 "context_policy": snapshot.policy if snapshot else None,
                 "checkpoint_used": snapshot_metrics.get("checkpoint_used") if isinstance(snapshot_metrics, dict) else None,
                 "checkpoint_created": any(checkpoint.attempt_id == attempt.id for checkpoint in checkpoints),
@@ -731,6 +773,55 @@ def _read_worker_error(control_dir: Path, worker: str) -> str | None:
     return error_type if isinstance(error_type, str) else None
 
 
+def _git_identity() -> tuple[str | None, bool]:
+    """Return HEAD and whether the code was clean before the evaluation ran."""
+
+    try:
+        sha_result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=str(REPO_ROOT),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            check=False,
+        )
+        status_result = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=str(REPO_ROOT),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        return None, False
+    sha = sha_result.stdout.strip() if sha_result.returncode == 0 else None
+    clean = status_result.returncode == 0 and not status_result.stdout.strip()
+    return sha or None, clean
+
+
+def _write_evidence(path: Path, payload: dict[str, Any], *, exclusive: bool) -> None:
+    """Write JSON atomically; live evidence uses exclusive creation."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    serialized = json.dumps(payload, indent=2, sort_keys=True) + "\n"
+    if exclusive:
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        fd = os.open(str(path), flags, 0o644)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(serialized)
+        return
+    temporary = path.with_name(f".{path.name}.{os.getpid()}.{time.time_ns()}.tmp")
+    try:
+        temporary.write_text(serialized, encoding="utf-8")
+        os.replace(str(temporary), str(path))
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+
+
 def run_evaluation(
     *,
     mode: str = "deterministic_process_recovery_fixture",
@@ -739,11 +830,14 @@ def run_evaluation(
     poll_interval: float = 0.2,
     resume_timeout: float = 180.0,
 ) -> dict[str, Any]:
-    if mode == "live_real_model" and not (os.getenv("ODYS_AGENT_MODEL") and os.getenv("ODYS_AGENT_API_KEY")):
-        return {"status": "SKIPPED_CONFIG", "mode": mode, "live_run_executed": False}
     if output_path is None:
         output_path = DEFAULT_LIVE_OUTPUT if mode == "live_real_model" else DEFAULT_DRY_OUTPUT
+    if mode == "live_real_model" and output_path.exists():
+        return {"status": "LIVE_RESULT_EXISTS", "mode": mode, "live_run_executed": False}
+    if mode == "live_real_model" and not (os.getenv("ODYS_AGENT_MODEL") and os.getenv("ODYS_AGENT_API_KEY")):
+        return {"status": "SKIPPED_CONFIG", "mode": mode, "live_run_executed": False}
     started = time.monotonic()
+    git_sha, code_commit_clean = _git_identity()
     fixture_source_sha = tree_sha256(FIXTURE_ROOT)
     # Windows can release a killed child's SQLite handle a little after the
     # parent observes process termination; keep cleanup bounded and harmless.
@@ -753,6 +847,7 @@ def run_evaluation(
         sessions_root = root / "sessions"
         control_dir = root / "control"
         shutil.copytree(FIXTURE_ROOT, source_root)
+        source_snapshot_sha_before = tree_sha256(source_root)
         initial_tests = _pytest(source_root)
         db_path = root / "run.sqlite"
         db = Database(db_path)
@@ -810,13 +905,13 @@ def run_evaluation(
 
         final_state = _read_snapshot(db_path, source_root, run_id)
         final_tests = {"status": "FAIL", "exit_code": None, "timed_out": False, "duration_ms": 0}
-        if final_state["work_tree_sha"]:
-            final_tests = _pytest(
-                Path(
-                    _local_session_root(db_path, run_id)[1] / "work"  # type: ignore[operator]
-                )
-            ) if run_id and _local_session_root(db_path, run_id)[1] else final_tests
-        source_unchanged = tree_sha256(FIXTURE_ROOT) == fixture_source_sha
+        if final_state["work_tree_sha"] and run_id:
+            _session_id, final_session_root = _local_session_root(db_path, run_id)
+            if final_session_root is not None:
+                final_tests = _pytest(final_session_root / "work")
+        source_snapshot_sha_after = tree_sha256(source_root)
+        repository_fixture_unchanged = tree_sha256(FIXTURE_ROOT) == fixture_source_sha
+        temporary_source_snapshot_unchanged = source_snapshot_sha_after == source_snapshot_sha_before
         db = Database(db_path)
         db.init_db()
         try:
@@ -863,7 +958,8 @@ def run_evaluation(
                 (
                     functional_validation_passed,
                     outer_task_completed,
-                    source_unchanged,
+                    repository_fixture_unchanged,
+                    temporary_source_snapshot_unchanged,
                     same_workspace,
                     final_patch_nonempty,
                     process_recovery_passed,
@@ -873,8 +969,15 @@ def run_evaluation(
                 "status": status,
                 "mode": mode,
                 "evaluation_id": "HV12-DRY-001" if mode != "live_real_model" else "HV12-LIVE-001",
+                "phase": PHASE,
+                "git_sha": git_sha,
+                "code_commit_clean": code_commit_clean,
                 "harness_version": HARNESS_VERSION,
+                "fixture_version": FIXTURE_VERSION,
                 "fixture": "evals/fixtures/hv12_session_lifecycle",
+                "fixture_source_sha": fixture_source_sha,
+                "source_snapshot_sha_before": source_snapshot_sha_before,
+                "source_snapshot_sha_after": source_snapshot_sha_after,
                 "task_id": task.id,
                 "run_id": run_id,
                 "max_attempts": MAX_ATTEMPTS,
@@ -895,7 +998,9 @@ def run_evaluation(
                 "agent_completion_passed": agent_completion_passed,
                 "outer_task_completed": outer_task_completed,
                 "process_recovery_passed": process_recovery_passed,
-                "source_repository_unchanged": source_unchanged,
+                "repository_fixture_unchanged": repository_fixture_unchanged,
+                "temporary_source_snapshot_unchanged": temporary_source_snapshot_unchanged,
+                "source_repository_unchanged": repository_fixture_unchanged,
                 "durable_workspace_session_reused": same_workspace,
                 "validator_final_patch_nonempty": final_patch_nonempty,
                 "pre_crash_tool_trace_complete": bool(
@@ -918,9 +1023,17 @@ def run_evaluation(
                     "files_changed_at_crash": (pre_crash_state or {}).get("files_changed", 0),
                     "patch_sha_at_crash": (pre_crash_state or {}).get("patch_sha256"),
                     "attempts_before_crash": int((post_crash_state or {}).get("attempt_count", 0)),
+                    "attempts_before_resume": int((post_crash_state or {}).get("attempt_count", 0)),
                     "attempts_total": len(attempt_metrics),
                     "crashed_attempts": sum(1 for metric in attempt_metrics if metric["attempt_status"] == "CRASHED"),
-                    "new_attempts_after_resume": max(0, len(attempt_metrics) - 1) if process_b_started else 0,
+                    "new_attempts_after_resume": (
+                        max(
+                            0,
+                            len(attempt_metrics) - int((post_crash_state or {}).get("attempt_count", 0)),
+                        )
+                        if process_b_started
+                        else 0
+                    ),
                     "resume_validation_passed": first_validation.passed if first_validation else None,
                     "checkpoints_created": len(checkpoints),
                     "cp3_attempts": sum(1 for metric in attempt_metrics if metric.get("context_policy") == "CP-3"),
@@ -929,7 +1042,9 @@ def run_evaluation(
                     "executor_calls_after_resume": worker_summary.get("executor_calls"),
                     "validator_calls_after_resume": worker_summary.get("validator_calls"),
                     **duplicates,
-                    "source_unchanged": source_unchanged,
+                    "repository_fixture_unchanged": repository_fixture_unchanged,
+                    "temporary_source_snapshot_unchanged": temporary_source_snapshot_unchanged,
+                    "source_unchanged": temporary_source_snapshot_unchanged,
                 },
                 "evidence_safety": {
                     "raw_diff_persisted": False,
@@ -944,9 +1059,13 @@ def run_evaluation(
             }
         finally:
             db.close()
-    if output_path is not None and (mode != "live_real_model" or not output_path.exists()):
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_path.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    if output_path is not None:
+        try:
+            _write_evidence(output_path, result, exclusive=mode == "live_real_model")
+        except FileExistsError:
+            if mode != "live_real_model":
+                raise
+            return {"status": "LIVE_RESULT_EXISTS", "mode": mode, "live_run_executed": False}
     return result
 
 
