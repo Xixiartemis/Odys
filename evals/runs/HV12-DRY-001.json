@@ -1,0 +1,154 @@
+{
+  "agent_completion_passed": false,
+  "allowed_capabilities": [
+    "workspace.list",
+    "workspace.read",
+    "workspace.search",
+    "workspace.edit",
+    "workspace.diff",
+    "cli.exec"
+  ],
+  "allowed_side_effect_capabilities": [
+    "workspace.edit"
+  ],
+  "attempt_metrics": [
+    {
+      "attempt_number": 1,
+      "attempt_status": "CRASHED",
+      "checkpoint_created": true,
+      "checkpoint_used": null,
+      "completion_claim_present": null,
+      "context_policy": "CP-2",
+      "duration_ms": null,
+      "inner_agent_status": null,
+      "input_tokens": null,
+      "output_tokens": null,
+      "pre_crash_tool_trace_complete": false,
+      "termination_status": "FORCED_PROCESS_TERMINATION",
+      "tool_call_count": null,
+      "tool_calls_by_capability": null,
+      "tool_failure_count": null,
+      "tool_failures_by_capability": null,
+      "tool_failures_by_type": null,
+      "total_tokens": null,
+      "turn_count": null
+    },
+    {
+      "attempt_number": 2,
+      "attempt_status": "COMPLETED",
+      "checkpoint_created": false,
+      "checkpoint_used": true,
+      "completion_claim_present": null,
+      "context_policy": "CP-3",
+      "duration_ms": 15,
+      "inner_agent_status": null,
+      "input_tokens": null,
+      "output_tokens": null,
+      "pre_crash_tool_trace_complete": false,
+      "termination_status": "COMPLETED",
+      "tool_call_count": null,
+      "tool_calls_by_capability": null,
+      "tool_failure_count": null,
+      "tool_failures_by_capability": null,
+      "tool_failures_by_type": null,
+      "total_tokens": null,
+      "turn_count": null
+    }
+  ],
+  "cli_policy": [
+    "pytest"
+  ],
+  "crash": {
+    "post_crash_state": {
+      "attempt_count": 1,
+      "changed_files": [
+        "src/session_store.py"
+      ],
+      "files_changed": 1,
+      "latest_attempt_status": "RUNNING",
+      "patch_sha256": "0a33f72bce9761e9ac8a75329c8adbbe21657852b75d84b05adb4cb5d327332b",
+      "run_status": "RUNNING",
+      "source_tree_sha": "7be0f4fce670826443b9fd39d0db24af3c904278571d6246893358ea3528dc74",
+      "task_status": "RUNNING",
+      "work_tree_sha": "b89fff8bb629bfb4734fc241ee40b1fb2e5abe0b55de0375ce07f902353188e3",
+      "workspace_session_id": "c1a56e22af70c1c0ecc77047cc2c049d"
+    },
+    "process_a_exit_code": 1,
+    "process_a_forced_termination": true,
+    "process_a_pid": 30128,
+    "process_a_termination_mechanism": "subprocess.Popen.terminate",
+    "trigger": "DURABLE_MUTATION_STABLE"
+  },
+  "durable_workspace_session_reused": true,
+  "evaluation_id": "HV12-DRY-001",
+  "evidence_safety": {
+    "credentials_persisted": false,
+    "raw_diff_persisted": false,
+    "raw_model_transcript_persisted": false,
+    "raw_stdout_stderr_persisted": false,
+    "raw_tool_arguments_persisted": false
+  },
+  "final_tests": {
+    "duration_ms": 625,
+    "exit_code": 0,
+    "status": "PASS",
+    "timed_out": false
+  },
+  "fixture": "evals/fixtures/hv12_session_lifecycle",
+  "functional_validation_passed": true,
+  "harness_version": "HV-1.2",
+  "initial_tests": {
+    "duration_ms": 687,
+    "exit_code": 1,
+    "status": "FAIL",
+    "timed_out": false
+  },
+  "inner_turn_budget": 20,
+  "live_config_gated": true,
+  "live_run_executed": false,
+  "max_attempts": 3,
+  "mode": "deterministic_process_recovery_fixture",
+  "outer_harness_metrics": {
+    "attempts_before_crash": 1,
+    "attempts_total": 2,
+    "checkpoints_created": 1,
+    "cp3_attempts": 1,
+    "crash_trigger": "DURABLE_MUTATION_STABLE",
+    "crashed_attempts": 1,
+    "duplicate_attempts": 0,
+    "duplicate_checkpoints": 0,
+    "duplicate_failure_reports": 0,
+    "duplicate_recovery_actions": 0,
+    "duplicate_validations": 0,
+    "executor_calls_after_resume": [
+      2
+    ],
+    "files_changed_at_crash": 1,
+    "new_attempts_after_resume": 1,
+    "patch_sha_at_crash": "0a33f72bce9761e9ac8a75329c8adbbe21657852b75d84b05adb4cb5d327332b",
+    "process_a_forced_termination": true,
+    "process_instances": 3,
+    "resume_validation_passed": false,
+    "same_workspace_session_after_restart": true,
+    "source_unchanged": true,
+    "validator_calls_after_resume": 2,
+    "workspace_session_id": "c1a56e22af70c1c0ecc77047cc2c049d"
+  },
+  "outer_task_completed": true,
+  "pre_crash_tool_trace_complete": false,
+  "process_recovery_passed": true,
+  "provider": {
+    "api_key_configured": false,
+    "api_mode": null,
+    "base_url_configured": false,
+    "model": "scripted-process-recovery",
+    "provider_profile": "deterministic"
+  },
+  "run_id": "da0ffa412b2e4cc9af6baefa1f4344e8",
+  "source_repository_unchanged": true,
+  "status": "PASS",
+  "task_id": "67cc8029318b41d9810ffbfa0c5a9ce6",
+  "total_wall_duration_ms": 8891,
+  "validator_final_patch_nonempty": true,
+  "worker_error_types": {}
+}

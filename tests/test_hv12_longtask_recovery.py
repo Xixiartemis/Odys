@@ -1,0 +1,56 @@
+"""Offline contract tests for the manual HV-1.2 evaluation infrastructure."""
+
+from pathlib import Path
+import shutil
+
+from scripts.hv12_longtask_recovery import (
+    FIXTURE_ROOT,
+    _diff_summary,
+    _pytest,
+    run_evaluation,
+)
+
+
+def test_hv12_fixture_starts_red_and_has_no_source_mutation(tmp_path):
+    fixture = tmp_path / "fixture"
+    shutil.copytree(FIXTURE_ROOT, fixture)
+
+    before = _pytest(fixture)
+    assert before["status"] == "FAIL"
+    assert _diff_summary(fixture, fixture)["files_changed"] == 0
+
+
+def test_hv12_dry_run_crosses_real_subprocess_boundary_and_resumes(tmp_path):
+    output = tmp_path / "HV12-DRY-test.json"
+
+    result = run_evaluation(
+        output_path=output,
+        observation_timeout=15,
+        poll_interval=0.1,
+        resume_timeout=30,
+    )
+
+    assert result["status"] == "PASS"
+    assert result["mode"] == "deterministic_process_recovery_fixture"
+    assert result["initial_tests"]["status"] == "FAIL"
+    assert result["final_tests"]["status"] == "PASS"
+    assert result["crash"]["trigger"] == "DURABLE_MUTATION_STABLE"
+    assert result["crash"]["process_a_forced_termination"] is True
+    assert result["process_recovery_passed"] is True
+    assert result["durable_workspace_session_reused"] is True
+    assert result["outer_harness_metrics"]["cp3_attempts"] >= 1
+    assert result["evidence_safety"]["raw_diff_persisted"] is False
+    assert output.is_file()
+
+
+def test_hv12_live_mode_is_config_gated(monkeypatch, tmp_path):
+    monkeypatch.delenv("ODYS_AGENT_MODEL", raising=False)
+    monkeypatch.delenv("ODYS_AGENT_API_KEY", raising=False)
+
+    result = run_evaluation(mode="live_real_model", output_path=tmp_path / "live.json")
+
+    assert result == {
+        "status": "SKIPPED_CONFIG",
+        "mode": "live_real_model",
+        "live_run_executed": False,
+    }
