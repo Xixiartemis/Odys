@@ -89,6 +89,12 @@ The primary regression models the live failure shape with Attempt 2 returning
 workspace. Attempt 2 remains `FAILED`, Run and Task complete, and Attempt 3 is
 absent.
 
+W-A through W-D explicitly persist `AttemptStatus.FAILED` with
+`error_type=AGENT_TURN_LIMIT` before the fresh resume. Their assertions inspect
+the durable pre-resume validation/report state and the bounded
+`outcome_arbitration=true` validation-start payload, so these windows do not
+exercise the pre-existing completed-attempt validation path.
+
 ## METRICS
 
 Measured from the deterministic E6-D test matrix:

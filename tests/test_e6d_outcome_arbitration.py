@@ -299,10 +299,18 @@ def test_non_workspace_failure_keeps_hv12_no_validator_behavior(tmp_path):
         db.close()
 
 
-def _crashed_case(tmp_path, crash_point: CrashPoint, *, validator_outcomes: dict[int, bool], mutations=()):
+def _crashed_case(
+    tmp_path,
+    crash_point: CrashPoint,
+    *,
+    validator_outcomes: dict[int, bool],
+    failures=(),
+    mutations=(),
+):
     db, task, calls, validator, orchestrator, db_path, source, sessions_root = _make_case(
         tmp_path,
         validation_outcomes=validator_outcomes,
+        failures=failures,
         mutations=mutations,
         crash_point=crash_point,
     )
@@ -333,29 +341,65 @@ def _resume_case(db_path: Path, task_id: str, run_id: str, sessions_root: Path, 
 
 def test_w_a_crash_after_failed_result_resumes_and_validates_once(tmp_path):
     db_path, task_id, run_id, _calls, _validator_calls, _source, sessions_root = _crashed_case(
-        tmp_path, CrashPoint.AFTER_EXECUTOR_PERSISTED, validator_outcomes={1: True}, mutations={1}
+        tmp_path,
+        CrashPoint.AFTER_EXECUTOR_PERSISTED,
+        validator_outcomes={1: True},
+        failures={1},
+        mutations={1},
     )
+    db_before = Database(db_path)
+    try:
+        attempt = AttemptRepository(db_before).list_for_run(run_id)[0]
+        assert attempt.status is AttemptStatus.FAILED
+        assert attempt.error_type == "AGENT_TURN_LIMIT"
+        assert ValidationResultRepository(db_before).get_for_attempt(attempt.id) is None
+    finally:
+        db_before.close()
     db, run, calls, validator = _resume_case(
         db_path, task_id, run_id, sessions_root, validator_outcomes={1: True}
     )
     try:
         assert run.status is RunStatus.COMPLETED
+        attempt = AttemptRepository(db).list_for_run(run_id)[0]
+        assert attempt.status is AttemptStatus.FAILED
+        assert attempt.error_type == "AGENT_TURN_LIMIT"
         assert calls == []
         assert validator.calls == [1]
         assert _counts(db, run_id) == {"attempts": 1, "validations": 1, "reports": 0, "actions": 0, "checkpoints": 0}
+        validation_started = next(
+            event
+            for event in EventStore(db).list_for_run(run_id)
+            if event.event_type is EventType.VALIDATION_STARTED
+        )
+        assert validation_started.payload["outcome_arbitration"] is True
+        assert validation_started.payload["executor_attempt_status"] == "FAILED"
     finally:
         db.close()
 
 
 def test_w_b_crash_after_validation_pass_resumes_without_revalidation(tmp_path):
     db_path, task_id, run_id, _calls, _validator_calls, _source, sessions_root = _crashed_case(
-        tmp_path, CrashPoint.AFTER_VALIDATION_PERSISTED, validator_outcomes={1: True}, mutations={1}
+        tmp_path,
+        CrashPoint.AFTER_VALIDATION_PERSISTED,
+        validator_outcomes={1: True},
+        failures={1},
+        mutations={1},
     )
+    db_before = Database(db_path)
+    try:
+        attempt = AttemptRepository(db_before).list_for_run(run_id)[0]
+        validation = ValidationResultRepository(db_before).get_for_attempt(attempt.id)
+        assert attempt.status is AttemptStatus.FAILED
+        assert attempt.error_type == "AGENT_TURN_LIMIT"
+        assert validation is not None and validation.passed is True
+    finally:
+        db_before.close()
     db, run, calls, validator = _resume_case(
         db_path, task_id, run_id, sessions_root, validator_outcomes={1: True}
     )
     try:
         assert run.status is RunStatus.COMPLETED
+        assert AttemptRepository(db).list_for_run(run_id)[0].status is AttemptStatus.FAILED
         assert calls == []
         assert validator.calls == []
         assert _counts(db, run_id) == {"attempts": 1, "validations": 1, "reports": 0, "actions": 0, "checkpoints": 0}
@@ -365,8 +409,20 @@ def test_w_b_crash_after_validation_pass_resumes_without_revalidation(tmp_path):
 
 def test_w_c_crash_after_validation_fail_continues_recovery(tmp_path):
     db_path, task_id, run_id, _calls, _validator_calls, _source, sessions_root = _crashed_case(
-        tmp_path, CrashPoint.AFTER_VALIDATION_PERSISTED, validator_outcomes={1: False}
+        tmp_path,
+        CrashPoint.AFTER_VALIDATION_PERSISTED,
+        validator_outcomes={1: False},
+        failures={1},
     )
+    db_before = Database(db_path)
+    try:
+        attempt = AttemptRepository(db_before).list_for_run(run_id)[0]
+        validation = ValidationResultRepository(db_before).get_for_attempt(attempt.id)
+        assert attempt.status is AttemptStatus.FAILED
+        assert attempt.error_type == "AGENT_TURN_LIMIT"
+        assert validation is not None and validation.passed is False
+    finally:
+        db_before.close()
     db, run, calls, validator = _resume_case(
         db_path,
         task_id,
@@ -376,16 +432,28 @@ def test_w_c_crash_after_validation_fail_continues_recovery(tmp_path):
     )
     try:
         assert run.status is RunStatus.COMPLETED
+        attempts = AttemptRepository(db).list_for_run(run_id)
+        assert attempts[0].status is AttemptStatus.FAILED
+        assert attempts[0].error_type == "AGENT_TURN_LIMIT"
         assert calls == [2]
         assert validator.calls == [2]
         assert _counts(db, run_id) == {"attempts": 2, "validations": 2, "reports": 1, "actions": 1, "checkpoints": 1}
+        checkpoint = CheckpointRepository(db).list_for_run(run_id)[0]
+        assert checkpoint.attempt_number == 1
+        assert checkpoint.attempt_id == attempts[0].id
+        second_snapshot = __import__("lhas.persistence.phaseb_repos", fromlist=["ContextSnapshotRepository"]).ContextSnapshotRepository(db).get(attempts[1].context_snapshot_id)
+        assert second_snapshot is not None and second_snapshot.policy == "CP-3"
     finally:
         db.close()
 
 
 def test_w_d_existing_failure_report_does_not_bypass_validation(tmp_path):
     db_path, task_id, run_id, _calls, _validator_calls, _source, sessions_root = _crashed_case(
-        tmp_path, CrashPoint.AFTER_EXECUTOR_PERSISTED, validator_outcomes={1: True}, mutations={1}
+        tmp_path,
+        CrashPoint.AFTER_EXECUTOR_PERSISTED,
+        validator_outcomes={1: True},
+        failures={1},
+        mutations={1},
     )
     db = Database(db_path)
     db.init_db()
@@ -401,6 +469,10 @@ def test_w_d_existing_failure_report_does_not_bypass_validation(tmp_path):
             suggested_recovery="retry",
         )
     )
+    assert attempt.status is AttemptStatus.FAILED
+    assert attempt.error_type == "AGENT_TURN_LIMIT"
+    assert ValidationResultRepository(db).get_for_attempt(attempt.id) is None
+    assert FailureReportRepository(db).get_for_attempt(attempt.id) is not None
     db.close()
 
     db, run, calls, validator = _resume_case(
@@ -408,10 +480,17 @@ def test_w_d_existing_failure_report_does_not_bypass_validation(tmp_path):
     )
     try:
         assert run.status is RunStatus.COMPLETED
+        assert AttemptRepository(db).list_for_run(run_id)[0].status is AttemptStatus.FAILED
         assert calls == []
         assert validator.calls == [1]
         assert RecoveryActionRepository(db).get_for_attempt(attempt.id) is None
         assert CheckpointRepository(db).list_for_run(run_id) == []
         assert _counts(db, run_id) == {"attempts": 1, "validations": 1, "reports": 1, "actions": 0, "checkpoints": 0}
+        validation_started = next(
+            event
+            for event in EventStore(db).list_for_run(run_id)
+            if event.event_type is EventType.VALIDATION_STARTED
+        )
+        assert validation_started.payload["outcome_arbitration"] is True
     finally:
         db.close()
