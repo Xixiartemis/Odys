@@ -60,3 +60,30 @@ does not implement process restart or resume.
 Recent history is an explicit allowlisted projection. Unknown event payloads
 are not copied into executor context, and reconstruction failures emit only a
 bounded error type in `CONTEXT_RECONSTRUCTION_FAILED`.
+
+## DD-E6D-POST-NON-SUCCESS-OUTCOME-ARBITRATION
+
+**Design decision.** For durable workspace-backed `FAILED` and `TIMED_OUT`
+attempts, the Outer Validator arbitrates the current workspace before failure
+classification and recovery. A passing validation completes Run and Task while
+the Attempt retains its authoritative executor status and persisted result.
+
+**Tradeoff.** This adds one bounded validator call after a non-success outcome,
+but may avoid an unnecessary retry when durable work already satisfies the
+acceptance criteria. A validation failure follows the existing classifier,
+recovery, checkpoint, and CP-3 path.
+
+**Failed approach.** HV-1.2 classified workspace-backed executor failures
+before validation, allowing `AGENT_TURN_LIMIT` to consume another attempt even
+when the durable workspace might already be sufficient. E6-D changes the
+ordering without changing executor budgets, tool policy, provider behavior, or
+CP-3 reconstruction semantics.
+
+**Known limitation.** This arbitration is intentionally limited to workspace-
+backed `FAILED` / `TIMED_OUT` attempts. `CRASHED` / `PROCESS_INTERRUPTED`
+recovery and non-workspace execution retain their existing behavior. The
+historical HV12 Attempt 2 post-state remains `NOT_MEASURED`.
+
+**Next hypothesis.** A future live evaluation with a new ID can measure whether
+post-non-success validation avoids unnecessary retries while preserving the
+Outer Validator as acceptance authority. Dynamic Replan remains out of scope.

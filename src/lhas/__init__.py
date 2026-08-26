@@ -6,8 +6,9 @@ __version__ = "0.1.0"
 # policy changes (docs/12_EXPERIMENT_PROTOCOL.md). Phase B added the
 # Hardening modified Prompt Template / Validation / Recovery Context wiring;
 # Phase E5 introduced durable checkpoints and bounded context reconstruction;
-# E6-C adds deterministic crash-window-aware resume and generalized continuation -> HV-1.2.
-HARNESS_VERSION = "HV-1.2"
+# E6-C adds deterministic crash-window-aware resume and generalized continuation;
+# E6-D adds post-non-success arbitration for durable workspace FAILED/TIMED_OUT attempts -> HV-1.3.
+HARNESS_VERSION = "HV-1.3"
 
 from .resume import CrashPoint, NoOpCrashInjector, ResumeAction, ResumeDecision, ResumeDecisionService, ResumeInspection
 

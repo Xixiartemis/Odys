@@ -31,6 +31,7 @@ class ResumeAction(str, Enum):
     START_FIRST_ATTEMPT = "START_FIRST_ATTEMPT"
     RECOVER_INTERRUPTED_ATTEMPT = "RECOVER_INTERRUPTED_ATTEMPT"
     VALIDATE_COMPLETED_ATTEMPT = "VALIDATE_COMPLETED_ATTEMPT"
+    VALIDATE_NON_SUCCESS_ATTEMPT = "VALIDATE_NON_SUCCESS_ATTEMPT"
     COMPLETE_FROM_PERSISTED_VALIDATION = "COMPLETE_FROM_PERSISTED_VALIDATION"
     CLASSIFY_PERSISTED_VALIDATION_FAILURE = "CLASSIFY_PERSISTED_VALIDATION_FAILURE"
     CLASSIFY_ATTEMPT_FAILURE = "CLASSIFY_ATTEMPT_FAILURE"
@@ -143,6 +144,19 @@ class ResumeDecisionService:
             if state.failure_report is None:
                 return ResumeDecision(ResumeAction.CLASSIFY_PERSISTED_VALIDATION_FAILURE, "validation failure is durable; report is absent", latest.id)
         elif latest.status in {AttemptStatus.FAILED, AttemptStatus.TIMED_OUT}:
+            if self.workspace_enabled:
+                if state.validation is None:
+                    return ResumeDecision(
+                        ResumeAction.VALIDATE_NON_SUCCESS_ATTEMPT,
+                        "workspace-backed non-success attempt needs outcome arbitration",
+                        latest.id,
+                    )
+                if state.validation.passed:
+                    return ResumeDecision(
+                        ResumeAction.COMPLETE_FROM_PERSISTED_VALIDATION,
+                        "non-success attempt validation passed",
+                        latest.id,
+                    )
             if state.failure_report is None:
                 return ResumeDecision(ResumeAction.CLASSIFY_ATTEMPT_FAILURE, "executor failure is durable; report is absent", latest.id)
         elif latest.status is AttemptStatus.CRASHED:
