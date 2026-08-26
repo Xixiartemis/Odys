@@ -194,6 +194,9 @@ class RecoveringOrchestrator(Orchestrator):
             if action is ResumeAction.VALIDATE_COMPLETED_ATTEMPT:
                 await self._validate_persisted_attempt(state)
                 continue
+            if action is ResumeAction.VALIDATE_NON_SUCCESS_ATTEMPT:
+                await self._validate_persisted_attempt(state, outcome_arbitration=True)
+                continue
             if action is ResumeAction.COMPLETE_FROM_PERSISTED_VALIDATION:
                 return self._complete_from_state(state)
             if action is ResumeAction.CLASSIFY_PERSISTED_VALIDATION_FAILURE:
@@ -265,16 +268,41 @@ class RecoveringOrchestrator(Orchestrator):
         )
         await self._validate_result(task, run, attempt, result, recovery_origin=True)
 
-    async def _validate_persisted_attempt(self, state) -> None:
+    async def _validate_persisted_attempt(self, state, *, outcome_arbitration: bool = False) -> None:
         result = self._result_for_attempt(state.latest_attempt)
-        await self._validate_result(state.task, state.run, state.latest_attempt, result)
+        await self._validate_result(
+            state.task,
+            state.run,
+            state.latest_attempt,
+            result,
+            outcome_arbitration=outcome_arbitration,
+        )
 
-    async def _validate_result(self, task, run, attempt, result, recovery_origin: bool = False) -> ValidationResult:
+    async def _validate_result(
+        self,
+        task,
+        run,
+        attempt,
+        result,
+        recovery_origin: bool = False,
+        outcome_arbitration: bool = False,
+    ) -> ValidationResult:
         existing = self.validation_repo.get_for_attempt(attempt.id)
         if existing is not None:
             return existing
+        payload: dict[str, Any] = {}
+        if recovery_origin:
+            payload["recovery_origin"] = "PROCESS_RESUME"
+        if outcome_arbitration:
+            payload.update(
+                {
+                    "outcome_arbitration": True,
+                    "executor_attempt_status": attempt.status.value,
+                    "executor_error_type": attempt.error_type,
+                }
+            )
         self._emit(EventType.VALIDATION_STARTED, task=task, run=run, attempt=attempt,
-                   payload={"recovery_origin": "PROCESS_RESUME"} if recovery_origin else None)
+                   payload=payload or None)
         validation = await self.validator.validate(task=task, attempt=attempt, result=result)
         self.validation_repo.create(validation)
         self._crash(CrashPoint.AFTER_VALIDATION_PERSISTED, task=task, run=run, attempt=attempt)

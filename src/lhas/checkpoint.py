@@ -122,6 +122,9 @@ _SAFE_EVENT_FIELDS = {
     EventType.ATTEMPT_TIMED_OUT: {"attempt_number", "reason", "error_type"},
     EventType.ATTEMPT_CRASHED: {"attempt_number", "reason", "error_type"},
     EventType.ATTEMPT_COMPLETED: {"attempt_number"},
+    EventType.VALIDATION_STARTED: {
+        "recovery_origin", "outcome_arbitration", "executor_attempt_status", "executor_error_type",
+    },
     EventType.FAILURE_CLASSIFIED: {"failure_type", "failure_class", "suggested_recovery"},
     EventType.RECOVERY_DECIDED: {"action", "attempt_to"},
     EventType.RECOVERY_STARTED: {"action", "next_attempt"},
