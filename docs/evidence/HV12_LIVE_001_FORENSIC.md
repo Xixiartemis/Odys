@@ -83,11 +83,12 @@ was already correct; its post-attempt pytest state was not measured.
 
 ## Secondary finding and limitation
 
-The real-model agent spent all post-resume turns on edit attempts, with
-`EDIT_TARGET_NOT_FOUND` as the dominant safe tool failure. The evidence supports
-an edit-target robustness problem, but it does not establish that this was the
-only cause of the incomplete outer task. No raw transcript or credentials are
-part of the evidence.
+The post-resume agent made 57 tool calls. All 16 recorded tool failures came
+from `workspace.edit`, with `EDIT_TARGET_NOT_FOUND=15` and
+`EDIT_TARGET_AMBIGUOUS=1`. The evidence therefore supports an edit-target
+robustness problem, but does not establish it as the only cause of the
+incomplete outer task. No raw transcript or credentials are part of the
+evidence.
 
 ## Next hypothesis
 
