@@ -1,0 +1,19 @@
+{
+  "eval_id": "E6-RESUME-002",
+  "harness_version": "HV-1.1",
+  "mode": "deterministic_file_backed_restart",
+  "scenario": "durable_candidate_fails_then_cp3_retry_repairs",
+  "source_repo_unchanged": true,
+  "process_boundary": "separate Database instances over one SQLite file",
+  "attempts": [
+    {"attempt_number": 1, "status_before_resume": "RUNNING", "status_after_resume": "CRASHED", "error_type": "PROCESS_INTERRUPTED"},
+    {"attempt_number": 2, "status_after_resume": "COMPLETED", "context_policy": "CP-3"}
+  ],
+  "resume_validation": "FAIL_THEN_RETRY_PASS",
+  "executor_calls_after_resume": 1,
+  "same_workspace_after_retry": true,
+  "recovery_checkpoint": true,
+  "final_run_status": "COMPLETED",
+  "workspace_recovery_state": {"raw_diff_persisted": false, "patch_sha256_recorded": true},
+  "test": "test_manual_resume_recovery_creates_cp3_retry_in_same_workspace"
+}

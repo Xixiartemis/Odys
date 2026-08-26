@@ -1,0 +1,29 @@
+{
+  "run_id": "E6-WS-001",
+  "phase": "E6",
+  "harness_version": "HV-1.0",
+  "scenario": "durable_workspace_restart",
+  "source_files": [
+    "src/calculator.py",
+    "tests/test_calculator.py"
+  ],
+  "workspace_files": [
+    "src/calculator.py",
+    "tests/test_calculator.py"
+  ],
+  "files_modified_before_restart": [
+    "src/calculator.py"
+  ],
+  "files_modified_after_restart": [
+    "src/calculator.py"
+  ],
+  "patch_sha_before_restart": "b3e3c9a6eac7c22e5ec7d84bd5e011ec461e3fb31b448522275b8dc4daa5dfc9",
+  "patch_sha_after_restart": "b3e3c9a6eac7c22e5ec7d84bd5e011ec461e3fb31b448522275b8dc4daa5dfc9",
+  "restart_patch_equal": true,
+  "source_unchanged": true,
+  "baseline_integrity_verified": true,
+  "source_drift_detection_tested": true,
+  "corruption_detection_tested": true,
+  "runtime_metrics": null,
+  "token_metrics": null
+}

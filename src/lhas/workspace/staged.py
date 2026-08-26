@@ -9,11 +9,16 @@ class StagingRootConflict(Exception): pass
 
 class StagedWorkspace(LocalReadOnlyWorkspace):
     """Mutable workspace backed by a private copy; never writes source_root."""
-    def __init__(self, source_root, staging_root, limits=None):
+    def __init__(self, source_root, staging_root, limits=None, baseline_root=None):
         self.source_root=Path(source_root).resolve(); self._staging_owner=False
         super().__init__(staging_root, limits)
         self._baseline={}
-        for p in self._iter_files(): self._baseline[p.relative_to(self.root).as_posix()] = p.read_bytes()
+        baseline_base=Path(baseline_root).resolve() if baseline_root is not None else self.root
+        if baseline_root is None or baseline_base == self.root:
+            for p in self._iter_files(): self._baseline[p.relative_to(self.root).as_posix()] = p.read_bytes()
+        else:
+            for p in self._iter_files_under(baseline_base):
+                self._baseline[p.relative_to(baseline_base).as_posix()] = p.read_bytes()
     @classmethod
     def create(cls, source_root, staging_root=None, limits=None):
         source=Path(source_root).resolve(); limits=limits or WorkspaceLimits()
@@ -47,6 +52,13 @@ class StagedWorkspace(LocalReadOnlyWorkspace):
     def _iter_files(self):
         for p in self.root.rglob("*"):
             if p.is_file() and self._safe_discovered(p) is not None: yield p
+    @staticmethod
+    def _iter_files_under(root):
+        root=Path(root).resolve()
+        for p in root.rglob("*"):
+            candidate=p.resolve(strict=False)
+            if candidate != root and root not in candidate.parents: continue
+            if p.is_file() and not p.is_symlink(): yield p
     @staticmethod
     def _sha(data): return hashlib.sha256(data).hexdigest()
     async def edit_file(self, path, old_text, new_text, expected_sha256=None):

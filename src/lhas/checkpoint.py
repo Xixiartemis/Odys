@@ -98,7 +98,13 @@ class WorkingStateProjector:
                 state.last_attempt_number=max(state.last_attempt_number,int(payload.get("attempt_number",state.last_attempt_number)))
                 state.last_completion_claim=bool(payload.get("completion_claim", state.last_completion_claim or False)); state.tool_call_count=max(state.tool_call_count,int(payload.get("tool_call_count",state.tool_call_count)))
             elif event.event_type == EventType.FAILURE_CLASSIFIED: state.last_failure_type=payload.get("failure_type")
-            elif event.event_type == EventType.RECOVERY_DECIDED: state.last_recovery_action=payload.get("action_type")
+            elif event.event_type == EventType.RECOVERY_DECIDED:
+                # ``action`` is canonical; ``action_type`` is retained for
+                # historical event payloads written before E6.
+                state.last_recovery_action=payload.get("action") or payload.get("action_type")
+            elif event.event_type == EventType.WORKSPACE_RECOVERY_STATE:
+                state.files_modified.extend(payload.get("changed_files", []))
+                state.candidate_patch_summary={k:payload[k] for k in ("changed_files","files_changed","lines_added","lines_removed","truncated","patch_sha256") if k in payload}
         return state.bounded()
 
 
@@ -121,6 +127,10 @@ _SAFE_EVENT_FIELDS = {
     EventType.RECOVERY_STARTED: {"action", "next_attempt"},
     EventType.VALIDATION_FAILED: {"passed"},
     EventType.VALIDATION_PASSED: {"passed"},
+    EventType.WORKSPACE_RECOVERY_STATE: {
+        "changed_files", "files_changed", "lines_added", "lines_removed",
+        "truncated", "patch_sha256",
+    },
 }
 
 

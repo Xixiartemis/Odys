@@ -13,6 +13,7 @@ from lhas.domain.models import json_dumps, json_loads
 from lhas.failure import FailureReport
 from lhas.persistence.database import Database
 from lhas.persistence.orm import (
+    AttemptRow,
     ContextSnapshotRow,
     FailureReportRow,
     RecoveryActionRow,
@@ -57,9 +58,13 @@ class ContextSnapshotRepository:
     def list_for_attempt(self, attempt_id: str) -> list[ContextSnapshot]:
         with self._db.session() as session:
             rows = session.execute(
-                select(ContextSnapshotRow).where(ContextSnapshotRow.attempt_id == attempt_id)
+                select(ContextSnapshotRow).where(ContextSnapshotRow.attempt_id == attempt_id).order_by(ContextSnapshotRow.created_at, ContextSnapshotRow.id)
             ).scalars().all()
             return [self._from_row(r) for r in rows]
+
+    def latest_for_attempt(self, attempt_id: str) -> Optional[ContextSnapshot]:
+        values = self.list_for_attempt(attempt_id)
+        return values[-1] if values else None
 
     def _from_row(self, r: ContextSnapshotRow) -> ContextSnapshot:
         return ContextSnapshot(
@@ -89,9 +94,13 @@ class ValidationResultRepository:
     def list_for_attempt(self, attempt_id: str) -> list[ValidationResult]:
         with self._db.session() as session:
             rows = session.execute(
-                select(ValidationResultRow).where(ValidationResultRow.attempt_id == attempt_id)
+                select(ValidationResultRow).where(ValidationResultRow.attempt_id == attempt_id).order_by(ValidationResultRow.created_at, ValidationResultRow.id)
             ).scalars().all()
             return [self._from_row(r) for r in rows]
+
+    def get_for_attempt(self, attempt_id: str) -> Optional[ValidationResult]:
+        values = self.list_for_attempt(attempt_id)
+        return values[-1] if values else None
 
     def _from_row(self, r: ValidationResultRow) -> ValidationResult:
         from lhas.validation import ValidationCheck
@@ -122,9 +131,13 @@ class FailureReportRepository:
     def list_for_attempt(self, attempt_id: str) -> list[FailureReport]:
         with self._db.session() as session:
             rows = session.execute(
-                select(FailureReportRow).where(FailureReportRow.attempt_id == attempt_id)
+                select(FailureReportRow).where(FailureReportRow.attempt_id == attempt_id).order_by(FailureReportRow.created_at, FailureReportRow.id)
             ).scalars().all()
             return [self._from_row(r) for r in rows]
+
+    def get_for_attempt(self, attempt_id: str) -> Optional[FailureReport]:
+        values = self.list_for_attempt(attempt_id)
+        return values[-1] if values else None
 
     def _from_row(self, r: FailureReportRow) -> FailureReport:
         from lhas.domain.enums import FailureClass, FailureType
@@ -155,7 +168,21 @@ class RecoveryActionRepository:
     def list_for_attempt(self, attempt_id: str) -> list[RecoveryAction]:
         with self._db.session() as session:
             rows = session.execute(
-                select(RecoveryActionRow).where(RecoveryActionRow.attempt_id == attempt_id)
+                select(RecoveryActionRow).where(RecoveryActionRow.attempt_id == attempt_id).order_by(RecoveryActionRow.created_at, RecoveryActionRow.id)
+            ).scalars().all()
+            return [self._from_row(r) for r in rows]
+
+    def get_for_attempt(self, attempt_id: str) -> Optional[RecoveryAction]:
+        values = self.list_for_attempt(attempt_id)
+        return values[-1] if values else None
+
+    def list_for_run(self, run_id: str) -> list[RecoveryAction]:
+        with self._db.session() as session:
+            rows = session.execute(
+                select(RecoveryActionRow)
+                .join(AttemptRow, AttemptRow.id == RecoveryActionRow.attempt_id)
+                .where(AttemptRow.run_id == run_id)
+                .order_by(RecoveryActionRow.created_at, RecoveryActionRow.id)
             ).scalars().all()
             return [self._from_row(r) for r in rows]
 

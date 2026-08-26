@@ -6,8 +6,17 @@
 | E3 | HV-0.8 | 188 passed (repository closeout record) | N/A | Read-only Workspace and Safe CLI | Not recorded as a benchmark | NOT_RUN | Historical tokens/duration/success rate unavailable |
 | E4 | HV-0.9 | 203 passed | SUCCESS (CI verified at `40d4c53`; final PR #8 merged as `0b981ff`) | Staged edit/test loop and candidate patch artifact | 1/1, one outer attempt, six inner calls, one file | NOT_RUN | Live metrics unavailable; implementation diff and final PR diff are separate in E4 summary |
 | E5 | HV-1.0 | 228 passed locally | PASS (PR merge-result workflow) | Durable checkpoint and bounded CP-3 context reconstruction | 120 events, cursor 100, replay 20, 0.8333333333333334 replay reduction, restart equal | Two real MiMo fixture runs; functional 2/2, agent completion 0/2, both TURN_LIMIT | Tokens unavailable; no latency or termination improvement; scope is E5 calculator fixture calibration only |
+| E6-B | HV-1.1 | 239 passed locally | PASS (exact-head push CI) | Manual process resume with durable run/workspace binding | Two restart scenarios: validate-without-retry and CP-3 retry in same workspace | NOT_RUN | Historical baseline; superseded by E6-C crash-window evidence |
+| E6-C | HV-1.2 | 254 passed locally | PASS (exact-head push CI) | Crash-window-aware durable resume and generalized continuation | 10 crash windows recovered; 3 CREATING-root scenarios; 3-attempt continuation; W5/W7 closeout contracts | NOT_RUN | No live provider or external side-effect exactly-once semantics |
 
 Metric semantics are explicit: implementation and deterministic test facts are not benchmark claims. `scripts/e5_live_model_smoke.py` is manual-only and CI remains offline. Missing historical fields remain N/A rather than being estimated.
+
+## E6 final PR scale
+
+Measured from `origin/main` to the final E6 PR head after the closeout patch:
+the final PR has **5 commits**, **29 changed files**, **2039 additions**, and
+**176 deletions**. The deterministic evidence contains 13 traceable scenarios:
+10 crash windows plus 3 CREATING-root binding cases.
 
 ## E5 real-run comparison
 

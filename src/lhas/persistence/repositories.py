@@ -10,7 +10,7 @@ from sqlalchemy import select
 from lhas.domain.enums import TaskStatus
 from lhas.domain.models import Attempt, Event, Project, Run, Task, json_dumps, json_loads
 from lhas.persistence.database import Database
-from lhas.persistence.orm import AttemptRow, EventRow, ProjectRow, RunRow, TaskRow
+from lhas.persistence.orm import AttemptRow, EventRow, ProjectRow, RunRow, TaskRow, WorkspaceSessionRow
 
 
 def _now() -> datetime:
@@ -33,6 +33,13 @@ class ProjectRepository:
     def get_by_name(self, name: str) -> Optional[Project]:
         with self._db.session() as session:
             row = session.execute(select(ProjectRow).where(ProjectRow.name == name)).scalar_one_or_none()
+            if row is None:
+                return None
+            return Project(id=row.id, name=row.name, type=row.type, root_path=row.root_path, created_at=row.created_at)
+
+    def get(self, project_id: str) -> Optional[Project]:
+        with self._db.session() as session:
+            row = session.get(ProjectRow, project_id)
             if row is None:
                 return None
             return Project(id=row.id, name=row.name, type=row.type, root_path=row.root_path, created_at=row.created_at)
@@ -219,4 +226,49 @@ class AttemptRepository:
             executor_result=r.executor_result, usage=json_loads(r.usage) or {}, failure_type=r.failure_type,
             error_type=r.error_type, error_message=r.error_message, output=r.output,
             duration_ms=r.duration_ms, created_at=r.created_at, updated_at=r.updated_at,
+        )
+
+
+class WorkspaceSessionBindingRepository:
+    """Minimal registry; file contents and workspace output stay on disk."""
+
+    def __init__(self, db: Database):
+        self._db = db
+
+    def create(self, binding):
+        with self._db.session() as session:
+            session.add(WorkspaceSessionRow(
+                session_id=binding.session_id, run_id=binding.run_id,
+                task_id=binding.task_id, session_root=binding.session_root,
+                state=binding.state, created_at=binding.created_at,
+                updated_at=binding.updated_at,
+            ))
+        return binding
+
+    def get_by_run(self, run_id: str):
+        with self._db.session() as session:
+            row = session.execute(select(WorkspaceSessionRow).where(WorkspaceSessionRow.run_id == run_id)).scalar_one_or_none()
+            return self._from_row(row) if row else None
+
+    def get(self, session_id: str):
+        with self._db.session() as session:
+            row = session.get(WorkspaceSessionRow, session_id)
+            return self._from_row(row) if row else None
+
+    def update_state(self, session_id: str, state: str):
+        with self._db.session() as session:
+            row = session.get(WorkspaceSessionRow, session_id)
+            if row is None:
+                raise KeyError(f"Workspace session {session_id} not found")
+            row.state = state
+            row.updated_at = _now()
+            return self._from_row(row)
+
+    @staticmethod
+    def _from_row(row):
+        from lhas.workspace.registry import WorkspaceSessionBinding
+        return WorkspaceSessionBinding(
+            session_id=row.session_id, run_id=row.run_id, task_id=row.task_id,
+            session_root=row.session_root, state=row.state,
+            created_at=row.created_at, updated_at=row.updated_at,
         )

@@ -1,0 +1,28 @@
+{
+  "eval_id": "E6-RESUME-003",
+  "harness_version": "HV-1.2",
+  "mode": "deterministic_file_backed_restart",
+  "scenario": "process_resume_then_multiple_recovery_attempts",
+  "process_boundary": "separate Database instances over one SQLite file",
+  "attempt_count": 3,
+  "attempts": [
+    {"attempt_number": 1, "status": "CRASHED", "error_type": "PROCESS_INTERRUPTED"},
+    {"attempt_number": 2, "status": "COMPLETED", "validation": "FAIL", "context_policy": "CP-3"},
+    {"attempt_number": 3, "status": "COMPLETED", "validation": "PASS", "context_policy": "CP-3"}
+  ],
+  "executor_calls_after_resume": 2,
+  "validator_calls_after_resume": 3,
+  "recovery_checkpoints": 2,
+  "failure_reports": 2,
+  "recovery_actions": 2,
+  "same_workspace_after_retry": true,
+  "source_unchanged": true,
+  "final_run_status": "COMPLETED",
+  "final_task_status": "COMPLETED",
+  "duplicate_attempts": 0,
+  "duplicate_validations": 0,
+  "duplicate_failure_reports": 0,
+  "duplicate_recovery_actions": 0,
+  "duplicate_checkpoints": 0,
+  "test": "test_resume_continues_multiple_recovery_attempts_after_interruption"
+}

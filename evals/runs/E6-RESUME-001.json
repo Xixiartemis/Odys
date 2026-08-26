@@ -1,0 +1,17 @@
+{
+  "eval_id": "E6-RESUME-001",
+  "harness_version": "HV-1.1",
+  "mode": "deterministic_file_backed_restart",
+  "scenario": "durable_candidate_validates_without_retry",
+  "source_repo_unchanged": true,
+  "process_boundary": "separate Database instances over one SQLite file",
+  "attempts": [
+    {"attempt_number": 1, "status_before_resume": "RUNNING", "status_after_resume": "CRASHED", "error_type": "PROCESS_INTERRUPTED"}
+  ],
+  "resume_validation": "PASS",
+  "executor_calls_after_resume": 0,
+  "final_run_status": "COMPLETED",
+  "workspace_recovery_state": {"raw_diff_persisted": false, "patch_sha256_recorded": true},
+  "terminal_resume_idempotent": true,
+  "test": "test_manual_resume_validates_durable_workspace_without_retry"
+}

@@ -165,6 +165,20 @@ class CheckpointRow(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
+class WorkspaceSessionRow(Base):
+    """Durable workspace identity/location binding for an outer Run."""
+
+    __tablename__ = "workspace_sessions"
+
+    session_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    run_id: Mapped[str] = mapped_column(String(32), unique=True, nullable=False)
+    task_id: Mapped[str] = mapped_column(String(32), nullable=False)
+    session_root: Mapped[str] = mapped_column(Text, nullable=False)
+    state: Mapped[str] = mapped_column(String(16), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class ValidationResultRow(Base):
     """Validation outcome per attempt (docs/06)."""
 
