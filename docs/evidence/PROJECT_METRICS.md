@@ -8,8 +8,36 @@
 | E5 | HV-1.0 | 228 passed locally | PASS (PR merge-result workflow) | Durable checkpoint and bounded CP-3 context reconstruction | 120 events, cursor 100, replay 20, 0.8333333333333334 replay reduction, restart equal | Two real MiMo fixture runs; functional 2/2, agent completion 0/2, both TURN_LIMIT | Tokens unavailable; no latency or termination improvement; scope is E5 calculator fixture calibration only |
 | E6-B | HV-1.1 | 239 passed locally | PASS (exact-head push CI) | Manual process resume with durable run/workspace binding | Two restart scenarios: validate-without-retry and CP-3 retry in same workspace | NOT_RUN | Historical baseline; superseded by E6-C crash-window evidence |
 | E6-C | HV-1.2 | 254 passed locally | PASS (exact-head push CI) | Crash-window-aware durable resume and generalized continuation | 10 crash windows recovered; 3 CREATING-root scenarios; 3-attempt continuation; W5/W7 closeout contracts | NOT_RUN | No live provider or external side-effect exactly-once semantics |
+| HV12-LIVE-001 | HV-1.2 | 262 passed locally | PASS (exact-head CI for code/evidence branch) | Real-model long-task process recovery baseline | Real model; canonical status FAIL; functional repair PASS; outer completion FAIL; 3 attempts; 2 post-resume attempts; 40 post-resume turns; 57 post-resume tool calls; 16 post-resume tool failures; CP-3=2; same workspace; duplicate durable records=0; wall duration 412421 ms | MiMo v2.5, `real_model=true` | Tokens unavailable (`null`/not available); Attempt 2 post-state not measured |
 
 Metric semantics are explicit: implementation and deterministic test facts are not benchmark claims. `scripts/e5_live_model_smoke.py` is manual-only and CI remains offline. Missing historical fields remain N/A rather than being estimated.
+
+## HV12-LIVE-001 canonical metric row
+
+| Metric | Value |
+|---|---:|
+| Harness | HV-1.2 |
+| Model | MiMo v2.5 |
+| Real model | `true` |
+| Canonical status | `FAIL` |
+| Functional repair | `PASS` |
+| Outer task completion | `FAIL` |
+| Attempts | 3 |
+| Post-resume attempts | 2 |
+| Post-resume turns | 40 |
+| Post-resume tool calls | 57 |
+| Post-resume tool failures | 16 |
+| Tool failure rate | `16/57 ≈ 28.07%` |
+| CP-3 attempts | 2 |
+| Same workspace | `true` |
+| Duplicate durable records | 0 |
+| Wall duration (ms) | 412421 |
+| Token usage | `null` / not available |
+
+The 57 calls, 16 failures, 28.07% rate, and edit-target counts are derived
+from the immutable canonical attempt records. The canonical `FAIL` is retained
+even though the final functional test status is `PASS`, because the outer task
+did not complete.
 
 ## E6 final PR scale
 

@@ -3,6 +3,7 @@
 Harness: `HV-1.2`
 Evaluation: `HV12-DRY-001` (offline deterministic evidence; live remains manual)
 Offline artifact: `evals/runs/HV12-DRY-001.json`
+Canonical live artifact: `evals/runs/HV12-LIVE-001.json` (`FAIL`, immutable)
 Fixture version: `HV12-SESSION-LIFECYCLE-1`
 
 ## PURPOSE
@@ -59,6 +60,75 @@ The artifact records both `repository_fixture_unchanged=true` and
 `temporary_source_snapshot_unchanged=true`, with separate before/after hashes
 for the copied source snapshot. It also records `evaluation_id`, `phase`,
 `git_sha`, `harness_version`, and `fixture_version` at the top level.
+
+## LIVE_RUN_RESULT
+
+The first real-model run is retained unchanged as `HV12-LIVE-001` with
+`mode=live_real_model`, model `mimo-v2.5`, code SHA
+`7d63314ba08147042f841317da02589180c02b8f`, and `status=FAIL`. Its initial
+tests were `FAIL` and final tests were `PASS`, while
+`functional_validation_passed=true`, `agent_completion_passed=false`,
+`outer_task_completed=false`, and `process_recovery_passed=false`.
+
+The canonical live run had one durable attempt before resume and three total
+attempts, yielding two post-resume attempts. Both post-resume attempts used
+CP-3 and the executor call list was `[2, 3]`. The same workspace session was
+reused, all duplicate durable-row counts were zero, both source immutability
+checks were true, and `total_wall_duration_ms=412421`. Post-resume token
+metrics are `null`/not available.
+
+## OBSERVED_FAILURE
+
+Recovery mechanics were observed: Process A was forcibly terminated after a
+stable durable mutation, a fresh Process B called `resume_run(run_id)`, the
+same workspace was reused, and CP-3 continuation occurred twice. The canonical
+composite remains `process_recovery_passed=false` because the benchmark
+requires final outer Run and Task completion. The run is intentionally not
+turned into a PASS by the final pytest result.
+
+Attempt 1 was `CRASHED` with `PROCESS_INTERRUPTED` and
+`FORCED_PROCESS_TERMINATION`. Attempts 2 and 3 were `FAILED` with
+`AGENT_TURN_LIMIT` and `TURN_LIMIT`, each at 20 turns. Only one validator call
+occurred after resume. Attempt 2's post-attempt pytest state was
+`NOT_MEASURED`; only the final workspace after Attempt 3 is known to pass
+pytest.
+
+## ROOT_CAUSE
+
+HV-1.2 `ResumeDecisionService` validates completed attempts without validation
+and performs workspace recovery validation for `PROCESS_INTERRUPTED`. Failed
+or timed-out attempts instead enter failure classification without first
+validating whether the durable workspace already satisfies the acceptance
+criteria. Consequently, an executor failure can prevent the Outer Validator
+from arbitrating useful durable workspace state before recovery consumes
+another attempt.
+
+This is a harness finding, not a claim that Attempt 2 was already correct.
+Its post-attempt pytest state was not measured.
+
+## SECONDARY_FINDING
+
+The post-resume agent made 57 tool calls with 16 tool failures, a derived
+failure rate of `16/57 ≈ 28.07%`. The safe tool-failure counts include
+`EDIT_TARGET_NOT_FOUND=15` and `EDIT_TARGET_AMBIGUOUS=1`. These are derived
+from the canonical attempt records; no raw transcript or credentials are
+persisted.
+
+## NEXT_HYPOTHESIS
+
+E6-D / HV-1.3 should introduce post-non-success outcome arbitration:
+
+```text
+Agent modifies workspace
+→ Agent ends AGENT_TURN_LIMIT
+→ Outer Validator runs
+→ Validator PASS
+→ Task COMPLETED
+→ no unnecessary next Attempt
+```
+
+If Validator FAILs, failure classification, recovery, checkpointing, and the
+next-attempt path should remain available. Dynamic Replan remains out of scope.
 
 ## CRASH_TRIGGER
 
@@ -164,7 +234,7 @@ stdout/stderr into the evidence file.
 - Dynamic replan is intentionally absent; this is a recovery-only HV-1.2
   baseline and does not enter E7.
 
-## NEXT_HYPOTHESIS
+## DRY_RUN_NEXT_HYPOTHESIS
 
 If HV-1.2 resumes and completes but needs repeated recovery attempts because
 the underlying strategy is wrong, E7 Dynamic Replan is justified. If state is
@@ -183,5 +253,6 @@ ODYS_AGENT_MODEL=<model> ODYS_AGENT_API_KEY=<key> \
 python scripts/hv12_longtask_recovery.py --mode live_real_model
 ```
 
-The implementation performed no live run and does not create
-`evals/runs/HV12-LIVE-001.json`.
+The deterministic implementation did not create the canonical live artifact.
+`HV12-LIVE-001` is immutable and must not be retried; any future live
+comparison requires a new evaluation ID.
