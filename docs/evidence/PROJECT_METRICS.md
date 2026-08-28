@@ -11,6 +11,7 @@
 | HV12-LIVE-001 | HV-1.2 | 262 passed locally | PASS (exact-head CI for code/evidence branch) | Real-model long-task process recovery baseline | Real model; canonical status FAIL; functional repair PASS; outer completion FAIL; 3 attempts; 2 post-resume attempts; 40 post-resume turns; 57 post-resume tool calls; 16 post-resume tool failures; CP-3=2; same workspace; duplicate durable records=0; wall duration 412421 ms | MiMo v2.5, `real_model=true` | Tokens unavailable (`null`/not available); Attempt 2 post-state not measured |
 | E6-D | HV-1.3 | 271 passed locally | NOT_RUN (local implementation) | Post-non-success outcome arbitration for durable workspace attempts | 5 arbitration-pass scenarios; 3 arbitration-fail scenarios; 2 timeout scenarios; 4 restart windows; duplicate validation/report/action/checkpoint rows 0; 5 scenario-level unnecessary attempts avoided | NOT_RUN | Deterministic only; no live improvement claim; historical Attempt 2 remains NOT_MEASURED |
 | HV13-DRY-001 | HV-1.3 | 287 passed locally | NOT_RUN (local preflight correction) | Controlled real-process long-task validation harness with safe live evidence preflight | Clean code SHA `194dfff`; initial pytest FAIL; forced stable-mutation termination; fresh Process B; same workspace; 2 attempts; Attempt 1 CRASHED/PROCESS_INTERRUPTED; Attempt 2 FAILED/AGENT_TURN_LIMIT; final pytest PASS; Run/Task COMPLETED; CP-3=1; 1 bounded arbitration event, latest Attempt 2 PASS; Attempt 3 absent; historical recovery=true; mechanics=true; duplicate durable rows=0; safe attempt metrics retained; source and temporary snapshot unchanged | NOT_RUN | Deterministic only; completion claim is durable-evidence-derived; live result/claim not created; no causal improvement claim |
+| HV13-LIVE-001 | HV-1.3 | 287 passed locally | See PR #13 exact-head checks | Real-model long-task recovery with post-non-success Outcome Arbitration | Canonical status FAIL; initial/final pytest FAIL; 3 attempts; CP-3=2; 40 post-resume turns; 58 tool calls; 19 failures; edit failures 17/20; 2 arbitration-fail events; same workspace; duplicate durable rows=0; source and temporary snapshot unchanged | MiMo v2.5, `live_real_model`; canonical FAIL | Single run only; tokens unavailable; raw diff/stdout/transcript and exact final failing assertion intentionally not retained; no success-rate claim |
 
 Metric semantics are explicit: implementation and deterministic test facts are not benchmark claims. `scripts/e5_live_model_smoke.py` is manual-only and CI remains offline. Missing historical fields remain N/A rather than being estimated.
 
@@ -40,6 +41,45 @@ The 57 calls, 16 failures, 28.07% rate, and edit-target counts are derived
 from the immutable canonical attempt records. The canonical `FAIL` is retained
 even though the final functional test status is `PASS`, because the outer task
 did not complete.
+
+## HV13-LIVE-001 canonical metric row
+
+| Metric | Value |
+|---|---:|
+| Harness | HV-1.3 |
+| Model | MiMo v2.5 |
+| Canonical status | `FAIL` |
+| Initial pytest | `FAIL` |
+| Final pytest | `FAIL` |
+| Functional validation | `false` |
+| Agent completion | `false` |
+| Outer task completion | `false` |
+| Attempts | 3 |
+| CP-3 attempts | 2 |
+| Post-resume turns | 40 |
+| Post-resume tool calls | 58 |
+| Post-resume tool failures | 19 |
+| Tool failure rate | `19/58 = 32.76%` |
+| `workspace.edit` calls / failures | 20 / 17 |
+| `workspace.edit` failure rate | `17/20 = 85.00%` |
+| `cli.exec` calls / failures | 2 / 2 |
+| Outcome Arbitration events / passes | 2 / 0 |
+| Same workspace | `true` |
+| Duplicate durable records | 0 |
+| Source repository unchanged | `true` |
+| Token usage | `null` / not available |
+
+Outcome Arbitration correctly rejected invalid state after Attempts 2 and 3.
+The latest `next_attempt_suppressed_after_arbitration=true` field observes no
+later attempt; it does not prove causal suppression because Attempt 3 was
+already the configured maximum and validation was false.
+
+### HV12/HV13 single-run comparison warning
+
+**SINGLE-RUN PAIRED OBSERVATION:** HV12 ended with final pytest PASS, 57 calls,
+and 16 failures; HV13 ended with final pytest FAIL, 58 calls, and 19 failures.
+Both used 40 post-resume turns and both outer tasks failed. These two stochastic
+runs do not establish that HV-1.3 reduced or worsened success rate.
 
 ## E6 final PR scale
 
