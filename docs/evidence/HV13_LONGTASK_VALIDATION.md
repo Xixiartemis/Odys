@@ -11,7 +11,9 @@ completion.
 
 The deterministic artifact is `evals/runs/HV13-DRY-001.json`. The future live
 artifact is reserved as `evals/runs/HV13-LIVE-001.json` but was not created by
-this task.
+this task. The corrected dry artifact was generated from clean code commit
+`194dfffcd43a197af8676dac1793693440ba2027`; it records that exact `git_sha`
+and `code_commit_clean=true`.
 
 ## BASELINE
 
@@ -64,8 +66,16 @@ Recorded deterministic shape:
 | Executor calls after resume | `[2]` |
 | Validator calls after resume | 2 |
 | Run / Task | `COMPLETED / COMPLETED` |
+| Outcome arbitration events | 1, not truncated; latest summary is Attempt 2 PASS |
+| Historical recovery / mechanics recovery | `true / true` |
 | Source and temporary snapshot unchanged | `true / true` |
 | Duplicate validation/report/action/checkpoint rows | `0 / 0 / 0 / 0` |
+
+Each attempt also retains the bounded safe metrics already used by HV12:
+attempt and inner-agent status, error and termination type, turns, tool calls
+and failures by safe category, duration, token usage where available, explicit
+completion-claim presence, context/checkpoint fields, and trace completeness.
+The killed Attempt 1 records unavailable turns/tool counts as `null`, not zero.
 
 ## SUCCESS_CONTRACT
 
@@ -81,7 +91,16 @@ The four historical booleans remain separate measurements:
 `outer_task_completed`, and `process_recovery_passed`. In this dry run they are
 `true`, `false`, `true`, and `true`, respectively. `long_horizon_result` is
 `PASS` because the long-horizon contract passed even though the executor did
-not provide a completion claim.
+not provide a completion claim. `agent_completion_passed` is derived only from
+an explicit completion claim in durable attempt evidence; Task completion does
+not imply an agent claim.
+
+For paired comparability, `process_recovery_passed` retains the HV12 meaning:
+stable durable mutation, forced termination, Process B started and exited 0,
+same workspace, and outer Task completion. The separate
+`process_recovery_mechanics_passed` measures lower-level mechanics/integrity,
+including final pytest, unchanged source snapshots, and zero duplicate durable
+rows. Both are `true` for HV13-DRY-001.
 
 ## ARBITRATION_OBSERVATION
 
@@ -90,12 +109,19 @@ Arbitration is detected from durable lifecycle evidence, specifically a
 from final status alone. HV13-DRY-001 records:
 
 - `outcome_arbitration_observed=true`
+- `outcome_arbitration_event_count=1`
+- `outcome_arbitration_events_truncated=false`
 - `outcome_arbitration_attempt_number=2`
 - `outcome_arbitration_executor_status=FAILED`
 - `outcome_arbitration_error_type=AGENT_TURN_LIMIT`
 - `outcome_arbitration_validation_passed=true`
 - `next_attempt_suppressed_after_arbitration=true`
 - `attempts_after_arbitration=0`
+
+`outcome_arbitration_events` preserves a bounded history of safe arbitration
+observations (maximum 100). If multiple non-success attempts are arbitrated,
+the singular fields summarize the latest durable arbitration event rather
+than the first; the total count and truncation flag make any bounding explicit.
 
 This is a deterministic observation of the E6-D path, not a causal claim that
 HV-1.3 improves stochastic live success rates.
@@ -109,6 +135,11 @@ the canonical claim marker already exists, and atomically creates
 `evals/runs/HV13-LIVE-001.claim.json` before starting Process A. Missing
 configuration returns `SKIPPED_CONFIG` without consuming the live ID or claim
 marker. There is no force-rerun escape hatch.
+
+Immediately before claim creation, HV13 captures `git_sha` and
+`code_commit_clean`. The claim and final result reuse that pre-execution
+identity, so the unignored claim marker cannot retroactively make a clean
+checkout appear dirty.
 
 Only bounded summaries may be persisted. API keys, authorization headers,
 provider transcripts, hidden reasoning, raw full diffs, full tool arguments,

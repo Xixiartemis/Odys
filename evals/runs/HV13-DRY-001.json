@@ -16,17 +16,47 @@
   "attempt_metrics": [
     {
       "attempt_number": 1,
+      "attempt_status": "CRASHED",
+      "checkpoint_created": true,
+      "checkpoint_used": null,
+      "completion_claim_present": null,
+      "context_policy": "CP-2",
+      "duration_ms": null,
       "error_type": "PROCESS_INTERRUPTED",
-      "status": "CRASHED",
-      "validation_passed": false,
-      "validation_persisted": true
+      "inner_agent_status": null,
+      "input_tokens": null,
+      "output_tokens": null,
+      "pre_crash_tool_trace_complete": false,
+      "termination_status": "FORCED_PROCESS_TERMINATION",
+      "tool_call_count": null,
+      "tool_calls_by_capability": null,
+      "tool_failure_count": null,
+      "tool_failures_by_capability": null,
+      "tool_failures_by_type": null,
+      "total_tokens": null,
+      "turn_count": null
     },
     {
       "attempt_number": 2,
+      "attempt_status": "FAILED",
+      "checkpoint_created": false,
+      "checkpoint_used": true,
+      "completion_claim_present": null,
+      "context_policy": "CP-3",
+      "duration_ms": 0,
       "error_type": "AGENT_TURN_LIMIT",
-      "status": "FAILED",
-      "validation_passed": true,
-      "validation_persisted": true
+      "inner_agent_status": null,
+      "input_tokens": null,
+      "output_tokens": null,
+      "pre_crash_tool_trace_complete": false,
+      "termination_status": "TURN_LIMIT",
+      "tool_call_count": null,
+      "tool_calls_by_capability": null,
+      "tool_failure_count": null,
+      "tool_failures_by_capability": null,
+      "tool_failures_by_type": null,
+      "total_tokens": null,
+      "turn_count": null
     }
   ],
   "attempts": [
@@ -66,10 +96,10 @@
       "source_tree_sha": "4e090a7c20fed9e655f75c9a7b4cc9ca19a8f1f14bb80a55835a3db46cd1b168",
       "task_status": "RUNNING",
       "work_tree_sha": "1767d1ca1af8a64fc4c7d08721661ce8f0c3ec7336d26da92f91bec919e4b1f0",
-      "workspace_session_id": "4af421273382fb9f7de1312a9c1120c7"
+      "workspace_session_id": "676a62a3577651891ef71160bea7dbb3"
     },
     "process_A_exit_code": 1,
-    "process_A_pid": 27564,
+    "process_A_pid": 33664,
     "termination_mechanism": "subprocess.Popen.terminate",
     "trigger": "DURABLE_MUTATION_STABLE"
   },
@@ -92,7 +122,7 @@
   "experiment_id": "HV13-LONGTASK-VALIDATION",
   "final_patch_nonempty": true,
   "final_tests": {
-    "duration_ms": 562,
+    "duration_ms": 483,
     "exit_code": 0,
     "status": "PASS",
     "timed_out": false
@@ -103,10 +133,10 @@
   "forced_process_termination": true,
   "fresh_process_b_created": true,
   "functional_validation_passed": true,
-  "git_sha": "7ec665a58b1e542d1d6acdbdc7aae2c250f7f14e",
+  "git_sha": "194dfffcd43a197af8676dac1793693440ba2027",
   "harness_version": "HV-1.3",
   "initial_tests": {
-    "duration_ms": 686,
+    "duration_ms": 594,
     "exit_code": 1,
     "status": "FAIL",
     "timed_out": false
@@ -120,6 +150,17 @@
   "next_attempt_suppressed_after_arbitration": true,
   "outcome_arbitration_attempt_number": 2,
   "outcome_arbitration_error_type": "AGENT_TURN_LIMIT",
+  "outcome_arbitration_event_count": 1,
+  "outcome_arbitration_events": [
+    {
+      "attempt_number": 2,
+      "error_type": "AGENT_TURN_LIMIT",
+      "executor_status": "FAILED",
+      "next_attempt_exists": false,
+      "validation_passed": true
+    }
+  ],
+  "outcome_arbitration_events_truncated": false,
   "outcome_arbitration_executor_status": "FAILED",
   "outcome_arbitration_observed": true,
   "outcome_arbitration_validation_passed": true,
@@ -148,12 +189,13 @@
     "source_unchanged": true,
     "temporary_source_snapshot_unchanged": true,
     "validator_calls_after_resume": 2,
-    "workspace_session_id": "4af421273382fb9f7de1312a9c1120c7"
+    "workspace_session_id": "676a62a3577651891ef71160bea7dbb3"
   },
   "outer_task_completed": true,
   "phase": "HV13_LONGTASK_VALIDATION",
   "process_A_exit_code": 1,
-  "process_A_pid": 27564,
+  "process_A_pid": 33664,
+  "process_recovery_mechanics_passed": true,
   "process_recovery_passed": true,
   "provider": {
     "api_key_configured": false,
@@ -164,7 +206,7 @@
   },
   "repository_fixture_unchanged": true,
   "resume_run_invoked": true,
-  "run_id": "fb07c949075d4b56abb8f6c8e0a3a899",
+  "run_id": "4a2cbf11508b459bace24d619edda4cb",
   "same_capability_policy": true,
   "same_crash_trigger_policy": true,
   "same_fixture": true,
@@ -175,9 +217,9 @@
   "source_snapshot_sha_after": "4e090a7c20fed9e655f75c9a7b4cc9ca19a8f1f14bb80a55835a3db46cd1b168",
   "source_snapshot_sha_before": "4e090a7c20fed9e655f75c9a7b4cc9ca19a8f1f14bb80a55835a3db46cd1b168",
   "status": "PASS",
-  "task_id": "8b3013f4396b4a59a966549b0f272484",
+  "task_id": "078ddaeea53c444a97eab20911aa60ef",
   "temporary_source_snapshot_unchanged": true,
   "termination_mechanism": "subprocess.Popen.terminate",
-  "total_wall_duration_ms": 10077,
+  "total_wall_duration_ms": 8218,
   "worker_error_types": {}
 }
