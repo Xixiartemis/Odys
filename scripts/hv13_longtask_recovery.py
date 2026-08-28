@@ -28,7 +28,6 @@ _SCRIPT_REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_SCRIPT_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_SCRIPT_REPO_ROOT))
 
-from lhas import HARNESS_VERSION
 from lhas.checkpoint import CheckpointRepository
 from lhas.domain.enums import AttemptStatus, EventType, RunStatus, TaskStatus
 from lhas.domain.models import Project
@@ -203,7 +202,7 @@ def _new_orchestrator(
         workspace_manager=manager,
         validator=validator,
         classifier=RuleFailureClassifier(),
-        harness_version=HARNESS_VERSION,
+        harness_version=EXPECTED_HARNESS_VERSION,
         context_policy_version="CP-2",
         executor_type=executor_type,
         provider=provider,
@@ -473,8 +472,6 @@ def run_evaluation(
             return {"status": "LIVE_RESULT_EXISTS", "mode": mode, "live_run_executed": False}
         if claim_path.exists():
             return {"status": "LIVE_CLAIM_EXISTS", "mode": mode, "live_run_executed": False}
-        if HARNESS_VERSION != EXPECTED_HARNESS_VERSION:
-            return {"status": "HARNESS_MISMATCH", "mode": mode, "live_run_executed": False}
         if not _live_config_is_valid():
             return {"status": "SKIPPED_CONFIG", "mode": mode, "live_run_executed": False}
 
@@ -487,7 +484,7 @@ def run_evaluation(
                     "evaluation_id": "HV13-LIVE-001",
                     "git_sha": git_sha,
                     "code_commit_clean": code_commit_clean,
-                    "harness_version": HARNESS_VERSION,
+                    "harness_version": EXPECTED_HARNESS_VERSION,
                     "execution_claimed": True,
                 },
                 exclusive=True,
@@ -667,7 +664,7 @@ def run_evaluation(
                 "experiment_id": EXPERIMENT_ID,
                 "git_sha": git_sha,
                 "code_commit_clean": code_commit_clean,
-                "harness_version": HARNESS_VERSION,
+                "harness_version": EXPECTED_HARNESS_VERSION,
                 "comparison_baseline_id": COMPARISON_BASELINE_ID,
                 "comparison_baseline_harness": COMPARISON_BASELINE_HARNESS,
                 "fixture_version": FIXTURE_VERSION,

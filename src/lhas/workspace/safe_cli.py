@@ -4,7 +4,13 @@ _META = re.compile(r"^(?:&&|\|\||>>|[;|><`])$")
 _SECRET = re.compile(r"(?:API_KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|AUTH|COOKIE)", re.I)
 class SafeCli:
     def __init__(self, workspace, policy, default_timeout=30, max_timeout=120, max_output_bytes=64*1024): self.workspace=workspace; self.policy=policy; self.default_timeout=default_timeout; self.max_timeout=max_timeout; self.max_output_bytes=max_output_bytes
-    def _env(self): return {k:v for k,v in os.environ.items() if not _SECRET.search(k) and k in {"PATH","SYSTEMROOT","WINDIR","TEMP","TMP","HOME","USERPROFILE","LANG","LC_ALL","VIRTUAL_ENV"}}
+    def _env(self):
+        env={k:v for k,v in os.environ.items() if not _SECRET.search(k) and k in {"PATH","SYSTEMROOT","WINDIR","TEMP","TMP","HOME","USERPROFILE","LANG","LC_ALL","VIRTUAL_ENV"}}
+        virtual_env=env.get("VIRTUAL_ENV")
+        if virtual_env:
+            scripts=os.path.join(virtual_env, "Scripts" if os.name == "nt" else "bin")
+            env["PATH"]=scripts + os.pathsep + env.get("PATH","")
+        return env
     async def execute(self, argv, cwd=".", timeout_seconds=None):
         if not isinstance(argv, list) or not argv or not all(isinstance(x,str) for x in argv) or any(_META.match(x) for x in argv): return None, "INVALID_ARGUMENTS"
         if not self.policy.allows(argv): return None, "COMMAND_NOT_ALLOWED"

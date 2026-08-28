@@ -61,6 +61,16 @@ class StagedWorkspace(LocalReadOnlyWorkspace):
             if p.is_file() and not p.is_symlink(): yield p
     @staticmethod
     def _sha(data): return hashlib.sha256(data).hexdigest()
+    @staticmethod
+    def _atomic_write(file, data):
+        tmp=None
+        try:
+            fd,tmp=tempfile.mkstemp(prefix=f".{file.name}.", dir=str(file.parent))
+            with os.fdopen(fd,"wb") as handle:
+                handle.write(data); handle.flush(); os.fsync(handle.fileno())
+            os.replace(tmp,file); tmp=None
+        finally:
+            if tmp: Path(tmp).unlink(missing_ok=True)
     async def edit_file(self, path, old_text, new_text, expected_sha256=None):
         file=self.resolve_path(path)
         if not file.exists(): raise FileNotFoundError(path)
@@ -75,25 +85,38 @@ class StagedWorkspace(LocalReadOnlyWorkspace):
         occurrences=text.count(old_text)
         if occurrences == 0: raise ValueError("EDIT_TARGET_NOT_FOUND")
         if occurrences > 1: raise ValueError("EDIT_TARGET_AMBIGUOUS")
-        updated=text.replace(old_text, new_text, 1).encode("utf-8"); tmp=None
-        try:
-            fd,tmp=tempfile.mkstemp(prefix=f".{file.name}.", dir=str(file.parent))
-            with os.fdopen(fd, "wb") as handle: handle.write(updated); handle.flush(); os.fsync(handle.fileno())
-            os.replace(tmp, file); tmp=None
-        finally:
-            if tmp: Path(tmp).unlink(missing_ok=True)
+        updated=text.replace(old_text, new_text, 1).encode("utf-8")
+        self._atomic_write(file, updated)
         after=self._sha(updated)
         return {"path":Path(path).as_posix(),"replacements":1,"before_sha256":before,"after_sha256":after,"bytes_before":len(data),"bytes_after":len(updated)}
+    async def edit_lines(self, path, start_line, end_line, new_lines, expected_sha256):
+        file=self.resolve_path(path)
+        if not file.exists(): raise FileNotFoundError(path)
+        if not file.is_file(): raise IsADirectoryError(path)
+        if file.is_symlink(): raise WorkspacePathEscape("WORKSPACE_PATH_ESCAPE")
+        data=file.read_bytes()
+        if b"\x00" in data: raise BinaryFileError("BINARY_FILE")
+        before=self._sha(data)
+        if not isinstance(expected_sha256,str) or not expected_sha256: raise ValueError("INVALID_ARGUMENTS")
+        if expected_sha256 != before: raise ValueError("STALE_FILE_VERSION")
+        if not isinstance(start_line,int) or isinstance(start_line,bool) or not isinstance(end_line,int) or isinstance(end_line,bool): raise ValueError("INVALID_LINE_RANGE")
+        if not isinstance(new_lines,list) or not all(isinstance(line,str) and "\n" not in line and "\r" not in line for line in new_lines): raise ValueError("INVALID_ARGUMENTS")
+        text=data.decode("utf-8"); lines=text.splitlines(keepends=True)
+        if start_line < 1 or end_line < start_line or end_line > len(lines): raise ValueError("INVALID_LINE_RANGE")
+        newline="\r\n" if any(line.endswith("\r\n") for line in lines) else "\n"
+        selected_reaches_eof=end_line == len(lines); had_final_newline=text.endswith(("\n","\r")); replacement=[]
+        for index,line in enumerate(new_lines):
+            needs_newline=(not selected_reaches_eof) or index < len(new_lines)-1 or had_final_newline
+            replacement.append(line + (newline if needs_newline else ""))
+        updated=("".join(lines[:start_line-1]) + "".join(replacement) + "".join(lines[end_line:])).encode("utf-8")
+        self._atomic_write(file, updated)
+        after=self._sha(updated)
+        return {"path":Path(path).as_posix(),"start_line":start_line,"end_line":end_line,"lines_written":len(new_lines),"before_sha256":before,"after_sha256":after,"bytes_before":len(data),"bytes_after":len(updated)}
     async def restore_file(self, path):
         rel=self.resolve_path(path).relative_to(self.root).as_posix()
         if rel not in self._baseline: raise FileNotFoundError(path)
-        file=self.resolve_path(path); data=self._baseline[rel]; tmp=None
-        try:
-            fd,tmp=tempfile.mkstemp(prefix=f".{file.name}.", dir=str(file.parent))
-            with os.fdopen(fd,"wb") as handle: handle.write(data); handle.flush(); os.fsync(handle.fileno())
-            os.replace(tmp,file); tmp=None
-        finally:
-            if tmp: Path(tmp).unlink(missing_ok=True)
+        file=self.resolve_path(path); data=self._baseline[rel]
+        self._atomic_write(file,data)
         return {"path":Path(path).as_posix(),"restored":True,"sha256":self._sha(data)}
     async def diff(self, path=None, max_diff_bytes=None):
         requested=self.limits.max_diff_bytes if max_diff_bytes is None else int(max_diff_bytes)

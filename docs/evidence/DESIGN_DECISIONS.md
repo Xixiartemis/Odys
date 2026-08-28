@@ -125,3 +125,48 @@ single-run paired observation and provides no stochastic success-rate estimate.
 
 E7-B — Dynamic Macro Replan remains deferred until lower-level tool robustness
 is measured.
+
+## DD-HV14-CLI-ALPHA-VERTICAL-SLICE
+
+**Design decision.** Make `odys` the primary Typer entry point while retaining
+`lhas` as a compatibility alias. The CLI is an application adapter over
+`RecoveringOrchestrator`, durable workspace binding, InnerAgentExecutor,
+ToolRegistry, explicit Outer Validation, EventStore, and CP-3. Product commands
+do not duplicate lifecycle or recovery state machines.
+
+**Design decision.** The user-supplied verification command is parsed to an
+explicit argv, executed without a shell in the staged workspace, and installed
+as an exact Inner Agent command policy. Validator exit code, rather than a
+model completion claim, is authoritative for Alpha functional acceptance.
+
+**Design decision.** Keep exact-target `workspace.edit` compatible and add
+version-checked `workspace.edit_lines` plus structured recovery metadata.
+Repeated failure adaptation uses only a SHA-256 argument signature and safe
+error identity. CP-3 receives bounded aggregate failure memory, never raw tool
+arguments.
+
+**Tradeoffs.** Exact command policy limits exploratory CLI flexibility and may
+require the user to choose a verification command that covers the full goal.
+Line editing requires a fresh file SHA and an extra read, but removes ambiguous
+substring targeting and makes stale edits explicit. Polling persisted state at
+four Hz is less immediate than in-process callbacks but keeps UI failure
+outside correctness.
+
+**Failed approaches.** The first offline vertical slice resolved `pytest` from
+an unrelated system Python because PATH did not explicitly prioritize the
+active Odys virtual environment. SafeCli now prepends the allowed
+`VIRTUAL_ENV/Scripts` or `bin` directory without changing argv or command
+policy. The first deterministic fixture repair corrected tenant-key isolation
+but left delayed-message recreation in the router; the final offline scenario
+repairs and validates both independent defects.
+
+**Known limitations.** Alpha supports one repository, one durable workspace,
+one sequential agent, and one explicit verification argv per Run. The
+deterministic offline profile is fixture-oriented product evidence, not a
+general autonomous coding benchmark. Terminal UI is polling-based; validation
+stdout/stderr is bounded; ordinary demos are rerunnable and are not canonical
+evidence.
+
+**Next hypothesis.** Measure E7-A tool ergonomics and verification discipline
+on additional non-canonical product demos before any new canonical real-model
+run. E7-B Dynamic Macro Replan remains deferred and is not implemented here.

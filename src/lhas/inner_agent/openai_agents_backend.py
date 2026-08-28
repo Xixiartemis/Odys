@@ -32,7 +32,7 @@ class AgentsSdkModelConfig:
 class OpenAIAgentsBackend:
     name="openai-agents"
     def __init__(self, registry, config=None, runner=None, provider_factory=None, run_config_factory=None): self.registry=registry; self.config=config or AgentsSdkModelConfig(); self.runner=runner; self.provider_factory=provider_factory; self.run_config_factory=run_config_factory
-    def _instructions(self, r): return "Complete the current subgoal. Tool failures are observations; adjust strategy. Do not claim uncalled work or expand permissions. Once acceptance evidence has been obtained, stop exploratory tool calls and return a concise completion claim. For SWE tasks, when relevant tests pass and required validation evidence is collected, do not continue unrelated exploration. Final output is a candidate completion claim; an outer validator independently verifies it.\nObjective: "+r.objective+"\nConstraints: "+str(r.constraints)+"\nAcceptance: "+str(r.acceptance_criteria)+"\nContext: "+str(r.context)
+    def _instructions(self, r): return "Complete the current subgoal. Tool failures are observations; adjust strategy. Never blindly repeat a failed call when retry_same_arguments=false. After an exact-edit target mismatch, reread the file and use workspace.edit_lines with the current SHA when appropriate. Refresh the file SHA after STALE_FILE_VERSION. Adapt to allowed CLI prefix and workspace-relative cwd feedback. Establish edit -> validate -> observe loops early; after a meaningful mutation inspect the diff and validate promptly. Do not claim uncalled work, expand permissions, or expose hidden reasoning. Once acceptance evidence passes, stop and return a concise completion claim. Final output is only a candidate claim; an outer validator independently verifies it.\nObjective: "+r.objective+"\nConstraints: "+str(r.constraints)+"\nAcceptance: "+str(r.acceptance_criteria)+"\nContext: "+str(r.context)
     async def run(self, request):
         trace = InnerAgentTrace()
         hooks = OdysAgentsRunHooks(trace)
@@ -67,4 +67,4 @@ class OpenAIAgentsBackend:
             kind="AGENT_TURN_LIMIT" if exc.__class__.__name__=="MaxTurnsExceeded" else type(exc).__name__
             run_data = getattr(exc, "run_data", None)
             failure_usage = usage_data(getattr(getattr(run_data, "context_wrapper", None), "usage", None))
-            return InnerAgentResult(status=InnerAgentStatus.FAILURE,error_type=kind,error_message=str(exc),turn_count=hooks.turn_count,tool_call_count=hooks.tool_call_count,usage=failure_usage,artifacts=_workspace_artifacts(trace),trace=trace.items,provider_metadata=metadata())
+            return InnerAgentResult(status=InnerAgentStatus.FAILURE,error_type=kind,error_message="inner agent execution failed",turn_count=hooks.turn_count,tool_call_count=hooks.tool_call_count,usage=failure_usage,artifacts=_workspace_artifacts(trace),trace=trace.items,provider_metadata=metadata())

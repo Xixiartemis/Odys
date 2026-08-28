@@ -8,6 +8,9 @@ from pathlib import Path
 from typing import Optional
 
 import typer
+from rich.console import Console
+from rich.panel import Panel
+from rich.table import Table
 
 from lhas import HARNESS_VERSION, DEFAULT_CONTEXT_POLICY_VERSION, DEFAULT_DATASET_VERSION
 from lhas.config import db_path, log_dir
@@ -27,10 +30,23 @@ from lhas.planning.planner import DeterministicPlanner
 from lhas.planning.service import PlanExecutionService
 from lhas.persistence.planning_repositories import GoalRepository, PlanRepository
 from lhas.persistence.phaseb_repos import FailureReportRepository, RecoveryActionRepository
+from lhas.cli_runtime import (
+    CliConfigurationError,
+    ProductRuntime,
+    inspect_run,
+    list_recent_runs,
+    resolve_provider_settings,
+)
+from lhas.cli_ui import execute_with_progress
+from lhas.command_validation import parse_verification_command
 
-app = typer.Typer(help="LHAS — Long-Horizon Agent System runtime / harness CLI.")
+app = typer.Typer(
+    help="Odys - Plan. Act. Recover. Finish.",
+    no_args_is_help=True,
+)
 goal_app = typer.Typer(help="Run and inspect constrained goals")
 app.add_typer(goal_app, name="goal")
+console = Console()
 
 
 def _open_db() -> Database:
@@ -145,7 +161,7 @@ def task_list(project: Optional[str] = typer.Option(None, help="Filter by projec
     db.close()
 
 
-@app.command("run")
+@app.command("task-run")
 def run_task(
     task_id: str = typer.Argument(..., help="Task id"),
     scenario: MockScenario = typer.Option(MockScenario.SUCCESS, help="MockExecutor scenario"),
@@ -171,6 +187,217 @@ def run_task(
     for ev in events:
         print(f"  #{ev.id:03d} {ev.event_type.value:<20} attempt={ev.attempt_id or '-'}")
     db.close()
+
+
+def _product_db_path(override: Optional[Path]) -> Path:
+    return (override or db_path()).expanduser().resolve()
+
+
+def _print_interrupt(run_id: Optional[str]) -> None:
+    console.print("\nRESULT: INTERRUPTED", style="bold yellow")
+    if run_id:
+        console.print(f"Run ID: {run_id}")
+        console.print(f"odys resume {run_id}")
+
+
+def _print_product_summary(data: dict) -> None:
+    run = data["run"]
+    tools = data["tools"]
+    workspace = data["workspace"]
+    validation = data.get("validation")
+    result = "PASS" if run["status"] == "COMPLETED" else "FAIL"
+    console.print(f"\nRESULT: {result}", style="bold green" if result == "PASS" else "bold red")
+    console.print(f"Run ID: {run['id']}")
+    console.print(f"Task status: {'COMPLETED' if run['status'] == 'COMPLETED' else run['status']}")
+    console.print(f"Run status: {run['status']}")
+    console.print(f"Attempts: {len(data['attempts'])}")
+    console.print(f"Total turns: {tools['total_turns']}")
+    console.print(f"Total tool calls: {tools['total_calls']}")
+    console.print(f"Total tool failures: {tools['total_failures']}")
+    console.print(f"Tool failure rate: {tools['failure_rate'] * 100:.2f}%")
+    console.print(f"Changed files: {workspace['changed_file_count']}")
+    console.print(f"Validation status: {validation['status'] if validation else 'UNKNOWN'}")
+    console.print(f"Validation command: {json.dumps(data['verification_command'], ensure_ascii=False)}")
+    exit_code = (validation or {}).get("evidence", {}).get("exit_code")
+    console.print(f"Validation exit code: {exit_code if exit_code is not None else 'N/A'}")
+    console.print(f"Duration: {run['duration_ms']} ms")
+    if result == "FAIL":
+        top = data["tools"]["failures_by_type"]
+        if top:
+            console.print("Top failure types: " + ", ".join(f"{name}={count}" for name, count in list(top.items())[:5]))
+        actions = [item.get("recovery_action") for item in data["recovery"] if item.get("recovery_action")]
+        if actions:
+            console.print(f"Last recovery action: {actions[-1]['action']}")
+    console.print(f"odys inspect {run['id']}")
+    if run["status"] == "RUNNING":
+        console.print(f"odys resume {run['id']}")
+
+
+@app.command("run")
+def product_run(
+    goal: str = typer.Argument(..., help="Natural-language engineering goal"),
+    repo: Path = typer.Option(..., "--repo", help="Local source repository"),
+    verify: str = typer.Option(..., "--verify", help="Authoritative verification command"),
+    max_attempts: int = typer.Option(3, "--max-attempts", min=1),
+    max_turns: int = typer.Option(20, "--max-turns", min=1),
+    provider: Optional[str] = typer.Option(None, "--provider", help="Provider profile (default: configured profile or mimo; offline for deterministic demo)"),
+    no_ui: bool = typer.Option(False, "--no-ui", help="Use plain deterministic console output"),
+    yes: bool = typer.Option(False, "--yes", help="Skip launch confirmation"),
+    db_override: Optional[Path] = typer.Option(None, "--db", help="SQLite database path"),
+) -> None:
+    """Run a goal against an immutable local source repository."""
+    source = repo.expanduser().resolve()
+    if not source.is_dir():
+        raise typer.BadParameter(f"repository path does not exist or is not a directory: {source}", param_hint="--repo")
+    try:
+        verify_argv = parse_verification_command(verify)
+        settings = resolve_provider_settings(provider)
+    except (ValueError, CliConfigurationError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    if not yes:
+        confirmed = typer.confirm(
+            f"Run Odys against {source} using {settings.profile}/{settings.model}? "
+            "The source stays immutable; work occurs in a durable staged workspace."
+        )
+        if not confirmed:
+            raise typer.Abort()
+    runtime = ProductRuntime(_product_db_path(db_override))
+    try:
+        prepared = runtime.prepare_new(
+            goal=goal,
+            repo=source,
+            verify_argv=verify_argv,
+            max_attempts=max_attempts,
+            max_turns=max_turns,
+            provider=settings.profile,
+        )
+        console.print("Odys", style="bold cyan")
+        console.print("Plan. Act. Recover. Finish.")
+        try:
+            run, data, _ = asyncio.run(execute_with_progress(prepared, no_ui=no_ui, console=console))
+        except KeyboardInterrupt:
+            latest = runtime.latest_run_for_task(prepared.task.id)
+            _print_interrupt(latest.id if latest else None)
+            raise typer.Exit(code=130)
+        _print_product_summary(data)
+        if run.status.value != "COMPLETED":
+            raise typer.Exit(code=1)
+    except CliConfigurationError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    finally:
+        runtime.close()
+
+
+@app.command("resume")
+def product_resume(
+    run_id: str = typer.Argument(..., help="Durable Run ID"),
+    no_ui: bool = typer.Option(False, "--no-ui", help="Use plain deterministic console output"),
+    db_override: Optional[Path] = typer.Option(None, "--db", help="SQLite database path"),
+) -> None:
+    """Resume an interrupted durable run in its existing workspace."""
+    runtime = ProductRuntime(_product_db_path(db_override))
+    try:
+        prepared = runtime.prepare_resume(run_id)
+        try:
+            run, data, _ = asyncio.run(execute_with_progress(prepared, no_ui=no_ui, console=console))
+        except KeyboardInterrupt:
+            _print_interrupt(run_id)
+            raise typer.Exit(code=130)
+        _print_product_summary(data)
+        if run.status.value != "COMPLETED":
+            raise typer.Exit(code=1)
+    except CliConfigurationError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    finally:
+        runtime.close()
+
+
+def _human_inspect(data: dict, *, show_events: bool) -> None:
+    run = data["run"]
+    console.print(Panel.fit(
+        f"[bold]Run ID[/bold] {run['id']}\n"
+        f"[bold]Status[/bold] {run['status']}\n"
+        f"[bold]Harness[/bold] {run['harness']}\n"
+        f"[bold]Task[/bold] {run['task_title']}\n"
+        f"[bold]Source[/bold] {run['source_root']}\n"
+        f"[bold]Workspace[/bold] {run['workspace_session']}\n"
+        f"[bold]Provider/model[/bold] {run['provider']}/{run['model']}\n"
+        f"[bold]Duration[/bold] {run['duration_ms']} ms",
+        title="Odys Inspect",
+    ))
+    attempts = Table(title="Attempts")
+    for column in ("#", "Status", "Error", "Context", "Turns", "Calls", "Failures", "Validation"):
+        attempts.add_column(column)
+    for item in data["attempts"]:
+        attempts.add_row(
+            str(item["attempt_number"]), item["status"], item["error_type"] or "-",
+            item["context_policy"] or "-", str(item["turn_count"]), str(item["tool_calls"]),
+            str(item["tool_failures"]), item["validation"] or "UNKNOWN",
+        )
+    console.print(attempts)
+    workspace = data["workspace"]
+    console.print(f"Workspace: changed_files={workspace['changed_file_count']} source_unchanged={workspace['source_unchanged']}")
+    for path in workspace["changed_files"]:
+        console.print(f"  {path}")
+    console.print("Diff summary: " + json.dumps(workspace["diff_summary"], ensure_ascii=False, sort_keys=True))
+    tools = data["tools"]
+    console.print("Tools calls: " + json.dumps(tools["calls_by_capability"], sort_keys=True))
+    console.print("Tool failures: " + json.dumps(tools["failures_by_capability"], sort_keys=True))
+    console.print("Failure types: " + json.dumps(tools["failures_by_type"], sort_keys=True))
+    console.print(f"Validation: {(data.get('validation') or {}).get('status', 'UNKNOWN')}")
+    for item in data["recovery"]:
+        console.print("Recovery: " + json.dumps(item, ensure_ascii=False, sort_keys=True))
+    if show_events:
+        console.print("Events:")
+        for event in data.get("events", []):
+            console.print("  " + json.dumps(event, ensure_ascii=False, sort_keys=True))
+
+
+@app.command("inspect")
+def product_inspect(
+    run_id: str = typer.Argument(..., help="Run ID"),
+    events: bool = typer.Option(False, "--events", help="Include bounded safe lifecycle events"),
+    as_json: bool = typer.Option(False, "--json", help="Emit bounded safe JSON"),
+    db_override: Optional[Path] = typer.Option(None, "--db", help="SQLite database path"),
+) -> None:
+    """Inspect a persisted run without exposing secrets or raw model data."""
+    runtime = ProductRuntime(_product_db_path(db_override))
+    try:
+        data = inspect_run(runtime.db, run_id, include_events=events)
+        if as_json:
+            console.print_json(json.dumps(data, ensure_ascii=False, sort_keys=True))
+        else:
+            _human_inspect(data, show_events=events)
+    except CliConfigurationError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    finally:
+        runtime.close()
+
+
+@app.command("runs")
+def product_runs(
+    limit: int = typer.Option(20, "--limit", min=1, max=100),
+    status: Optional[str] = typer.Option(None, "--status", help="Filter by Run status"),
+    db_override: Optional[Path] = typer.Option(None, "--db", help="SQLite database path"),
+) -> None:
+    """List recent durable runs."""
+    runtime = ProductRuntime(_product_db_path(db_override))
+    try:
+        rows = list_recent_runs(runtime.db, limit=limit, status=status)
+        if not console.is_terminal:
+            console.print("STATUS\tRUN_ID\tTASK\tATTEMPTS\tPROVIDER/MODEL\tUPDATED")
+            for item in rows:
+                console.print(
+                    f"{item['status']}\t{item['run_id']}\t{item['task_title']}\t"
+                    f"{item['attempts']}\t{item['provider_model']}\t{item['updated_at']}"
+                )
+            return
+        table = Table("Status", "Run ID", "Task", "Attempts", "Provider/model", "Updated")
+        for item in rows:
+            table.add_row(item["status"], item["run_id"], item["task_title"], str(item["attempts"]), item["provider_model"], item["updated_at"])
+        console.print(table)
+    finally:
+        runtime.close()
 
 
 @app.command("events")
@@ -306,7 +533,10 @@ def jobbench(
 @app.command()
 def version() -> None:
     """Print version info."""
-    print(f"lhas {__import__('lhas').__version__} harness={HARNESS_VERSION}")
+    console.print("Odys", style="bold cyan")
+    console.print("Plan. Act. Recover. Finish.")
+    console.print(f"Harness: {HARNESS_VERSION}")
+    console.print(f"Package: {__import__('lhas').__version__}")
 
 
 if __name__ == "__main__":

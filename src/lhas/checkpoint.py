@@ -30,6 +30,12 @@ class WorkingState(BaseModel):
     candidate_patch_summary: dict[str, Any] = Field(default_factory=dict)
     last_completion_claim: bool | None = None
     tool_call_count: int = 0
+    tool_failure_count: int = 0
+    tool_failures_by_capability: dict[str, int] = Field(default_factory=dict)
+    tool_failures_by_type: dict[str, int] = Field(default_factory=dict)
+    last_tool_failure_capability: str | None = None
+    last_tool_failure_type: str | None = None
+    strategy_change_required: bool = False
     event_cursor: int = 0
     truncated: bool = False
 
@@ -42,6 +48,13 @@ class WorkingState(BaseModel):
         if data.get("last_completion_claim") is not None:
             claim=str(data["last_completion_claim"])
             if len(claim.encode())>4096: data["last_completion_claim"]=claim.encode()[:4096].decode("utf-8","ignore"); data["truncated"]=True
+        for key in ("tool_failures_by_capability","tool_failures_by_type"):
+            values=data.get(key,{})
+            bounded={str(name)[:128]:max(0,int(count)) for name,count in list(sorted(values.items()))[:32]}
+            data["truncated"] = data["truncated"] or len(values)>32
+            data[key]=bounded
+        for key in ("last_tool_failure_capability","last_tool_failure_type"):
+            if isinstance(data.get(key),str): data[key]=data[key][:128]
         return WorkingState(**data)
 
 class Checkpoint(BaseModel):
@@ -90,9 +103,18 @@ class WorkingStateProjector:
                 state.tool_call_count += 1; capability=payload.get("capability")
                 if capability == "workspace.read" and payload.get("path"): state.files_inspected.append(payload["path"])
                 if capability == "workspace.search": state.files_inspected.extend(payload.get("matched_paths", []))
-                if capability == "workspace.edit" and payload.get("path"): state.files_modified.append(payload["path"])
+                if capability in {"workspace.edit","workspace.edit_lines"} and payload.get("path"): state.files_modified.append(payload["path"])
                 if capability == "workspace.diff": state.candidate_patch_summary={k:payload[k] for k in ("changed_files","files_changed","lines_added","lines_removed","truncated") if k in payload}
                 if capability == "cli.exec": state.last_cli_exit_code=payload.get("exit_code")
+                if payload.get("status") == "FAILURE":
+                    error_type=str(payload.get("error_type") or "UNKNOWN")
+                    safe_capability=str(capability or "UNKNOWN")
+                    state.tool_failure_count += 1
+                    state.tool_failures_by_capability[safe_capability]=state.tool_failures_by_capability.get(safe_capability,0)+1
+                    state.tool_failures_by_type[error_type]=state.tool_failures_by_type.get(error_type,0)+1
+                    state.last_tool_failure_capability=safe_capability
+                    state.last_tool_failure_type=error_type
+                    state.strategy_change_required=state.strategy_change_required or bool(payload.get("strategy_change_required"))
             elif event.event_type in {EventType.INNER_AGENT_COMPLETED, EventType.INNER_AGENT_FAILED}:
                 state.last_attempt_status="SUCCESS" if event.event_type == EventType.INNER_AGENT_COMPLETED else "FAILURE"; state.attempts_completed += 1
                 state.last_attempt_number=max(state.last_attempt_number,int(payload.get("attempt_number",state.last_attempt_number)))
@@ -116,6 +138,7 @@ _SAFE_EVENT_FIELDS = {
         "capability", "status", "error_type", "path", "sha256", "truncated",
         "matched_paths", "match_count", "exit_code", "timed_out", "duration_ms",
         "stdout_truncated", "stderr_truncated", "command_name",
+        "failure_repeat_count", "strategy_change_required", "action",
     },
     EventType.ATTEMPT_STARTED: {"attempt_number"},
     EventType.ATTEMPT_FAILED: {"attempt_number", "reason", "error_type"},
