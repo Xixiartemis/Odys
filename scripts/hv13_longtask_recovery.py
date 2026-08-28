@@ -59,6 +59,7 @@ from scripts.hv12_longtask_recovery import (
     FIXTURE_ROOT,
     FixturePytestValidator,
     ExecutorCallRecorder,
+    _attempt_metrics as _safe_attempt_metrics,
     _child_env,
     _diff_summary,
     _live_executor_factory,
@@ -89,6 +90,7 @@ MAX_ATTEMPTS = 3
 INNER_TURN_BUDGET = 20
 SIDE_EFFECT_CAPABILITIES = ["workspace.edit"]
 EXPECTED_HARNESS_VERSION = "HV-1.3"
+MAX_ARBITRATION_EVENTS = 100
 
 
 class DryRunCrashExecutor:
@@ -313,17 +315,41 @@ def _arbitration_observation(db: Database, run_id: str) -> dict[str, Any]:
     events = EventStore(db).list_for_run(run_id)
     attempts = AttemptRepository(db).list_for_run(run_id)
     by_id = {attempt.id: attempt for attempt in attempts}
-    event = next(
-        (
-            event
-            for event in events
-            if event.event_type is EventType.VALIDATION_STARTED
-            and event.payload.get("outcome_arbitration") is True
-        ),
-        None,
-    )
-    if event is None or event.attempt_id not in by_id:
+    arbitration_events = [
+        event
+        for event in events
+        if event.event_type is EventType.VALIDATION_STARTED
+        and event.payload.get("outcome_arbitration") is True
+        and event.attempt_id in by_id
+    ]
+    history: list[dict[str, Any]] = []
+    attempts_after: list[int] = []
+    for event in arbitration_events:
+        attempt = by_id[event.attempt_id]
+        validation = ValidationResultRepository(db).get_for_attempt(attempt.id)
+        later_attempts = [
+            item for item in attempts if item.attempt_number > attempt.attempt_number
+        ]
+        history.append(
+            {
+                "attempt_number": attempt.attempt_number,
+                "executor_status": event.payload.get("executor_attempt_status"),
+                "error_type": event.payload.get("executor_error_type"),
+                "validation_passed": validation.passed if validation else None,
+                "next_attempt_exists": bool(later_attempts),
+            }
+        )
+        attempts_after.append(len(later_attempts))
+
+    bounded_history = history[-MAX_ARBITRATION_EVENTS:]
+    common = {
+        "outcome_arbitration_events": bounded_history,
+        "outcome_arbitration_event_count": len(history),
+        "outcome_arbitration_events_truncated": len(history) > len(bounded_history),
+    }
+    if not history:
         return {
+            **common,
             "outcome_arbitration_observed": False,
             "outcome_arbitration_attempt_number": None,
             "outcome_arbitration_executor_status": None,
@@ -332,17 +358,16 @@ def _arbitration_observation(db: Database, run_id: str) -> dict[str, Any]:
             "next_attempt_suppressed_after_arbitration": None,
             "attempts_after_arbitration": None,
         }
-    attempt = by_id[event.attempt_id]
-    validation = ValidationResultRepository(db).get_for_attempt(attempt.id)
-    later_attempts = [item for item in attempts if item.attempt_number > attempt.attempt_number]
+    latest = history[-1]
     return {
+        **common,
         "outcome_arbitration_observed": True,
-        "outcome_arbitration_attempt_number": attempt.attempt_number,
-        "outcome_arbitration_executor_status": event.payload.get("executor_attempt_status"),
-        "outcome_arbitration_error_type": event.payload.get("executor_error_type"),
-        "outcome_arbitration_validation_passed": validation.passed if validation else None,
-        "next_attempt_suppressed_after_arbitration": not later_attempts,
-        "attempts_after_arbitration": len(later_attempts),
+        "outcome_arbitration_attempt_number": latest["attempt_number"],
+        "outcome_arbitration_executor_status": latest["executor_status"],
+        "outcome_arbitration_error_type": latest["error_type"],
+        "outcome_arbitration_validation_passed": latest["validation_passed"],
+        "next_attempt_suppressed_after_arbitration": not latest["next_attempt_exists"],
+        "attempts_after_arbitration": attempts_after[-1],
     }
 
 
@@ -363,6 +388,49 @@ def _attempt_summaries(db: Database, run_id: str) -> list[dict[str, Any]]:
         }
         for attempt in attempts
     ]
+
+
+def _agent_completion_from_metrics(attempt_metrics: list[dict[str, Any]]) -> bool:
+    """Derive agent completion only from a persisted explicit completion claim."""
+
+    return any(metric.get("completion_claim_present") is True for metric in attempt_metrics)
+
+
+def _process_recovery_metrics(
+    *,
+    crash_trigger: str,
+    forced: bool,
+    process_b_started: bool,
+    process_b_exit: int | None,
+    same_workspace: bool,
+    outer_task_completed: bool,
+    final_pytest_passed: bool,
+    repository_fixture_unchanged: bool,
+    temporary_source_snapshot_unchanged: bool,
+    duplicate_rows_zero: bool,
+) -> tuple[bool, bool]:
+    """Return the historical recovery verdict and lower-level mechanics verdict."""
+
+    historical = bool(
+        crash_trigger == "DURABLE_MUTATION_STABLE"
+        and forced
+        and process_b_started
+        and process_b_exit == 0
+        and same_workspace
+        and outer_task_completed
+    )
+    mechanics = bool(
+        crash_trigger == "DURABLE_MUTATION_STABLE"
+        and forced
+        and process_b_started
+        and process_b_exit == 0
+        and same_workspace
+        and final_pytest_passed
+        and repository_fixture_unchanged
+        and temporary_source_snapshot_unchanged
+        and duplicate_rows_zero
+    )
+    return historical, mechanics
 
 
 def _live_config_is_valid() -> bool:
@@ -409,13 +477,16 @@ def run_evaluation(
             return {"status": "HARNESS_MISMATCH", "mode": mode, "live_run_executed": False}
         if not _live_config_is_valid():
             return {"status": "SKIPPED_CONFIG", "mode": mode, "live_run_executed": False}
-        git_sha = _git_sha()
+
+    git_sha, code_commit_clean = _git_identity()
+    if mode == "live_real_model":
         try:
             _write_evidence(
                 claim_path,
                 {
                     "evaluation_id": "HV13-LIVE-001",
                     "git_sha": git_sha,
+                    "code_commit_clean": code_commit_clean,
                     "harness_version": HARNESS_VERSION,
                     "execution_claimed": True,
                 },
@@ -425,7 +496,6 @@ def run_evaluation(
             return {"status": "LIVE_CLAIM_EXISTS", "mode": mode, "live_run_executed": False}
 
     started = time.monotonic()
-    git_sha, code_commit_clean = _git_identity()
     fixture_source_sha = tree_sha256(FIXTURE_ROOT)
     with tempfile.TemporaryDirectory(prefix="hv13-longtask-", ignore_cleanup_errors=True) as temporary:
         root = Path(temporary)
@@ -512,7 +582,8 @@ def run_evaluation(
             final_run = RunRepository(db).get(run_id) if run_id else None
             final_task = TaskRepository(db).get(task.id)
             attempts = AttemptRepository(db).list_for_run(run_id) if run_id else []
-            attempt_metrics = _attempt_summaries(db, run_id) if run_id else []
+            attempt_summaries = _attempt_summaries(db, run_id) if run_id else []
+            attempt_metrics = _safe_attempt_metrics(db, run_id) if run_id else []
             checkpoints = CheckpointRepository(db).list_for_run(run_id) if run_id else []
             duplicates = (
                 _duplicate_metrics(db, run_id)
@@ -526,6 +597,9 @@ def run_evaluation(
                 }
             )
             arbitration = _arbitration_observation(db, run_id) if run_id else {
+                "outcome_arbitration_events": [],
+                "outcome_arbitration_event_count": 0,
+                "outcome_arbitration_events_truncated": False,
                 "outcome_arbitration_observed": False,
                 "outcome_arbitration_attempt_number": None,
                 "outcome_arbitration_executor_status": None,
@@ -540,7 +614,7 @@ def run_evaluation(
                 and pre_crash_state.get("workspace_session_id") == final_state.get("workspace_session_id")
             )
             functional_validation_passed = initial_tests["status"] == "FAIL" and final_tests["status"] == "PASS"
-            agent_completion_passed = False
+            agent_completion_passed = _agent_completion_from_metrics(attempt_metrics)
             outer_task_completed = bool(
                 final_run
                 and final_run.status is RunStatus.COMPLETED
@@ -557,16 +631,17 @@ def run_evaluation(
                     "duplicate_checkpoints",
                 )
             )
-            process_recovery_passed = bool(
-                crash_trigger == "DURABLE_MUTATION_STABLE"
-                and forced
-                and process_b_started
-                and process_b_exit == 0
-                and same_workspace
-                and final_tests["status"] == "PASS"
-                and repository_fixture_unchanged
-                and temporary_source_snapshot_unchanged
-                and duplicate_rows_zero
+            process_recovery_passed, process_recovery_mechanics_passed = _process_recovery_metrics(
+                crash_trigger=crash_trigger,
+                forced=forced,
+                process_b_started=process_b_started,
+                process_b_exit=process_b_exit,
+                same_workspace=same_workspace,
+                outer_task_completed=outer_task_completed,
+                final_pytest_passed=final_tests["status"] == "PASS",
+                repository_fixture_unchanged=repository_fixture_unchanged,
+                temporary_source_snapshot_unchanged=temporary_source_snapshot_unchanged,
+                duplicate_rows_zero=duplicate_rows_zero,
             )
             long_horizon_result = "PASS" if all(
                 (
@@ -632,6 +707,7 @@ def run_evaluation(
                 "agent_completion_passed": agent_completion_passed,
                 "outer_task_completed": outer_task_completed,
                 "process_recovery_passed": process_recovery_passed,
+                "process_recovery_mechanics_passed": process_recovery_mechanics_passed,
                 "repository_fixture_unchanged": repository_fixture_unchanged,
                 "temporary_source_snapshot_unchanged": temporary_source_snapshot_unchanged,
                 "source_repository_unchanged": repository_fixture_unchanged,
@@ -640,7 +716,7 @@ def run_evaluation(
                 "fresh_process_b_created": process_b_started,
                 "resume_run_invoked": process_b_started,
                 "final_patch_nonempty": final_patch_nonempty,
-                "attempts": attempt_metrics,
+                "attempts": attempt_summaries,
                 "attempt_metrics": attempt_metrics,
                 "attempt_count": len(attempts),
                 "attempt_3_exists": any(attempt.attempt_number == 3 for attempt in attempts),
