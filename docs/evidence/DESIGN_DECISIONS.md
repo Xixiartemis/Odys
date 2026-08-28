@@ -87,3 +87,41 @@ historical HV12 Attempt 2 post-state remains `NOT_MEASURED`.
 **Next hypothesis.** A future live evaluation with a new ID can measure whether
 post-non-success validation avoids unnecessary retries while preserving the
 Outer Validator as acceptance authority. Dynamic Replan remains out of scope.
+
+## DD-HV13-LIVE-001-TOOL-AWARE-RECOVERY
+
+**Design decision.** Preserve HV13-LIVE-001 as a canonical `FAIL` and retain
+the Outer Validator as acceptance authority. The two real-run arbitration
+events correctly returned false for invalid durable workspace state; Outcome
+Arbitration must not be characterized as failed merely because the overall run
+failed.
+
+**Tradeoffs.** Post-non-success validation adds a bounded validator step but
+prevents executor status from becoming an unverified task outcome. Lower-level
+tool recovery work should be measured before introducing macro replanning, so
+the next phase prioritizes edit ergonomics and verification feedback while
+deferring broader planning changes.
+
+**Failed approaches.** Across the two post-resume attempts, exact-target
+`workspace.edit` failed 17 of 20 calls. Attempt 3 also failed both `cli.exec`
+calls. Repeating these operations without sufficient adaptation consumed two
+20-turn budgets and did not produce a valid final workspace. This measured
+bottleneck is not asserted to be the only cause.
+
+**Known limitations.** The canonical artifact intentionally omits raw diff,
+stdout/stderr, tool arguments, and model transcript, so it cannot identify the
+exact final failing assertion or incorrect code. Its
+`next_attempt_suppressed_after_arbitration` field records absence of a later
+attempt, not causal retry suppression; Attempt 3 had already reached
+`max_attempts=3` and validation was false. The HV12/HV13 comparison is a
+single-run paired observation and provides no stochastic success-rate estimate.
+
+**Next hypothesis.** E7-A — Tool-Aware Recovery & Verification should test:
+
+1. whether less brittle edit targeting reduces `EDIT_TARGET_NOT_FOUND`;
+2. whether repeated edit failure triggers a strategy change;
+3. whether an early edit → pytest → observe loop improves verification;
+4. whether CLI policy and path errors provide actionable recovery feedback.
+
+E7-B — Dynamic Macro Replan remains deferred until lower-level tool robustness
+is measured.

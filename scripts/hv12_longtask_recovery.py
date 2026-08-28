@@ -67,6 +67,7 @@ DEFAULT_DRY_OUTPUT = REPO_ROOT / "evals" / "runs" / "HV12-DRY-001.json"
 DEFAULT_LIVE_OUTPUT = REPO_ROOT / "evals" / "runs" / "HV12-LIVE-001.json"
 PHASE = "HV12_LONGTASK_BASELINE"
 FIXTURE_VERSION = "HV12-SESSION-LIFECYCLE-1"
+HISTORICAL_HARNESS_VERSION = "HV-1.2"
 MAX_ATTEMPTS = 3
 INNER_TURN_BUDGET = 20
 CAPABILITIES = [
@@ -90,7 +91,15 @@ def _file_hashes(root: Path) -> dict[str, str]:
         relative = path.relative_to(root)
         if any(part in EXCLUDED_DIRS for part in relative.parts) or not path.is_file() or path.is_symlink():
             continue
-        hashes[relative.as_posix()] = hashlib.sha256(path.read_bytes()).hexdigest()
+        try:
+            data = path.read_bytes()
+        except OSError:
+            # Workspace.edit uses an atomic temporary file.  A parent poll can
+            # observe that file between creation and replace, including while
+            # Windows still denies the transient handle.  Omit it from this
+            # poll; the next stable observation will hash the final file.
+            continue
+        hashes[relative.as_posix()] = hashlib.sha256(data).hexdigest()
     return hashes
 
 
@@ -1095,6 +1104,9 @@ def main(argv: list[str] | None = None) -> int:
         return _worker_a(args)
     if args.role == "worker-b":
         return _worker_b(args)
+    if HARNESS_VERSION != HISTORICAL_HARNESS_VERSION:
+        print("STATUS=HISTORICAL_HARNESS_MISMATCH")
+        return 2
     if args.mode == "live_real_model" and not (os.getenv("ODYS_AGENT_MODEL") and os.getenv("ODYS_AGENT_API_KEY")):
         print("STATUS=SKIPPED_CONFIG")
         return 0
