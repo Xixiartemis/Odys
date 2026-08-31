@@ -82,6 +82,9 @@ class DefaultRecoveryPolicy:
         if ft == FailureType.CONTEXT_CONFLICT:
             return self._action(attempt, RecoveryActionType.ESCALATE,
                                 "context conflict needs human clarification", attempt_number, None)
+        if ft in {FailureType.QUOTA_EXHAUSTED, FailureType.BILLING_OR_CREDIT_EXHAUSTED, FailureType.AUTH_INVALID}:
+            return self._action(attempt, RecoveryActionType.BLOCK_PROVIDER,
+                                "provider route is blocked; migrate explicitly before resuming", attempt_number, None)
         if attempt_number >= max_attempts:
             return self._action(attempt, RecoveryActionType.ESCALATE,
                                 "max attempts reached", attempt_number, None)

@@ -13,7 +13,7 @@ from lhas.planning.models import (
 __all__ = [
     "CapabilitySpec", "Goal", "Plan", "PlanMode", "PlanStatus",
     "PlanStep", "PlanStepStatus",
-    "PlanExecutionService", "TaskGraphScheduler", "build_step_dependency_context",
+    "PlanExecutionService", "TaskGraphScheduler", "build_step_dependency_context", "MacroReplanService", "ReplanResult",
 ]
 
 def __getattr__(name):
@@ -25,4 +25,7 @@ def __getattr__(name):
     if name in {"TaskGraphScheduler", "build_step_dependency_context"}:
         from lhas.planning.scheduler import TaskGraphScheduler, build_step_dependency_context
         return {"TaskGraphScheduler": TaskGraphScheduler, "build_step_dependency_context": build_step_dependency_context}[name]
+    if name in {"MacroReplanService", "ReplanResult"}:
+        from lhas.planning.replan import MacroReplanService, ReplanResult
+        return {"MacroReplanService": MacroReplanService, "ReplanResult": ReplanResult}[name]
     raise AttributeError(name)

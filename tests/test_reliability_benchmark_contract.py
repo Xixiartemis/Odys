@@ -14,7 +14,7 @@ def _scenarios():
 
 def test_three_reliability_families_are_declared():
     scenarios = _scenarios()
-    assert {item.family.value for item in scenarios} == {"execution_state_recovery", "completion_integrity", "delegation_lifecycle"}
+    assert {item.family.value for item in scenarios} == {"execution_state_recovery", "completion_integrity", "delegation_lifecycle", "runtime_target_truth", "provider_quota_exhaustion", "complex_workflow_replan"}
     assert all("odys" not in item.fairness.acceptance_validator.casefold() for item in scenarios)
 
 

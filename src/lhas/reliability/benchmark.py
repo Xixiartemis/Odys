@@ -12,6 +12,9 @@ class BenchmarkFamily(str, Enum):
     EXECUTION_STATE_RECOVERY = "execution_state_recovery"
     COMPLETION_INTEGRITY = "completion_integrity"
     DELEGATION_LIFECYCLE = "delegation_lifecycle"
+    RUNTIME_TARGET_TRUTH = "runtime_target_truth"
+    PROVIDER_QUOTA_EXHAUSTION = "provider_quota_exhaustion"
+    COMPLEX_WORKFLOW_REPLAN = "complex_workflow_replan"
 
 
 class FairnessContract(BaseModel):
@@ -28,6 +31,9 @@ class FairnessContract(BaseModel):
     api_call_budget: int = Field(ge=1)
     acceptance_validator: str
     failure_injection_point: str
+    configured_runtime_target: dict[str, Any] | None = None
+    effective_provider_constraints: dict[str, Any] = Field(default_factory=dict)
+    repository_digest: str | None = None
 
     @model_validator(mode="after")
     def require_unique_capabilities(self):
@@ -55,6 +61,23 @@ class BenchmarkResult(BaseModel):
     metrics: dict[str, int | float | bool | str | None]
     invariant_results: dict[str, bool]
     safe_evidence: dict[str, Any] = Field(default_factory=dict)
+    # Optional first-class workflow metrics. Deterministic runners may expose
+    # them in ``metrics`` without inventing live token/cost observations.
+    task_success: bool | None = None
+    initial_plan_nodes: int | None = None
+    final_plan_nodes: int | None = None
+    replan_signals: int | None = None
+    replans_attempted: int | None = None
+    replans_accepted: int | None = None
+    stale_plan_executions: int | None = None
+    dead_end_turns: int | None = None
+    redundant_tool_calls: int | None = None
+    tool_failures: int | None = None
+    turns_to_replan: int | None = None
+    turns_after_replan: int | None = None
+    validator_rejections: int | None = None
+    human_intervention: bool | None = None
+    final_acceptance: bool | None = None
 
 
 class BenchmarkRunner(Protocol):

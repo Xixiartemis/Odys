@@ -6,7 +6,7 @@ import asyncio
 from collections.abc import Iterable
 from typing import Any, Protocol, runtime_checkable
 
-from lhas.native.models import ModelContext, ProviderResponse
+from lhas.native.models import ModelContext, ProviderResponse, RuntimeTarget
 
 
 @runtime_checkable
@@ -39,10 +39,18 @@ class OpenAIChatProviderAdapter:
         base_url: str | None = None,
         extra_body: dict[str, Any] | None = None,
         client: Any = None,
+        provider_id: str | None = None,
+        endpoint_identity: str | None = None,
+        credential_route_id: str = "default",
+        route_type: str = "chat_completions",
     ):
         if not model or not api_key:
             raise ValueError("model and api_key are required")
         self.model = model
+        self.provider_id = provider_id or self.name
+        self.endpoint_identity = endpoint_identity or (base_url or "default")
+        self.credential_route_id = credential_route_id
+        self.route_type = route_type
         self.api_key = api_key
         self.base_url = base_url
         self.extra_body = dict(extra_body or {})
@@ -53,6 +61,12 @@ class OpenAIChatProviderAdapter:
                 raise RuntimeError("agent extra is required for the real native provider") from exc
             client = AsyncOpenAI(api_key=api_key, base_url=base_url)
         self.client = client
+
+    @property
+    def runtime_target(self) -> RuntimeTarget:
+        return RuntimeTarget(provider_id=self.provider_id, model_id=self.model,
+            endpoint_identity=self.endpoint_identity, credential_route_id=self.credential_route_id,
+            route_type=self.route_type)
 
     async def generate(self, *, context: ModelContext, tools: list[dict[str, Any]], timeout_seconds: float) -> Any:
         kwargs: dict[str, Any] = {"model": self.model, "messages": context.messages}
@@ -71,9 +85,17 @@ class ScriptedProviderAdapter:
 
     name = "scripted-native-provider"
 
-    def __init__(self, responses: Iterable[Any]):
+    def __init__(self, responses: Iterable[Any], *, runtime_target: RuntimeTarget | None = None,
+                 provider_id: str = "scripted", model_id: str = "scripted-model",
+                 endpoint_identity: str = "scripted", credential_route_id: str = "default"):
         self._responses = list(responses)
         self.calls: list[dict[str, Any]] = []
+        self._runtime_target = runtime_target or RuntimeTarget(provider_id=provider_id, model_id=model_id,
+            endpoint_identity=endpoint_identity, credential_route_id=credential_route_id, route_type="scripted")
+
+    @property
+    def runtime_target(self) -> RuntimeTarget:
+        return self._runtime_target
 
     async def generate(self, *, context: ModelContext, tools: list[dict[str, Any]], timeout_seconds: float) -> Any:
         self.calls.append({
@@ -95,6 +117,10 @@ class OfflineCompletionProvider:
     """Network-free provider for an already-valid native CLI smoke run."""
 
     name = "offline-native-provider"
+
+    @property
+    def runtime_target(self) -> RuntimeTarget:
+        return RuntimeTarget(provider_id=self.name, model_id="offline", endpoint_identity="local", credential_route_id="none", route_type="offline")
 
     async def generate(self, *, context: ModelContext, tools: list[dict[str, Any]], timeout_seconds: float) -> ProviderResponse:
         return ProviderResponse(

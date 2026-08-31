@@ -29,14 +29,18 @@ class PlanRepository:
     def __init__(self, db): self.db=db
     def create(self,p):
         with self.db.session() as s:
-            s.add(PlanRow(id=p.id,goal_id=p.goal_id,version=p.version,mode=p.mode.value,status=p.status.value,created_at=p.created_at))
+            s.add(PlanRow(id=p.id,goal_id=p.goal_id,version=p.version,mode=p.mode.value,status=p.status.value,created_at=p.created_at,metadata_json=json_dumps({**p.metadata, "replan_count": p.replan_count}),invalidated_step_ids=json_dumps(p.invalidated_step_ids)))
             for i,x in enumerate(p.steps): s.add(PlanStepRow(id=x.id,plan_id=p.id,position=i,title=x.title,objective=x.objective,capability=x.capability,depends_on=json_dumps(x.depends_on),inputs=json_dumps(_step_inputs(x)),expected_output=x.expected_output,success_criteria=json_dumps(x.success_criteria),status=x.status.value,task_id=x.task_id,output=json_dumps(x.output),execution_context=json_dumps(x.execution_context)))
         return p
     def update(self,p):
         with self.db.session() as s:
-            r=s.get(PlanRow,p.id); r.status=p.status.value
+            r=s.get(PlanRow,p.id); r.status=p.status.value; r.version=p.version; r.metadata_json=json_dumps({**p.metadata, "replan_count": p.replan_count}); r.invalidated_step_ids=json_dumps(p.invalidated_step_ids)
             for x in p.steps:
-                q=s.get(PlanStepRow,x.id); q.status=x.status.value; q.task_id=x.task_id; q.output=json_dumps(x.output); q.execution_context=json_dumps(x.execution_context)
+                q=s.get(PlanStepRow,x.id)
+                if q is None:
+                    q=PlanStepRow(id=x.id,plan_id=p.id,position=p.steps.index(x),title=x.title,objective=x.objective,capability=x.capability,depends_on=json_dumps(x.depends_on),inputs=json_dumps(_step_inputs(x)),expected_output=x.expected_output,success_criteria=json_dumps(x.success_criteria),status=x.status.value,task_id=x.task_id,output=json_dumps(x.output),execution_context=json_dumps(x.execution_context)); s.add(q)
+                else:
+                    q.position=p.steps.index(x); q.title=x.title; q.objective=x.objective; q.capability=x.capability; q.depends_on=json_dumps(x.depends_on); q.inputs=json_dumps(_step_inputs(x)); q.expected_output=x.expected_output; q.success_criteria=json_dumps(x.success_criteria); q.status=x.status.value; q.task_id=x.task_id; q.output=json_dumps(x.output); q.execution_context=json_dumps(x.execution_context)
         return p
     def get(self, plan_id):
         with self.db.session() as s:
@@ -48,4 +52,5 @@ class PlanRepository:
                 inputs=json_loads(x.inputs) or {}
                 agent_fields=inputs.pop("_agent_platform", {})
                 steps.append(PlanStep(id=x.id,title=x.title,objective=x.objective,capability=x.capability,depends_on=json_loads(x.depends_on) or [],inputs=inputs,expected_output=x.expected_output or "",success_criteria=json_loads(x.success_criteria) or [],status=x.status,task_id=x.task_id,output=json_loads(x.output),execution_context=json_loads(x.execution_context) or {},suggested_role=agent_fields.get("suggested_role","WORKER"),required_capabilities=agent_fields.get("required_capabilities",[]),optional_skill_refs=agent_fields.get("optional_skill_refs",[])))
-            return Plan(id=r.id,goal_id=r.goal_id,version=r.version,mode=r.mode,status=r.status,steps=steps,created_at=r.created_at)
+            metadata=json_loads(r.metadata_json) or {}
+            return Plan(id=r.id,goal_id=r.goal_id,version=r.version,mode=r.mode,status=r.status,steps=steps,metadata=metadata,invalidated_step_ids=json_loads(r.invalidated_step_ids) or [],replan_count=int(metadata.get("replan_count", 0)),created_at=r.created_at)

@@ -33,6 +33,7 @@ class PlanStepStatus(str, Enum):
     FAILED = "FAILED"
     BLOCKED = "BLOCKED"
     WAITING_FOR_HUMAN_APPROVAL = "WAITING_FOR_HUMAN_APPROVAL"
+    STALE = "STALE"
 
 
 class Goal(BaseModel):
@@ -86,6 +87,9 @@ class Plan(BaseModel):
     mode: PlanMode = PlanMode.LINEAR
     status: PlanStatus = PlanStatus.DRAFT
     steps: list[PlanStep] = Field(default_factory=list)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    invalidated_step_ids: list[str] = Field(default_factory=list)
+    replan_count: int = Field(default=0, ge=0)
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
     @model_validator(mode="after")

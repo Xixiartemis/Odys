@@ -62,6 +62,8 @@ class PlanRow(Base):
     mode: Mapped[str] = mapped_column(String(32), nullable=False)
     status: Mapped[str] = mapped_column(String(48), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    metadata_json: Mapped[str | None] = _json_col()
+    invalidated_step_ids: Mapped[str | None] = _json_col()
 
 class PlanStepRow(Base):
     __tablename__ = "plan_steps"
@@ -226,6 +228,8 @@ class RecoveryActionRow(Base):
     attempt_to: Mapped[int | None] = mapped_column(Integer, nullable=True)
     added_context: Mapped[str | None] = _json_col()
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    metadata_json: Mapped[str | None] = _json_col()
+    invalidated_step_ids: Mapped[str | None] = _json_col()
 
 
 class ConversationSessionRow(Base):
@@ -348,6 +352,34 @@ class ReplanSignalRow(Base):
     failed_node_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
     evidence_json: Mapped[str | None] = _json_col()
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class NativeRuntimeTargetRow(Base):
+    __tablename__ = "native_runtime_targets"
+
+    execution_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    owner_run_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    owner_session_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    state: Mapped[str] = mapped_column(String(32), nullable=False)
+    configured_json: Mapped[str] = _json_col()
+    effective_json: Mapped[str] = _json_col()
+    pending_json: Mapped[str | None] = _json_col()
+    fallback_reason: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    switch_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class ProviderHealthRow(Base):
+    __tablename__ = "provider_route_health"
+
+    target_id: Mapped[str] = mapped_column(String(512), primary_key=True)
+    target_json: Mapped[str] = _json_col()
+    state: Mapped[str] = mapped_column(String(32), nullable=False)
+    failure_category: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    reason: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    blocked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
 class DelegationLifecycleRow(Base):

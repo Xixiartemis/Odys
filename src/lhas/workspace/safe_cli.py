@@ -1,4 +1,4 @@
-import asyncio, os, re, time
+import asyncio, os, re, sys, time
 from .errors import WorkspacePathEscape
 _META = re.compile(r"^(?:&&|\|\||>>|[;|><`])$")
 _SECRET = re.compile(r"(?:API_KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|AUTH|COOKIE)", re.I)
@@ -10,6 +10,11 @@ class SafeCli:
         if virtual_env:
             scripts=os.path.join(virtual_env, "Scripts" if os.name == "nt" else "bin")
             env["PATH"]=scripts + os.pathsep + env.get("PATH","")
+        # Resolve tools from the interpreter that owns this harness before
+        # falling through to an unrelated global Python installation.
+        interpreter_bin = os.path.dirname(sys.executable)
+        if interpreter_bin:
+            env["PATH"] = interpreter_bin + os.pathsep + env.get("PATH", "")
         return env
     async def execute(self, argv, cwd=".", timeout_seconds=None):
         if not isinstance(argv, list) or not argv or not all(isinstance(x,str) for x in argv) or any(_META.match(x) for x in argv): return None, "INVALID_ARGUMENTS"
@@ -18,7 +23,13 @@ class SafeCli:
         if timeout <= 0 or timeout > self.max_timeout: return None, "INVALID_TIMEOUT"
         directory=self.workspace.resolve_path(cwd); start=time.monotonic()
         try:
-            proc=await asyncio.create_subprocess_exec(*argv, cwd=str(directory), stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env=self._env())
+            launch_argv = list(argv)
+            if os.name == "nt" and launch_argv and launch_argv[0].casefold() == "pytest":
+                # The global pytest.exe launcher can point at a different
+                # Python installation. Keep the configured command contract,
+                # but execute it through the active harness interpreter.
+                launch_argv = [sys.executable, "-m", "pytest", *launch_argv[1:]]
+            proc=await asyncio.create_subprocess_exec(*launch_argv, cwd=str(directory), stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env=self._env())
             try: out,err=await asyncio.wait_for(proc.communicate(), timeout)
             except asyncio.TimeoutError:
                 proc.kill(); await proc.communicate(); return None, "COMMAND_TIMEOUT"

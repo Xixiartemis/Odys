@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import re
+from urllib.parse import urlparse
 from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -25,7 +26,9 @@ from lhas.native.completion import AcceptedCompletionValidator, CompletionAuthor
 from lhas.native.executor import NativeAgentExecutor
 from lhas.native.kernel import NativeAgentKernel
 from lhas.native.provider import OfflineCompletionProvider, OpenAIChatProviderAdapter
+from lhas.native.models import RuntimeTarget
 from lhas.native.tools import NativeToolDispatcher
+from lhas.native.persistence import ExecutionSnapshotRepository
 from lhas.orchestrator_v2 import RecoveringOrchestrator
 from lhas.persistence.database import Database
 from lhas.persistence.event_store import EventStore
@@ -374,6 +377,13 @@ class ProductRuntime:
     def _build_orchestrator(self, task, manager, verify_argv, max_turns, settings, kernel_mode="external"):
         policy = explicit_command_policy(verify_argv)
         acceptance_validator = ExplicitCommandValidator(self.db, manager, verify_argv)
+        if settings.profile == "offline":
+            configured_runtime_target = RuntimeTarget(provider_id="offline-native-provider", model_id="offline", endpoint_identity="local", credential_route_id="none", route_type="offline")
+        else:
+            endpoint_identity = urlparse(settings.config.base_url).netloc if settings.config and settings.config.base_url else f"{settings.profile}-default"
+            configured_runtime_target = RuntimeTarget(provider_id=settings.profile, model_id=settings.model,
+                endpoint_identity=endpoint_identity or f"{settings.profile}-default",
+                credential_route_id=f"{settings.profile}-default", route_type=settings.config.api_mode if settings.config else "chat_completions")
 
         def executor_factory(workspace):
             registry = ToolRegistry()
@@ -381,13 +391,19 @@ class ProductRuntime:
             if kernel_mode == "native":
                 if settings.profile == "offline":
                     provider_adapter = OfflineCompletionProvider()
+                    runtime_target = configured_runtime_target
                 else:
                     config = settings.config
+                    runtime_target = configured_runtime_target
                     provider_adapter = OpenAIChatProviderAdapter(
                         model=settings.model,
                         api_key=config.api_key,
                         base_url=config.base_url,
                         extra_body=config.provider_profile.extra_body_dict(),
+                        provider_id=runtime_target.provider_id,
+                        endpoint_identity=runtime_target.endpoint_identity,
+                        credential_route_id=runtime_target.credential_route_id,
+                        route_type=runtime_target.route_type,
                     )
 
                 async def mutation_probe():
@@ -436,6 +452,7 @@ class ProductRuntime:
             harness_version=HARNESS_VERSION,
             context_policy_version="CP-3",
             dataset_version="CLI-ALPHA",
+            runtime_target=configured_runtime_target if kernel_mode == "native" else None,
         )
 
     def latest_run_for_task(self, task_id: str):
@@ -478,6 +495,7 @@ def inspect_run(db: Database, run_id: str, *, include_events: bool = False, rece
     failures_by_capability: Counter[str] = Counter()
     failures_by_type: Counter[str] = Counter()
     latest_validation = None
+    latest_native_snapshot = None
     recovery_rows = []
     for attempt in attempts:
         attempt_events = [event for event in events if event.attempt_id == attempt.id]
@@ -499,6 +517,9 @@ def inspect_run(db: Database, run_id: str, *, include_events: bool = False, rece
         if validation is not None:
             latest_validation = validation
         snapshot = snapshot_repo.latest_for_attempt(attempt.id)
+        native_snapshot = ExecutionSnapshotRepository(db).get_for_attempt(attempt.id)
+        if native_snapshot is not None:
+            latest_native_snapshot = native_snapshot
         reports = failure_repo.list_for_attempt(attempt.id)
         actions = action_repo.list_for_attempt(attempt.id)
         checkpoint = next((item for item in reversed(checkpoint_repo.list_for_run(run.id)) if item.attempt_id == attempt.id), None)
@@ -584,6 +605,10 @@ def inspect_run(db: Database, run_id: str, *, include_events: bool = False, rece
             "workspace_session": workspace["session_id"],
             "provider": run.provider,
             "model": run.model,
+            "configured_target": latest_native_snapshot.configured_target.safe_projection() if latest_native_snapshot and latest_native_snapshot.configured_target else None,
+            "effective_target": latest_native_snapshot.effective_target.safe_projection() if latest_native_snapshot and latest_native_snapshot.effective_target else None,
+            "runtime_target_state": "FALLBACK" if latest_native_snapshot and latest_native_snapshot.fallback_reason else (latest_native_snapshot.phase.value if latest_native_snapshot else None),
+            "fallback_reason": latest_native_snapshot.fallback_reason if latest_native_snapshot else None,
             "duration_ms": _duration_ms(run),
             "created_at": run.created_at.isoformat(),
             "finished_at": run.finished_at.isoformat() if run.finished_at else None,

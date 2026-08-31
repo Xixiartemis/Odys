@@ -77,6 +77,7 @@ class Orchestrator:
         context_policy_version: str = "CP-0",
         dataset_version: str = "RUNTIME-V0.1",
         experiment_id: Optional[str] = None,
+        runtime_target: Any = None,
     ):
         self.db = db
         self.task_repo = task_repo or TaskRepository(db)
@@ -98,6 +99,7 @@ class Orchestrator:
         self.context_policy_version = context_policy_version
         self.dataset_version = dataset_version
         self.experiment_id = experiment_id
+        self.runtime_target = runtime_target
 
     def _crash(self, point: CrashPoint, **context: Any) -> None:
         invoke_crash_injector(self.crash_injector, point, **context)
@@ -217,6 +219,7 @@ class Orchestrator:
                 "harness_version": self.harness_version,
                 "context_policy_version": self.context_policy_version,
                 "dataset_version": self.dataset_version,
+                "configured_target": self.runtime_target,
             },
         )
 

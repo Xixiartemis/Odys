@@ -1,0 +1,21 @@
+{
+  "scenario_id": "runtime-target-truth-v1",
+  "family": "runtime_target_truth",
+  "fairness": {
+    "model": "mimo-v2.5-pro",
+    "provider": "explicit-provider-control",
+    "task_objective": "Prove every model request uses the explicitly selected provider and make fallback observable.",
+    "fixture_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "initial_repository_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "tool_capabilities": ["runtime.target.inspect", "runtime.target.switch"],
+    "timeout_seconds": 120,
+    "turn_budget": 6,
+    "api_call_budget": 6,
+    "acceptance_validator": "runtime-request-evidence-validator",
+    "failure_injection_point": "explicit-fallback",
+    "configured_runtime_target": {"provider_id": "provider-a", "model_id": "mimo-v2.5-pro", "endpoint_identity": "provider-a-host", "credential_route_id": "route-a", "route_type": "chat_completions"},
+    "effective_provider_constraints": {"provider_selection": "explicit", "same_model_id_candidates": 2}
+  },
+  "expected_invariants": {"ambiguous_model_fails_closed": true, "configured_target_preserved": true, "effective_target_durable": true, "fallback_reason_recorded": true},
+  "metric_names": ["configured_target_durable", "effective_target_durable", "fallback_observable", "ambiguous_model_provider_fails_closed"]
+}

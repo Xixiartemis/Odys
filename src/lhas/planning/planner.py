@@ -24,7 +24,9 @@ class DeterministicPlanner:
 
     async def create_plan(self, *, goal: Goal, capabilities: list[CapabilitySpec], context=None) -> Plan:
         by_name = {spec.name: spec for spec in capabilities}
-        requested = goal.metadata.get("plan_steps") or goal.allowed_capabilities
+        context = context or {}
+        replanning = bool(context.get("replan_signals"))
+        requested = (goal.metadata.get("replan_plan_steps") if replanning else None) or goal.metadata.get("plan_steps") or goal.allowed_capabilities
         if not requested:
             requested = [spec.name for spec in capabilities]
         unknown = [name for name in requested if name not in by_name]
@@ -53,4 +55,5 @@ class DeterministicPlanner:
             )
             steps.append(step)
             previous = step.id
-        return Plan(goal_id=goal.id, mode=PlanMode.LINEAR, status="READY", steps=steps)
+        return Plan(goal_id=goal.id, mode=PlanMode.LINEAR, status="READY", steps=steps,
+                    metadata={"planner": "DeterministicPlanner", "replan": replanning})
