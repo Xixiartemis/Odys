@@ -1,0 +1,23 @@
+{
+  "scenario_id": "native-reliability-execution-state-recovery-v1",
+  "family": "execution_state_recovery",
+  "fairness": {
+    "model": "FROZEN_BY_LIVE_RUN",
+    "provider": "FROZEN_BY_LIVE_RUN",
+    "task_objective": "Repair a deterministic multi-file defect, recover after an injected process failure, and pass the authoritative validator.",
+    "fixture_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "initial_repository_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "tool_capabilities": ["workspace.list", "workspace.read", "workspace.search", "workspace.edit", "workspace.edit_lines", "workspace.diff", "cli.exec"],
+    "timeout_seconds": 900,
+    "turn_budget": 20,
+    "api_call_budget": 20,
+    "acceptance_validator": "fixture-authoritative-full-pytest",
+    "failure_injection_point": "after-meaningful-mutation-before-verification"
+  },
+  "expected_invariants": {
+    "source_repository_unchanged": true,
+    "duplicate_side_effects": 0,
+    "final_validation": true
+  },
+  "metric_names": ["state_recovered", "duplicate_side_effects", "resume_progress_preserved", "post_resume_turns", "final_validation"]
+}
