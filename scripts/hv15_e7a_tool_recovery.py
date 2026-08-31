@@ -28,6 +28,7 @@ from lhas.tools.protocol import ToolRequest
 from lhas.workspace import CommandPolicy, CommandRule, RunWorkspaceManager, StagedWorkspace
 from lhas.workspace.tools import SafeCliTool, WorkspaceDiffTool, WorkspaceEditLinesTool, WorkspaceEditTool, WorkspaceReadTool
 from scripts.hv12_longtask_recovery import FixturePytestValidator, _pytest
+from scripts.hv13_longtask_recovery import _task_objective
 
 
 REPO_ROOT=Path(__file__).resolve().parents[1]
@@ -35,6 +36,8 @@ FIXTURE_ROOT=REPO_ROOT / "evals" / "fixtures" / "hv12_session_lifecycle"
 DEFAULT_OUTPUT=REPO_ROOT / "evals" / "runs" / "HV15-E7A-DRY-001.json"
 EVALUATION_ID="HV15-E7A-DRY-001"
 FIXTURE_VERSION="HV12-SESSION-LIFECYCLE-1"
+MAX_ATTEMPTS=3
+INNER_TURN_BUDGET=20
 CANONICAL_HASHES={
     "HV12-LIVE-001.json":"144985bc68dbc2d3e8ecbde669c7f14d28adb4d8c3a693668b4b5acaa1603af9",
     "HV13-LIVE-001.json":"3e6ecf1b718d2e8f0a292fa4cf8f1d2d71c455128f3d0a23fabad81079840bb5",
@@ -65,6 +68,8 @@ async def _tool_sequence(workspace, *, safe_normalization: bool) -> dict[str,Any
     async def call(capability: str, arguments: dict[str,Any]):
         nonlocal call_number
         call_number += 1
+        if call_number > INNER_TURN_BUDGET:
+            raise RuntimeError("INNER_TURN_BUDGET_EXCEEDED")
         result=await tools[capability].execute(ToolRequest(
             tool_call_id=f"dry-{call_number}",task_id="e7a",run_id="dry",
             attempt_id="attempt-1",capability=capability,arguments=arguments,
@@ -155,12 +160,16 @@ async def _scenario(root: Path, *, safe_normalization: bool) -> dict[str,Any]:
     try:
         project=Project(name="e7a-dry",root_path=str(FIXTURE_ROOT))
         ProjectRepository(db).create(project)
+        objective,constraints,acceptance=_task_objective()
+        contract_sha256=hashlib.sha256(json.dumps(
+            {"objective":objective,"constraints":constraints,"acceptance":acceptance},
+            ensure_ascii=False,sort_keys=True,separators=(",",":")
+        ).encode("utf-8")).hexdigest()
         task=create_task(
             db,project_id=project.id,title="E7-A deterministic comparison",
-            objective="Repair tenant-scoped session lifecycle behavior.",
-            constraints=["Use the durable staged workspace only."],
-            acceptance_criteria=["Fixture pytest passes."],max_attempts=1,
-            timeout_seconds=120,
+            objective=objective,constraints=constraints,
+            acceptance_criteria=acceptance,max_attempts=MAX_ATTEMPTS,
+            timeout_seconds=float(INNER_TURN_BUDGET * 90),
         )
         holder: dict[str,ComparisonExecutor]={}
         def factory(workspace):
@@ -182,6 +191,12 @@ async def _scenario(root: Path, *, safe_normalization: bool) -> dict[str,Any]:
             "outer_run_result":run.status.value,
             "outer_task_result":TaskRepository(db).get(task.id).status.value,
             "outer_validator_calls":validator.calls,
+            "attempt_budget":{"max_attempts":MAX_ATTEMPTS,"inner_turn_budget":INNER_TURN_BUDGET},
+            "task_contract_sha256":contract_sha256,
+            "orchestrator":"RecoveringOrchestrator",
+            "validator":"FixturePytestValidator",
+            "verification_argv":["pytest","-q"],
+            "production_tool_invocations":True,
         })
         return observation
     finally:
@@ -212,6 +227,11 @@ def run_evaluation(output_path: Path | None = None) -> dict[str,Any]:
         "e7a_outer_validator_completes":e7a["outer_task_result"] == "COMPLETED" and e7a["outer_validator_calls"] == 1,
         "e7a_edit_failures_reduced":e7a_metrics["workspace_edit_failures"] < baseline_metrics["workspace_edit_failures"],
         "e7a_verifies_earlier":e7a["first_verification_turn"] < baseline["first_verification_turn"],
+        "same_task_contract":baseline["task_contract_sha256"] == e7a["task_contract_sha256"],
+        "same_outer_components":baseline["orchestrator"] == e7a["orchestrator"] and baseline["validator"] == e7a["validator"],
+        "same_attempt_and_turn_budget":baseline["attempt_budget"] == e7a["attempt_budget"],
+        "same_verification_policy":baseline["verification_argv"] == e7a["verification_argv"],
+        "production_tool_invocations":baseline["production_tool_invocations"] and e7a["production_tool_invocations"],
         "fixture_unchanged":fixture_before == fixture_after,
         "canonical_artifacts_unchanged":canonical_unchanged,
     }
@@ -223,6 +243,15 @@ def run_evaluation(output_path: Path | None = None) -> dict[str,Any]:
         "harness_version":HARNESS_VERSION,
         "fixture_version":FIXTURE_VERSION,
         "comparison_scope":"same fixture; legacy exact-only edit policy versus E7-A safe unique normalization",
+        "controlled_variables":{
+            "fixture_version":FIXTURE_VERSION,
+            "task_contract_sha256":baseline["task_contract_sha256"],
+            "orchestrator":baseline["orchestrator"],
+            "validator":baseline["validator"],
+            "attempt_budget":baseline["attempt_budget"],
+            "verification_argv":baseline["verification_argv"],
+            "only_mechanism_difference":"workspace.edit safe unique normalization enabled in E7-A arm",
+        },
         "stochastic_success_rate_claimed":False,
         "status":"PASS" if all(checks.values()) else "FAIL",
         "checks":checks,

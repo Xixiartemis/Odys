@@ -1,5 +1,9 @@
 {
   "baseline": {
+    "attempt_budget": {
+      "inner_turn_budget": 20,
+      "max_attempts": 3
+    },
     "changed_files": [
       "src/message_router.py",
       "src/session_store.py"
@@ -26,11 +30,19 @@
       "workspace_edit_successes": 0,
       "workspace_read_search_after_edit_failure": 1
     },
+    "orchestrator": "RecoveringOrchestrator",
     "outer_run_result": "COMPLETED",
     "outer_task_result": "COMPLETED",
     "outer_validator_calls": 1,
     "policy": "legacy_exact_only",
+    "production_tool_invocations": true,
+    "task_contract_sha256": "1900fc864ae80e2bac72b0dfdf1098bb143531ecd32961a052152c8f68d2d5f7",
     "turn_mapping": "one scripted tool call equals one deterministic turn",
+    "validator": "FixturePytestValidator",
+    "verification_argv": [
+      "pytest",
+      "-q"
+    ],
     "workspace_tree_sha256": "8310b20abac36af8aabdacea52eab23729aa3c2e27b0c59f5347bb31e49f26a7"
   },
   "canonical_artifact_sha256": {
@@ -47,7 +59,12 @@
     "e7a_outer_validator_completes": true,
     "e7a_verifies_earlier": true,
     "fixture_unchanged": true,
-    "initial_fixture_tests_fail": true
+    "initial_fixture_tests_fail": true,
+    "production_tool_invocations": true,
+    "same_attempt_and_turn_budget": true,
+    "same_outer_components": true,
+    "same_task_contract": true,
+    "same_verification_policy": true
   },
   "comparison": {
     "edit_failure_rate_baseline": 1.0,
@@ -64,7 +81,26 @@
     "tool_failure_rate_e7a": 0.0
   },
   "comparison_scope": "same fixture; legacy exact-only edit policy versus E7-A safe unique normalization",
+  "controlled_variables": {
+    "attempt_budget": {
+      "inner_turn_budget": 20,
+      "max_attempts": 3
+    },
+    "fixture_version": "HV12-SESSION-LIFECYCLE-1",
+    "only_mechanism_difference": "workspace.edit safe unique normalization enabled in E7-A arm",
+    "orchestrator": "RecoveringOrchestrator",
+    "task_contract_sha256": "1900fc864ae80e2bac72b0dfdf1098bb143531ecd32961a052152c8f68d2d5f7",
+    "validator": "FixturePytestValidator",
+    "verification_argv": [
+      "pytest",
+      "-q"
+    ]
+  },
   "e7a": {
+    "attempt_budget": {
+      "inner_turn_budget": 20,
+      "max_attempts": 3
+    },
     "changed_files": [
       "src/message_router.py",
       "src/session_store.py"
@@ -89,11 +125,19 @@
       "workspace_edit_successes": 1,
       "workspace_read_search_after_edit_failure": 0
     },
+    "orchestrator": "RecoveringOrchestrator",
     "outer_run_result": "COMPLETED",
     "outer_task_result": "COMPLETED",
     "outer_validator_calls": 1,
     "policy": "safe_unique_normalization",
+    "production_tool_invocations": true,
+    "task_contract_sha256": "1900fc864ae80e2bac72b0dfdf1098bb143531ecd32961a052152c8f68d2d5f7",
     "turn_mapping": "one scripted tool call equals one deterministic turn",
+    "validator": "FixturePytestValidator",
+    "verification_argv": [
+      "pytest",
+      "-q"
+    ],
     "workspace_tree_sha256": "8310b20abac36af8aabdacea52eab23729aa3c2e27b0c59f5347bb31e49f26a7"
   },
   "evaluation_id": "HV15-E7A-DRY-001",

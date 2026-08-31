@@ -10,6 +10,7 @@ from lhas.tools.protocol import ToolRequest
 _RECOVERY_CAPABILITIES = {"workspace.read", "workspace.search"}
 _EDIT_CAPABILITIES = {"workspace.edit", "workspace.edit_lines"}
 _MAX_REPEAT_COUNT = 100
+_MAX_SIGNATURE_KEYS = 256
 
 
 def _args_signature(args: dict[str, Any]) -> str:
@@ -71,7 +72,7 @@ class ToolAwareObserver:
     def __init__(self):
         self.call_index=0
         self._signature_failures: dict[tuple[str,str,str],int]={}
-        self._last_similar_failure: tuple[str,str] | None=None
+        self._last_similar_failure: tuple[str,str,str] | None=None
         self._similar_failure_count=0
         self._strategy_pending: tuple[str,str] | None=None
         self._edit_failure_pending=False
@@ -94,8 +95,14 @@ class ToolAwareObserver:
         exact=0; exact_truncated=False
         if status == "FAILURE":
             key=(name,signature,result.error_type or "UNKNOWN")
-            exact,exact_truncated=self._bounded_increment(self._signature_failures.get(key,0))
-            self._signature_failures[key]=exact
+            if key in self._signature_failures:
+                exact,exact_truncated=self._bounded_increment(self._signature_failures[key])
+                self._signature_failures[key]=exact
+            elif len(self._signature_failures) < _MAX_SIGNATURE_KEYS:
+                exact,exact_truncated=1,False
+                self._signature_failures[key]=exact
+            else:
+                exact,exact_truncated=1,True
             if exact >= 2:
                 summary["failure_repeat_count"]=exact
                 summary["strategy_change_required"]=True
@@ -103,7 +110,8 @@ class ToolAwareObserver:
                 summary["repeat_count_truncated"]=True
 
         if name in _EDIT_CAPABILITIES and status == "FAILURE":
-            similar=(name,category)
+            target_path=str(args.get("path") or "")[:512]
+            similar=(name,category,target_path)
             if self._last_similar_failure == similar:
                 self._similar_failure_count,truncated_similar=self._bounded_increment(self._similar_failure_count)
             else:
@@ -120,7 +128,7 @@ class ToolAwareObserver:
         elif name in _EDIT_CAPABILITIES and status == "SUCCESS":
             self._last_similar_failure=None; self._similar_failure_count=0
             if self._strategy_pending is not None:
-                failed_capability,failed_category=self._strategy_pending
+                failed_capability,failed_category,_failed_path=self._strategy_pending
                 summary.update({
                     "strategy_change_observed":True,
                     "strategy_change_from":failed_capability,
@@ -141,7 +149,7 @@ class ToolAwareObserver:
         if name in _RECOVERY_CAPABILITIES and self._edit_failure_pending:
             summary["after_edit_failure"]=True
         if name in _RECOVERY_CAPABILITIES and self._strategy_pending is not None:
-            failed_capability,failed_category=self._strategy_pending
+            failed_capability,failed_category,_failed_path=self._strategy_pending
             summary.update({
                 "strategy_change_observed":True,
                 "strategy_change_from":failed_capability,

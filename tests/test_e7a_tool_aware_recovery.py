@@ -47,6 +47,13 @@ def test_e7a_unique_trailing_space_normalization(tmp_path):
     assert (workspace.root / "sample.txt").read_bytes() == b"alpha\nBETA\ngamma\n"
 
 
+def test_e7a_exact_match_wins_over_other_normalized_candidate(tmp_path):
+    workspace=StagedWorkspace.create(_source(tmp_path,b"same\nsame  \n"),tmp_path / "stage")
+    result=asyncio.run(workspace.edit_file("sample.txt","same\n","EXACT\n"))
+    assert result["match_mode"] == "EXACT" and result["matched_start_line"] == 1
+    assert (workspace.root / "sample.txt").read_bytes() == b"EXACT\nsame  \n"
+
+
 def test_e7a_unique_newline_normalization_preserves_crlf(tmp_path):
     workspace=StagedWorkspace.create(_source(tmp_path,b"alpha\r\nbeta\r\ngamma\r\n"),tmp_path / "stage")
     result=asyncio.run(workspace.edit_file("sample.txt","beta\n","BETA\n"))
@@ -140,6 +147,48 @@ def test_e7a_similar_failure_then_read_records_strategy_change(tmp_path):
     assert observations[2]["strategy_change_to"] == "workspace.read"
 
 
+def test_e7a_strategy_change_has_a_causal_failure_window():
+    observer=ToolAwareObserver()
+    failure=ToolResult(status=ToolResultStatus.FAILURE,error_type="EDIT_TARGET_NOT_FOUND",metadata={"failure_category":"EDIT_TARGET_NOT_FOUND"})
+    read=ToolResult(status=ToolResultStatus.SUCCESS,output={"path":"a.py","sha256":"a"})
+    edit=ToolResult(status=ToolResultStatus.SUCCESS,output={"path":"a.py","before_sha256":"a","after_sha256":"b"})
+    args={"path":"a.py","old_text":"x","new_text":"y"}
+    observer.decorate("workspace.edit",args,failure,{},_args_signature(args))
+    observer.decorate("workspace.edit",args,failure,{},_args_signature(args))
+    read_summary=observer.decorate("workspace.read",{"path":"a.py"},read,{},_args_signature({"path":"a.py"}))
+    edit_summary=observer.decorate("workspace.edit",args,edit,{},_args_signature(args))
+    assert read_summary["strategy_change_observed"] is True
+    assert "strategy_change_observed" not in edit_summary
+
+
+def test_e7a_single_failure_then_unrelated_read_is_not_strategy_change():
+    observer=ToolAwareObserver()
+    failure=ToolResult(status=ToolResultStatus.FAILURE,error_type="EDIT_TARGET_NOT_FOUND",metadata={"failure_category":"EDIT_TARGET_NOT_FOUND"})
+    args={"path":"a.py","old_text":"x","new_text":"y"}
+    observer.decorate("workspace.edit",args,failure,{},_args_signature(args))
+    read_args={"path":"other.py"}
+    summary=observer.decorate("workspace.read",read_args,ToolResult(status=ToolResultStatus.SUCCESS,output={}),{},_args_signature(read_args))
+    assert summary.get("after_edit_failure") is True
+    assert summary.get("strategy_change_observed") is not True
+
+
+def test_e7a_repeated_failures_reset_between_attempt_observers():
+    failure=ToolResult(status=ToolResultStatus.FAILURE,error_type="EDIT_TARGET_NOT_FOUND",metadata={"failure_category":"EDIT_TARGET_NOT_FOUND"})
+    args={"path":"a.py","old_text":"x","new_text":"y"}
+    first=ToolAwareObserver(); first.decorate("workspace.edit",args,failure,{},_args_signature(args)); second=ToolAwareObserver()
+    summary=second.decorate("workspace.edit",args,failure,{},_args_signature(args))
+    assert "similar_failure_count" not in summary and "failure_repeat_count" not in summary
+
+
+def test_e7a_repeated_failures_do_not_cross_contaminate_files():
+    observer=ToolAwareObserver()
+    failure=ToolResult(status=ToolResultStatus.FAILURE,error_type="EDIT_TARGET_NOT_FOUND",metadata={"failure_category":"EDIT_TARGET_NOT_FOUND"})
+    for path in ("a.py","b.py"):
+        args={"path":path,"old_text":"x","new_text":"y"}
+        summary=observer.decorate("workspace.edit",args,failure,{},_args_signature(args))
+        assert "similar_failure_count" not in summary and "strategy_change_required" not in summary
+
+
 def test_e7a_adapter_does_not_hide_or_auto_retry_failures(tmp_path):
     tools,trace=_adapter_tools(tmp_path); context=SimpleNamespace(tool_call_id="c",context={})
     result=asyncio.run(tools["workspace.edit"].on_invoke_tool(context,json.dumps({"path":"sample.txt","old_text":"missing","new_text":"x"})))
@@ -155,6 +204,16 @@ def test_e7a_repeat_observation_count_is_bounded():
     for _ in range(105):
         summary=observer.decorate("workspace.edit",args,result,safe_tool_summary("workspace.edit",args,result),signature)
     assert summary["failure_repeat_count"] == 100 and summary["similar_failure_count"] == 100
+    assert summary["repeat_count_truncated"] is True
+
+
+def test_e7a_unique_signature_tracking_keys_are_bounded():
+    observer=ToolAwareObserver()
+    result=ToolResult(status=ToolResultStatus.FAILURE,error_type="EDIT_TARGET_NOT_FOUND",metadata={"failure_category":"EDIT_TARGET_NOT_FOUND"})
+    for index in range(300):
+        args={"path":"x.py","old_text":f"missing-{index}","new_text":"y"}
+        summary=observer.decorate("workspace.edit",args,result,{},_args_signature(args))
+    assert len(observer._signature_failures) == 256
     assert summary["repeat_count_truncated"] is True
 
 

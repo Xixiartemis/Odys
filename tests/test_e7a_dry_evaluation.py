@@ -42,6 +42,11 @@ def test_e7a_dry_verifies_earlier_and_finishes_functionally(dry_result):
     assert comparison["outer_task_result_baseline"] == comparison["outer_task_result_e7a"] == "COMPLETED"
     assert dry_result["baseline"]["outer_run_result"] == dry_result["e7a"]["outer_run_result"] == "COMPLETED"
     assert dry_result["baseline"]["outer_validator_calls"] == dry_result["e7a"]["outer_validator_calls"] == 1
+    assert dry_result["baseline"]["attempt_budget"] == dry_result["e7a"]["attempt_budget"] == {"max_attempts":3,"inner_turn_budget":20}
+    assert dry_result["baseline"]["task_contract_sha256"] == dry_result["e7a"]["task_contract_sha256"]
+    assert dry_result["baseline"]["orchestrator"] == dry_result["e7a"]["orchestrator"] == "RecoveringOrchestrator"
+    assert dry_result["baseline"]["validator"] == dry_result["e7a"]["validator"] == "FixturePytestValidator"
+    assert dry_result["baseline"]["production_tool_invocations"] is True and dry_result["e7a"]["production_tool_invocations"] is True
 
 
 def test_e7a_dry_preserves_fixture_and_canonical_artifacts(dry_result):

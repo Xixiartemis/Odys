@@ -16,8 +16,11 @@ MiMo call was made.
 `HV15-E7A-DRY-001` is deterministic dry evidence over the frozen
 `HV12-SESSION-LIFECYCLE-1` fixture. Its legacy arm executes the same edit
 implementation with safe normalization disabled; its E7-A arm enables the new
-policy. This is a controlled mechanism comparison, not a historical replay and
-not evidence of a stochastic success-rate improvement.
+policy. Both arms use the byte-identical HV13 task contract, the same
+`RecoveringOrchestrator`, `FixturePytestValidator`, `MAX_ATTEMPTS=3`,
+`INNER_TURN_BUDGET=20`, and `pytest -q` policy. This is a controlled mechanism
+comparison, not a historical replay and not evidence of a stochastic
+success-rate improvement.
 
 ## Implementation contract
 
@@ -54,13 +57,15 @@ Inner Agent
 → CP-3 safe projection on a later attempt
 ```
 
-Consecutive `workspace.edit` failures are grouped by capability and safe
-failure category even when argument hashes differ. Exact repeats remain
-separately countable. On the second similar failure the observation emits
-`strategy_change_required`; a later read/search or successful reconstructed
-edit emits `strategy_change_observed`. Counts are capped at 100 and marked
-truncated. The adapter performs no hidden retry, and the existing turn budget
-is unchanged.
+Consecutive `workspace.edit` failures are grouped within one attempt by
+capability, safe failure category, and the bounded workspace-relative target
+path, even when argument hashes differ. Exact repeats remain separately
+countable by capability, argument hash, and error type. On the second similar
+failure the observation emits `strategy_change_required`; a later read/search
+or successful reconstructed edit in that causal window emits
+`strategy_change_observed`. Repeat counts are capped at 100, unique signature
+keys at 256, and truncation is explicit. The adapter performs no hidden retry,
+and the existing turn budget is unchanged.
 
 The verification path is:
 
@@ -87,6 +92,17 @@ the first pytest tool-call index, and total tool calls/failures. Attempt turns
 remain sourced from the existing Inner-Agent lifecycle events. No transcript,
 reasoning, arguments, command output, credentials, or secrets enter these
 metrics.
+
+Metric definitions are: `EDIT_FAILURE_RATE` = failed `workspace.edit` calls
+divided by `workspace.edit` calls; `TOTAL_TOOL_FAILURE_RATE` = observations
+with `status=FAILURE` divided by all observed tool calls; functional pytest
+non-zero exits are `status=SUCCESS` with `pytest_observation=FAIL` and are not
+tool failures; `REPEATED_EDIT_TARGET_NOT_FOUND` counts failure observations
+with a same-path similar-failure count of at least two; and
+`STRATEGY_CHANGE_OBSERVED` counts summaries emitted after a pending repeated
+failure followed by a read/search or reconstructed edit. In this artifact
+`FIRST_VERIFICATION_TURN` is a scripted executor tool-call ordinal, not a
+model turn or event ordinal.
 
 ## Regression risk map
 
@@ -131,7 +147,7 @@ resulting tool sequence.
 | Outer Task result | COMPLETED | COMPLETED |
 
 One scripted tool call is defined as one deterministic turn in this dry
-comparison. The fixture, HV12 canonical JSON, HV13 canonical JSON, and HV13
+comparison solely for the comparison table. The fixture, HV12 canonical JSON, HV13 canonical JSON, and HV13
 claim marker remained unchanged.
 
 ## Known limitations and live readiness
