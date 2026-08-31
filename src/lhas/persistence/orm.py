@@ -226,3 +226,44 @@ class RecoveryActionRow(Base):
     attempt_to: Mapped[int | None] = mapped_column(Integer, nullable=True)
     added_context: Mapped[str | None] = _json_col()
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class ConversationSessionRow(Base):
+    __tablename__ = "conversation_sessions"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    title: Mapped[str] = mapped_column(String(256), nullable=False)
+    parent_session_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    metadata_json: Mapped[str | None] = _json_col()
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class SessionMessageRow(Base):
+    __tablename__ = "session_messages"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    session_id: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    role: Mapped[str] = mapped_column(String(16), nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    safe_tool_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    metadata_json: Mapped[str | None] = _json_col()
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class DelegationRow(Base):
+    __tablename__ = "delegations"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    parent_agent_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    parent_task_id: Mapped[str] = mapped_column(String(32), nullable=False)
+    parent_run_id: Mapped[str] = mapped_column(String(32), nullable=False)
+    child_agent_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    child_task_id: Mapped[str] = mapped_column(String(32), nullable=False)
+    child_run_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    spawn_depth: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    context_json: Mapped[str | None] = _json_col()
+    result_json: Mapped[str | None] = _json_col()
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

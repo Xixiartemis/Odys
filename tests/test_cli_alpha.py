@@ -66,9 +66,9 @@ def test_odys_version_identifies_product_and_harness():
     result = runner.invoke(app, ["version"])
     assert result.exit_code == 0
     assert "Odys" in result.output
-    assert "Harness: HV-1.4" in result.output
+    assert "Harness: HV-1.5" in result.output
     assert "Package: 0.1.0" in result.output
-    assert HARNESS_VERSION == "HV-1.4"
+    assert HARNESS_VERSION == "HV-1.5"
 
 
 def test_run_rejects_missing_repo(tmp_path):

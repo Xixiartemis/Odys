@@ -23,17 +23,19 @@ class _ToolExecutor:
         except KeyError as exc: return ExecutionResult(status=ExecutionStatus.FAILURE, error_type="UNKNOWN_CAPABILITY", error_message=str(exc))
         tr = ToolRequest(tool_call_id=new_id(), task_id=request.task_id, run_id=request.run_id, attempt_id=request.attempt_id,
                          capability=self.step.capability, arguments=self.step.inputs, context={**self.context, **request.context}, metadata=request.metadata)
-        event.append(EventType.TOOL_CALL_STARTED, task_id=request.task_id, run_id=request.run_id, attempt_id=request.attempt_id, payload={"request": tr.model_dump(mode="json")})
+        safe_request={"tool_call_id":tr.tool_call_id,"capability":tr.capability}
+        event.append(EventType.TOOL_CALL_STARTED, task_id=request.task_id, run_id=request.run_id, attempt_id=request.attempt_id, payload={"request":safe_request})
         try:
             result = await tool.execute(tr)
             typ = EventType.TOOL_CALL_COMPLETED if result.status == ToolResultStatus.SUCCESS else EventType.TOOL_CALL_FAILED
-            event.append(typ, task_id=request.task_id, run_id=request.run_id, attempt_id=request.attempt_id, payload={"request": tr.model_dump(mode="json"), "result": result.model_dump(mode="json")})
+            safe_result={"status":result.status.value,"error_type":result.error_type,"artifact_keys":sorted(result.artifacts)[:20]}
+            event.append(typ, task_id=request.task_id, run_id=request.run_id, attempt_id=request.attempt_id, payload={"request":safe_request,"result":safe_result})
             status = ExecutionStatus.SUCCESS if result.status == ToolResultStatus.SUCCESS else ExecutionStatus.FAILURE
             import json
             output = result.output if isinstance(result.output, str) else json.dumps(result.output, ensure_ascii=False)
             return ExecutionResult(status=status, output=output, artifacts=result.artifacts, usage=result.usage, raw=result.model_dump(mode="json"), error_type=result.error_type, error_message=result.error_message)
         except Exception as exc:
-            event.append(EventType.TOOL_CALL_FAILED, task_id=request.task_id, run_id=request.run_id, attempt_id=request.attempt_id, payload={"request": tr.model_dump(mode="json"), "error": str(exc)})
+            event.append(EventType.TOOL_CALL_FAILED, task_id=request.task_id, run_id=request.run_id, attempt_id=request.attempt_id, payload={"request":safe_request,"error_type":type(exc).__name__})
             return ExecutionResult(status=ExecutionStatus.FAILURE, error_type=type(exc).__name__, error_message=str(exc))
     async def resume(self, request): return await self.execute(request)
     async def cancel(self, run_id): return None

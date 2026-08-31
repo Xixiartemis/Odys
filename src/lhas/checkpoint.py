@@ -157,6 +157,22 @@ _SAFE_EVENT_FIELDS = {
         "changed_files", "files_changed", "lines_added", "lines_removed",
         "truncated", "patch_sha256",
     },
+    EventType.ROOT_AGENT_STARTED: {"agent_id", "session_id", "route"},
+    EventType.ROOT_AGENT_COMPLETED: {"agent_id", "session_id", "route", "goal_id", "plan_id"},
+    EventType.DELEGATION_CREATED: {"delegation_id", "parent_agent_id", "child_agent_id", "child_task_id", "spawn_depth", "role"},
+    EventType.DELEGATION_STARTED: {"delegation_id", "parent_run_id"},
+    EventType.DELEGATION_COMPLETED: {"delegation_id", "parent_run_id", "validation"},
+    EventType.DELEGATION_FAILED: {"delegation_id", "parent_run_id", "validation"},
+    EventType.CHILD_RUN_LINKED: {"delegation_id", "parent_task_id", "parent_run_id"},
+    EventType.SKILL_DISCOVERED: {"agent_id", "count"},
+    EventType.SKILL_LOADED: {"name", "reference_path"},
+    EventType.MEMORY_READ: {"agent_id", "session_id", "count"},
+    EventType.KNOWLEDGE_SEARCHED: {"result_count"},
+    EventType.MCP_SERVER_CONNECTED: {"server_name", "transport"},
+    EventType.MCP_TOOL_DISCOVERED: {"server_name", "capability", "origin"},
+    EventType.PLAN_STEP_STARTED: {"plan_id", "step_id", "task_id"},
+    EventType.PLAN_STEP_COMPLETED: {"plan_id", "step_id", "run_id"},
+    EventType.PLAN_STEP_FAILED: {"plan_id", "step_id", "run_id"},
 }
 
 

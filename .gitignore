@@ -19,6 +19,9 @@ htmlcov/
 
 # Runtime data (SQLite + logs) — never commit
 data/
+.odys/*.db
+.odys/memory/
+.odys-demo/
 
 # OS / editor
 .DS_Store

@@ -37,15 +37,25 @@ from lhas.cli_runtime import (
     list_recent_runs,
     resolve_provider_settings,
 )
-from lhas.cli_ui import execute_with_progress
+from lhas.cli_ui import execute_with_progress, project_agent_tree
 from lhas.command_validation import parse_verification_command
+from lhas.agent.platform import OfflineAgentPlatform
+from lhas.agent.profile import AgentProfileRegistry
+from lhas.memory import BuiltinMemoryProvider
+from lhas.skills import SkillRegistry
 
 app = typer.Typer(
     help="Odys - Plan. Act. Recover. Finish.",
     no_args_is_help=True,
 )
 goal_app = typer.Typer(help="Run and inspect constrained goals")
+skills_app = typer.Typer(help="Discover progressively disclosed skills")
+memory_app = typer.Typer(help="Inspect bounded persistent memory")
+mcp_app = typer.Typer(help="Inspect Model Context Protocol servers")
 app.add_typer(goal_app, name="goal")
+app.add_typer(skills_app, name="skills")
+app.add_typer(memory_app, name="memory")
+app.add_typer(mcp_app, name="mcp")
 console = Console()
 
 
@@ -55,6 +65,85 @@ def _open_db() -> Database:
     db = Database(path)
     db.init_db()
     return db
+
+
+def _platform_db(override: Optional[Path]) -> Database:
+    path=(override or Path(".odys/platform.db")).expanduser().resolve()
+    path.parent.mkdir(parents=True,exist_ok=True)
+    db=Database(path); db.init_db(); return db
+
+
+@app.command("chat")
+def chat(
+    message: str = typer.Argument(..., help="Message or long-running goal"),
+    repo: Path = typer.Option(Path("."), "--repo", help="Project context root"),
+    offline: bool = typer.Option(False, "--offline", help="Use the deterministic no-network platform"),
+    db_override: Optional[Path] = typer.Option(None, "--db", help="SQLite database path"),
+) -> None:
+    """Talk to RootAgent; long goals route through the Odys control plane."""
+    if not offline:
+        raise typer.BadParameter("Agent Platform Foundation chat currently requires --offline")
+    root=repo.expanduser().resolve()
+    if not root.is_dir(): raise typer.BadParameter(f"repository path does not exist: {root}")
+    db=_platform_db(db_override)
+    async def execute():
+        platform=await OfflineAgentPlatform.create(db,root,memory_root=(Path(db_override).resolve().parent/"memory" if db_override else root/".odys"/"memory"))
+        try:
+            return await platform.root.handle(message,project_id=platform.project.id)
+        finally:
+            await platform.close()
+    try:
+        response=asyncio.run(execute())
+        console.print(f"Route: {response.route.value}")
+        console.print(response.output)
+        console.print(f"Session: {response.session_id}")
+        if response.goal_id: console.print(f"Goal: {response.goal_id}")
+        if response.plan_id: console.print(f"Plan: {response.plan_id}")
+        for run_id in response.run_refs: console.print(f"Run: {run_id}")
+        tree=project_agent_tree(EventStore(db).list_all())
+        if tree:
+            console.print("Agent tree:")
+            for node in tree: console.print(f"  {node['role']} {node['agent_id']} {node['status']}")
+    finally:
+        db.close()
+
+
+@app.command("agents")
+def agents() -> None:
+    """List installed role profiles sharing the AgentKernel contract."""
+    for profile in AgentProfileRegistry().list():
+        console.print(f"{profile.role.value}\t{profile.name}\t{profile.provider}/{profile.model}\ttoolsets={','.join(sorted(profile.toolsets))}")
+
+
+def _cli_skills() -> SkillRegistry:
+    return SkillRegistry([Path.cwd()/".odys"/"skills",Path.home()/".odys"/"skills"])
+
+
+@skills_app.command("list")
+def skills_list() -> None:
+    for item in _cli_skills().list(): console.print(f"{item.name}\t{item.description}")
+
+
+@skills_app.command("show")
+def skills_show(name: str, reference: Optional[str] = typer.Option(None,"--reference")) -> None:
+    document=_cli_skills().view(name,reference); console.print(document.content)
+
+
+@memory_app.command("show")
+def memory_show() -> None:
+    provider=BuiltinMemoryProvider(Path.home()/".odys"/"memory")
+    for item in provider.list(): console.print(f"{item.scope}\t{item.id}\t{item.content}")
+
+
+@memory_app.command("search")
+def memory_search(query: str) -> None:
+    provider=BuiltinMemoryProvider(Path.home()/".odys"/"memory")
+    for item in provider.search(query): console.print(f"{item.scope}\t{item.id}\t{item.content}")
+
+
+@mcp_app.command("list")
+def mcp_list() -> None:
+    console.print("No persistent MCP servers configured. Offline acceptance uses stdio server 'offline'.")
 
 @goal_app.command("run")
 def goal_run(goal: str = typer.Option(...,"--goal"), file: Path = typer.Option(...,"--file"), live: bool = typer.Option(False,"--live"), output_dir: Path = typer.Option(Path("artifacts"),"--output-dir")):

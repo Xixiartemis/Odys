@@ -20,6 +20,9 @@ _UI_EVENT_FIELDS = {
     "event_id", "event_type", "capability", "status", "error_type", "path",
     "files_changed", "turn_number", "attempt_number", "action",
     "failure_repeat_count", "strategy_change_required",
+    "agent_id", "session_id", "route", "delegation_id", "child_agent_id",
+    "child_task_id", "parent_agent_id", "parent_run_id", "spawn_depth", "role", "validation",
+    "plan_id", "step_id", "task_id", "run_id",
 }
 
 
@@ -41,6 +44,42 @@ def should_use_rich(*, no_ui: bool, stream=None) -> bool:
         return False
 
 
+def project_agent_tree(events) -> list[dict[str, Any]]:
+    """Build a bounded hierarchy using persisted events only."""
+    nodes: dict[str, dict[str, Any]] = {}
+    order: list[str] = []
+    steps: dict[str, str] = {}
+    root_id: str | None = None
+    for event in list(events)[-200:]:
+        if hasattr(event, "event_type"):
+            event_type=event.event_type.value; payload=event.payload or {}
+        else:
+            event_type=str(event.get("event_type","")); payload=event
+        if event_type=="ROOT_AGENT_STARTED":
+            agent_id=str(payload.get("agent_id","root"))[:128]
+            nodes[agent_id]={"agent_id":agent_id,"role":"ROOT","status":"RUNNING","parent_agent_id":None}; order.append(agent_id)
+            root_id=agent_id
+        elif event_type=="ROOT_AGENT_COMPLETED":
+            agent_id=str(payload.get("agent_id","root"))[:128]
+            nodes.setdefault(agent_id,{"agent_id":agent_id,"role":"ROOT","parent_agent_id":None})["status"]="COMPLETED"
+        elif event_type=="PLAN_STEP_STARTED":
+            task_id=str(payload.get("task_id",""))[:64]; step_id=str(payload.get("step_id",""))[:64]
+            worker=f"worker-{task_id}"
+            nodes[worker]={"agent_id":worker,"role":"WORKER","status":"RUNNING","parent_agent_id":root_id,"task_id":task_id}; order.append(worker); steps[step_id]=worker
+        elif event_type in {"PLAN_STEP_COMPLETED","PLAN_STEP_FAILED"}:
+            worker=steps.get(str(payload.get("step_id","")))
+            if worker in nodes: nodes[worker]["status"]="COMPLETED" if event_type=="PLAN_STEP_COMPLETED" else "FAILED"
+        elif event_type=="DELEGATION_CREATED":
+            child=str(payload.get("child_agent_id","child"))[:128]
+            nodes[child]={"agent_id":child,"role":str(payload.get("role","WORKER"))[:32],"status":"CREATED","parent_agent_id":str(payload.get("parent_agent_id","worker"))[:128],"child_task_id":str(payload.get("child_task_id",""))[:64],"delegation_id":str(payload.get("delegation_id",""))[:64]}; order.append(child)
+        elif event_type in {"DELEGATION_STARTED","DELEGATION_COMPLETED","DELEGATION_FAILED"}:
+            delegation=str(payload.get("delegation_id",""))
+            for node in nodes.values():
+                if node.get("delegation_id")==delegation:
+                    node["status"]={"DELEGATION_STARTED":"RUNNING","DELEGATION_COMPLETED":"COMPLETED","DELEGATION_FAILED":"FAILED"}[event_type]
+    return [nodes[key] for key in order if key in nodes][-20:]
+
+
 def project_view_state(
     inspection: dict[str, Any] | None,
     *,
@@ -60,6 +99,7 @@ def project_view_state(
             "validation": "UNKNOWN",
             "recovery": {"failure": None, "action": None, "checkpoint": None, "cp3": False},
             "recent_activity": [],
+            "agent_tree": [],
         }
     run = inspection["run"]
     attempts = inspection["attempts"]
@@ -95,6 +135,7 @@ def project_view_state(
             "cp3": bool(recovery.get("cp3_used")),
         },
         "recent_activity": _safe_activity(inspection.get("events", [])),
+        "agent_tree": project_agent_tree(inspection.get("events", [])),
     }
 
 
@@ -121,6 +162,10 @@ def render_dashboard(state: dict[str, Any]):
         + (f" [{event.get('capability')}]" if event.get("capability") else "")
         for event in state["recent_activity"]
     ) or "(no persisted activity yet)"
+    tree = "\n".join(
+        f"{'  ' if node.get('parent_agent_id') else ''}{node.get('role', 'AGENT')} {node.get('agent_id', '-')}: {node.get('status', 'UNKNOWN')}"
+        for node in state.get("agent_tree", [])
+    ) or "(single agent)"
     return Group(
         Panel(heading),
         Panel(state["goal"], title="GOAL"),
@@ -129,6 +174,7 @@ def render_dashboard(state: dict[str, Any]):
         Panel(workspace_table, title="WORKSPACE"),
         Panel(state["validation"], title="VALIDATION"),
         Panel(recovery_table, title="RECOVERY"),
+        Panel(tree, title="AGENT TREE"),
         Panel(activity, title="RECENT ACTIVITY"),
     )
 

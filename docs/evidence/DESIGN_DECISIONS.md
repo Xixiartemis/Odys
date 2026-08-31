@@ -170,3 +170,45 @@ evidence.
 **Next hypothesis.** Measure E7-A tool ergonomics and verification discipline
 on additional non-canonical product demos before any new canonical real-model
 run. E7-B Dynamic Macro Replan remains deferred and is not implemented here.
+
+## DD-HV15-AGENT-PLATFORM-FOUNDATION
+
+**Design decision.** Adopt a shared provider-neutral AgentKernel contract and
+role Profiles, while retaining Task/Run/Attempt, RecoveringOrchestrator,
+Validator, CP-3 and EventStore as the authoritative long-horizon control plane.
+The existing InnerAgent path remains available through an adapter.
+
+**Design decision.** Make delegation durable. A delegated agent is represented
+by a lineage row plus an ordinary Child Task, Child Run and Child Attempt. Its
+context is a bounded explicit handoff, not the parent transcript. A child
+result is a bounded summary/evidence envelope and never becomes an acceptance
+verdict without Validator evidence.
+
+**Design decision.** Keep ToolRegistry as the platform narrow waist. Toolsets
+expand to its capabilities, and stdio MCP discovery creates normal Tool
+adapters with origin/risk metadata. Skills, Memory, Session and Knowledge are
+separate systems joined only through ContextAssembler-selected sections.
+
+**Upstream decision.** Hermes Agent at fixed MIT commit `3f315e46` was used as
+architecture research. Nine subsystem concepts were reimplemented natively;
+zero Hermes source files were copied or modified. Hermes CLI, gateway,
+dashboard, messaging and branding were intentionally excluded.
+
+**Tradeoffs.** The stdio MCP transport implements the core initialize/list/call
+path but not HTTP, OAuth or catalog management. Lexical Knowledge and FTS5
+Session search are predictable and light but not semantic retrieval. The
+Scripted Planner and kernels prove platform wiring, not model intelligence.
+
+**Failed approach.** The first CLI smoke closed its MCP subprocess in a second
+`asyncio.run`, which caused a Windows cross-event-loop Future error after all
+work had completed. Platform creation, execution and close now share one event
+loop; the corrected smoke exits zero.
+
+**Known limitations.** Dynamic Replan is a typed event/routing boundary only.
+Workers are sequential; Memory write approval has no interactive UI; persistent
+MCP configuration and provider-backed Root/Planner kernels are future work.
+
+**Next hypothesis.** Add a provider-backed ModelPlanner and RootAgent adapter
+behind the same contracts, then measure whether durable child specialization
+improves multi-step validated completion without weakening permission or
+context isolation.

@@ -60,6 +60,9 @@ class PlanStep(BaseModel):
     inputs: dict[str, Any] = Field(default_factory=dict)
     expected_output: str = ""
     success_criteria: list[str] = Field(default_factory=list)
+    suggested_role: str = "WORKER"
+    required_capabilities: list[str] = Field(default_factory=list)
+    optional_skill_refs: list[str] = Field(default_factory=list)
     status: PlanStepStatus = PlanStepStatus.PENDING
     task_id: Optional[str] = None
     output: Any = None
@@ -125,3 +128,5 @@ class CapabilitySpec(BaseModel):
     risk_level: str = "LOW"
     side_effect: bool = False
     requires_human_approval: bool = False
+    origin: str = "native"
+    server_name: str | None = None
