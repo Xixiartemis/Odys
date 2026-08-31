@@ -112,6 +112,19 @@ def test_w3_validator_rejection_creates_signal_consumed_by_macro_replan(db, make
     signals = ReplanSignalRepository(db).list_for_attempt(attempt.id)
     assert result.status is AgentStatus.COMPLETED
     assert any(signal.reason == "VALIDATOR_REJECTION" for signal in signals)
+    goal = Goal(id="w3-goal", project_id=task.project_id, objective="w3 revised workflow", allowed_capabilities=list("abcde"))
+    plan = Plan(id="w3-plan", goal_id=goal.id, mode=PlanMode.LINEAR, status=PlanStatus.RUNNING, steps=[
+        PlanStep(id="w3-a", title="a", objective="a", capability="a", status=PlanStepStatus.COMPLETED),
+        PlanStep(id="w3-b", title="b", objective="b", capability="b"),
+    ])
+    PlanRepository(db).create(plan)
+    planner = _ReplanPlanner()
+    registry = _tools([])
+    revised = asyncio.run(MacroReplanService(db, planner).consume(goal=goal, plan=plan, signals=[signals[0]], context={"capabilities": registry.specs()}))
+    assert revised.accepted is True and revised.plan.version.endswith("-r1")
+    finished = asyncio.run(PlanExecutionService(db, planner, registry).execute_goal(goal, resume_plan_id=plan.id))
+    assert finished.status is PlanStatus.COMPLETED
+    assert {step.capability for step in finished.steps if step.status is PlanStepStatus.COMPLETED} >= {"a", "d", "e"}
 
 
 def test_w4_child_failure_reaches_parent_replan_signal(db, make_task):
@@ -125,6 +138,15 @@ def test_w4_child_failure_reaches_parent_replan_signal(db, make_task):
     kernel._consume_deliveries(snapshot)
     signals = ReplanSignalRepository(db).list_for_attempt(attempt.id)
     assert any(signal.reason == "CHILD_FAILURE" for signal in signals)
+    goal = Goal(id="w4-goal", project_id=task.project_id, objective="w4 parent workflow", allowed_capabilities=list("abcde"))
+    plan = Plan(id="w4-plan", goal_id=goal.id, mode=PlanMode.SIMPLE_DEPENDENCY, status=PlanStatus.RUNNING, steps=[
+        PlanStep(id="w4-a", title="a", objective="a", capability="a", status=PlanStepStatus.COMPLETED),
+        PlanStep(id="w4-b", title="b", objective="b", capability="b", depends_on=["w4-a"]),
+    ])
+    PlanRepository(db).create(plan)
+    revised = asyncio.run(MacroReplanService(db, _ReplanPlanner(PlanMode.SIMPLE_DEPENDENCY)).consume(
+        goal=goal, plan=plan, signals=[signals[0]], context={"capabilities": _tools([]).specs()}))
+    assert revised.accepted is True and any(step.capability == "d" for step in revised.plan.steps)
 
 
 def test_w5_stale_worker_has_zero_side_effects(db):
