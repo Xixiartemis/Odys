@@ -3,12 +3,53 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import hashlib
+import json
 from enum import Enum
 from typing import Any, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from lhas.domain.models import new_id
+
+
+def _semantic_value(value: Any) -> Any:
+    if isinstance(value, str):
+        return " ".join(value.split()).casefold()
+    if isinstance(value, dict):
+        return {str(key): _semantic_value(value[key]) for key in sorted(value, key=str)}
+    if isinstance(value, (list, tuple)):
+        return [_semantic_value(item) for item in value]
+    return value
+
+
+def compute_step_semantic_fingerprint(step: "PlanStep", by_id: dict[str, "PlanStep"] | None = None, _seen: set[str] | None = None) -> str:
+    by_id = by_id or {}
+    seen = set(_seen or set())
+    dependency_semantics = []
+    if step.id not in seen:
+        seen.add(step.id)
+        for dependency_id in step.depends_on:
+            dependency = by_id.get(dependency_id)
+            if dependency is None:
+                dependency_semantics.append({"id": dependency_id})
+            else:
+                dependency_semantics.append({
+                    "capability": _semantic_value(dependency.capability),
+                    "objective": _semantic_value(dependency.objective),
+                    "inputs": _semantic_value(dependency.inputs),
+                    "depends_on": [
+                        compute_step_semantic_fingerprint(dependency, by_id, seen)
+                        if dependency_id not in seen else "cycle"
+                    ],
+                })
+    payload = {
+        "capability": _semantic_value(step.capability),
+        "objective": _semantic_value(step.objective),
+        "inputs": _semantic_value(step.inputs),
+        "dependency_semantics": dependency_semantics,
+    }
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8")).hexdigest()
 
 
 class PlanMode(str, Enum):
@@ -68,6 +109,7 @@ class PlanStep(BaseModel):
     task_id: Optional[str] = None
     output: Any = None
     execution_context: dict[str, Any] = Field(default_factory=dict)
+    semantic_fingerprint: str | None = Field(default=None, min_length=64, max_length=64)
 
     @model_validator(mode="after")
     def no_self_dependency(self) -> "PlanStep":
@@ -119,6 +161,8 @@ class Plan(BaseModel):
 
         for step_id in ids:
             visit(step_id)
+        for step in self.steps:
+            step.semantic_fingerprint = compute_step_semantic_fingerprint(step, by_id)
         return self
 
 

@@ -8,6 +8,7 @@ from lhas.persistence.event_store import EventStore
 from lhas.persistence.repositories import TaskRepository, RunRepository, AttemptRepository
 from lhas.persistence.planning_repositories import GoalRepository, PlanRepository
 from lhas.native.persistence import ReplanSignalRepository
+from lhas.native.models import ReplanSignal
 from lhas.orchestrator_v2 import RecoveringOrchestrator
 from lhas.planning.models import Goal, Plan, PlanStatus, PlanStepStatus
 from lhas.planning.scheduler import TaskGraphScheduler, build_step_dependency_context
@@ -47,11 +48,15 @@ class _ToolExecutor:
 class _TaskGraphAgentExecutor:
     """Expose the canonical Plan/PlanStep projection to an injected executor."""
     name = "TaskGraphAgentExecutor"
-    def __init__(self, executor, plan, step, db=None): self.executor, self.plan, self.step, self.db = executor, plan, step, db
+    def __init__(self, executor, plan, step, db=None):
+        self.executor, self.plan, self.step, self.db = executor, plan, step, db
+        self.bound_plan_id = plan.id
+        self.bound_plan_version = str(plan.version)
+        self.bound_step_id = step.id
     async def execute(self, request):
         if self.db is not None:
-            current = PlanRepository(self.db).get(self.plan.id)
-            if current is None or current.version != self.plan.version:
+            current = PlanRepository(self.db).get(self.bound_plan_id)
+            if current is None or str(current.version) != self.bound_plan_version or not any(item.id == self.bound_step_id for item in current.steps):
                 return ExecutionResult(status=ExecutionStatus.FAILURE, error_type="STALE_PLAN", error_message="plan version is no longer authoritative")
         completed=[item.id for item in self.plan.steps if item.status == PlanStepStatus.COMPLETED]
         pending=[item.id for item in self.plan.steps if item.id != self.step.id and item.status in {PlanStepStatus.PENDING,PlanStepStatus.READY,PlanStepStatus.RUNNING}]
@@ -68,6 +73,24 @@ class PlanExecutionService:
             return _TaskGraphAgentExecutor(self.agent_executor_factory(step),plan,step,self.db)
         return _ToolExecutor(self.registry,step,self.db,context)
     def _emit(self, typ, payload): EventStore(self.db).append(typ, payload=payload)
+    def _record_step_replan_signal(self, step, run_id: str, reason: str | None = None) -> None:
+        """Turn a durable step failure into the canonical replan input."""
+        attempts = AttemptRepository(self.db).list_for_run(run_id)
+        if not attempts:
+            return
+        run = RunRepository(self.db).get(run_id)
+        error_type = attempts[-1].error_type or "TOOL_FAILURE"
+        signal = ReplanSignal(
+            task_id=run.task_id if run is not None else attempts[-1].run_id,
+            run_id=run_id,
+            attempt_id=attempts[-1].id,
+            reason=reason or step.inputs.get("replan_reason") or "REPEATED_TOOL_FAILURE",
+            scope="TASKGRAPH_NODE",
+            failed_node_id=step.id,
+            evidence={"capability": step.capability, "error_type": error_type, "objective": step.objective},
+        )
+        ReplanSignalRepository(self.db).create(signal)
+        self._emit(EventType.REPLAN_SIGNAL_CREATED, {"signal_id": signal.id, "reason": signal.reason, "failed_node_id": step.id})
     async def _maybe_replan(self, goal, plan, run_id: str, context: dict[str, Any]) -> bool:
         attempts = AttemptRepository(self.db).list_for_run(run_id)
         signals = []
@@ -103,40 +126,54 @@ class PlanExecutionService:
         self._emit(EventType.PLAN_STARTED, {"plan_id": plan.id})
         task_repo = TaskRepository(self.db)
         execution_context = {"runtime": {**dict(context or {}), "goal_id": goal.id}, "steps": {}}
-        for step in plan.steps:
-            if step.status == PlanStepStatus.COMPLETED:
-                execution_context["steps"][step.id] = step.execution_context.get("steps", {}).get(step.id, {"capability": step.capability, "output": step.output, "artifacts": {}, "usage": {}})
+        while True:
+            plan = plans.get(plan.id) or plan
+            restart_authoritative_schedule = False
+            for step in list(plan.steps):
+                if step.status in {PlanStepStatus.COMPLETED, PlanStepStatus.STALE}:
+                    if step.status is PlanStepStatus.COMPLETED:
+                        execution_context["steps"][step.id] = step.execution_context.get("steps", {}).get(step.id, {"capability": step.capability, "output": step.output, "artifacts": {}, "usage": {}})
+                    continue
+                spec = self.registry.resolve(step.capability).capability
+                if step.id not in (approved_step_ids or set()) and (spec.requires_human_approval or (goal.requires_human_approval and spec.side_effect)):
+                    step.status = PlanStepStatus.WAITING_FOR_HUMAN_APPROVAL; plan.status = PlanStatus.WAITING_FOR_HUMAN_APPROVAL
+                    self._emit(EventType.HUMAN_APPROVAL_REQUIRED, {"plan_id": plan.id, "step_id": step.id, "capability": step.capability})
+                    plans.update(plan); return plan
+                step.execution_context = dict(execution_context)
+                task = Task(project_id=goal.project_id, title=step.title, objective=step.objective, constraints=goal.constraints, acceptance_criteria=step.success_criteria, max_attempts=2)
+                task_repo.create(task); step.task_id = task.id; step.status = PlanStepStatus.RUNNING
+                self._emit(EventType.PLAN_STEP_STARTED, {"plan_id": plan.id, "step_id": step.id, "task_id": task.id})
+                orch = RecoveringOrchestrator(self.db, executor_factory=lambda s=step,p=plan: self._step_executor(p,s,execution_context), executor_type="TaskGraphAgentExecutor" if self.agent_executor_factory else "ToolRegistryExecutor", provider="native-kernel" if self.agent_executor_factory else "tool-registry", model="provider-adapter" if self.agent_executor_factory else "deterministic", harness_version=HARNESS_VERSION, dataset_version="PLANNING-V0.1", experiment_id=experiment_id)
+                run = await orch.execute_task(task.id)
+                if run.status.value != "COMPLETED":
+                    step.status = PlanStepStatus.FAILED
+                    self._emit(EventType.PLAN_STEP_FAILED, {"plan_id": plan.id, "step_id": step.id, "run_id": run.id})
+                    if self.agent_executor_factory is None and step.inputs.get("replan_reason"):
+                        self._record_step_replan_signal(step, run.id)
+                    if await self._maybe_replan(goal, plan, run.id, context or {}):
+                        plans.update(plan)
+                        restart_authoritative_schedule = True
+                        break
+                    plan.status = PlanStatus.FAILED; plans.update(plan); self._emit(EventType.PLAN_FAILED, {"plan_id": plan.id}); return plan
+                import json
+                payload = json.loads(run.result or "{}")
+                step.output = payload.get("output")
+                if isinstance(step.output, str):
+                    try: step.output = json.loads(step.output)
+                    except json.JSONDecodeError: pass
+                attempts = AttemptRepository(self.db).list_for_run(run.id)
+                raw = json.loads(attempts[-1].executor_result or "{}") if attempts and attempts[-1].executor_result else {}
+                record = {"capability": step.capability, "output": step.output, "artifacts": raw.get("artifacts", {}), "usage": raw.get("usage", {})}
+                execution_context["steps"][step.id] = record
+                execution_context[step.capability] = record
+                step.execution_context = dict(execution_context)
+                step.status = PlanStepStatus.COMPLETED; plans.update(plan); self._emit(EventType.PLAN_STEP_COMPLETED, {"plan_id": plan.id, "step_id": step.id, "run_id": run.id, "output": step.output})
+            if restart_authoritative_schedule:
                 continue
-            spec = self.registry.resolve(step.capability).capability
-            if step.id not in (approved_step_ids or set()) and (spec.requires_human_approval or (goal.requires_human_approval and spec.side_effect)):
-                step.status = PlanStepStatus.WAITING_FOR_HUMAN_APPROVAL; plan.status = PlanStatus.WAITING_FOR_HUMAN_APPROVAL
-                self._emit(EventType.HUMAN_APPROVAL_REQUIRED, {"plan_id": plan.id, "step_id": step.id, "capability": step.capability})
-                plans.update(plan); return plan
-            step.execution_context = dict(execution_context)
-            task = Task(project_id=goal.project_id, title=step.title, objective=step.objective, constraints=goal.constraints, acceptance_criteria=step.success_criteria, max_attempts=2)
-            task_repo.create(task); step.task_id = task.id; step.status = PlanStepStatus.RUNNING
-            self._emit(EventType.PLAN_STEP_STARTED, {"plan_id": plan.id, "step_id": step.id, "task_id": task.id})
-            orch = RecoveringOrchestrator(self.db, executor_factory=lambda s=step,p=plan: self._step_executor(p,s,execution_context), executor_type="TaskGraphAgentExecutor" if self.agent_executor_factory else "ToolRegistryExecutor", provider="native-kernel" if self.agent_executor_factory else "tool-registry", model="provider-adapter" if self.agent_executor_factory else "deterministic", harness_version=HARNESS_VERSION, dataset_version="PLANNING-V0.1", experiment_id=experiment_id)
-            run = await orch.execute_task(task.id)
-            if run.status.value != "COMPLETED":
-                step.status = PlanStepStatus.FAILED; self._emit(EventType.PLAN_STEP_FAILED, {"plan_id": plan.id, "step_id": step.id, "run_id": run.id})
-                if await self._maybe_replan(goal, plan, run.id, context or {}):
-                    plans.update(plan); continue
-                plan.status = PlanStatus.FAILED; plans.update(plan); self._emit(EventType.PLAN_FAILED, {"plan_id": plan.id}); return plan
-            import json
-            payload = json.loads(run.result or "{}")
-            step.output = payload.get("output")
-            if isinstance(step.output, str):
-                try: step.output = json.loads(step.output)
-                except json.JSONDecodeError: pass
-            attempts = AttemptRepository(self.db).list_for_run(run.id)
-            raw = json.loads(attempts[-1].executor_result or "{}") if attempts and attempts[-1].executor_result else {}
-            record = {"capability": step.capability, "output": step.output, "artifacts": raw.get("artifacts", {}), "usage": raw.get("usage", {})}
-            execution_context["steps"][step.id] = record
-            execution_context[step.capability] = record
-            step.execution_context = dict(execution_context)
-            step.status = PlanStepStatus.COMPLETED; plans.update(plan); self._emit(EventType.PLAN_STEP_COMPLETED, {"plan_id": plan.id, "step_id": step.id, "run_id": run.id, "output": step.output})
-        plan.status = PlanStatus.COMPLETED; plans.update(plan); self._emit(EventType.PLAN_COMPLETED, {"plan_id": plan.id}); return plan
+            plan = plans.get(plan.id) or plan
+            if all(step.status in {PlanStepStatus.COMPLETED, PlanStepStatus.STALE} for step in plan.steps) and all(step.status is PlanStepStatus.COMPLETED for step in plan.steps if step.status is not PlanStepStatus.STALE):
+                plan.status = PlanStatus.COMPLETED; plans.update(plan); self._emit(EventType.PLAN_COMPLETED, {"plan_id": plan.id}); return plan
+            plan.status = PlanStatus.FAILED; plans.update(plan); self._emit(EventType.PLAN_FAILED, {"plan_id": plan.id}); return plan
 
     async def resume_after_approval(self, plan_id: str, goal: Goal, step_id: str, *, context: dict[str, Any] | None = None, experiment_id: str | None = None) -> Plan:
         """Resume by explicitly granting one previously gated capability."""
@@ -150,14 +187,17 @@ class PlanExecutionService:
                 s.status = PlanStepStatus.PENDING
             if s.status == PlanStepStatus.COMPLETED:
                 execution_context["steps"][s.id]=s.execution_context.get("steps",{}).get(s.id,{"capability":s.capability,"output":s.output,"artifacts":{},"usage":{}})
+        plans.update(plan)
         while True:
+            plan = plans.get(plan.id) or plan
             schedule=scheduler.calculate(plan)
+            restart_authoritative_schedule = False
             for step in schedule.blocked_steps:
                 step.status=PlanStepStatus.BLOCKED
                 blockers=[d for d in step.depends_on if next(x for x in plan.steps if x.id==d).status in {PlanStepStatus.FAILED,PlanStepStatus.BLOCKED}]
                 self._emit(EventType.PLAN_STEP_BLOCKED,{"plan_id":plan.id,"step_id":step.id,"blocked_by_step_ids":blockers})
             if schedule.blocked_steps: plans.update(plan)
-            for step in schedule.ready_steps:
+            for step in list(schedule.ready_steps):
                 self._emit(EventType.PLAN_STEP_READY,{"plan_id":plan.id,"step_id":step.id})
                 spec=self.registry.resolve(step.capability).capability
                 if step.id not in approved_step_ids and (spec.requires_human_approval or (goal.requires_human_approval and spec.side_effect)):
@@ -170,8 +210,10 @@ class PlanExecutionService:
                 run=await orch.execute_task(task.id)
                 if run.status.value != "COMPLETED":
                     step.status=PlanStepStatus.FAILED; self._emit(EventType.PLAN_STEP_FAILED,{"plan_id":plan.id,"step_id":step.id,"run_id":run.id})
+                    if self.agent_executor_factory is None and step.inputs.get("replan_reason"):
+                        self._record_step_replan_signal(step, run.id)
                     if await self._maybe_replan(goal, plan, run.id, context):
-                        plans.update(plan); continue
+                        plans.update(plan); restart_authoritative_schedule = True; break
                     plans.update(plan); continue
                 import json
                 payload=json.loads(run.result or "{}"); step.output=payload.get("output")
@@ -182,6 +224,8 @@ class PlanExecutionService:
                 rec={"capability":step.capability,"output":step.output,"artifacts":raw.get("artifacts",{}),"usage":raw.get("usage",{})}; execution_context["steps"][step.id]=rec
                 persisted_context=build_step_dependency_context(plan,step,execution_context); persisted_context["steps"][step.id]=rec; step.execution_context=persisted_context
                 step.status=PlanStepStatus.COMPLETED; self._emit(EventType.PLAN_STEP_COMPLETED,{"plan_id":plan.id,"step_id":step.id,"run_id":run.id}); plans.update(plan)
+            if restart_authoritative_schedule:
+                continue
             schedule=scheduler.calculate(plan)
             if schedule.blocked_steps:
                 continue

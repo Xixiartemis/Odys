@@ -75,10 +75,22 @@ class NativeAgentKernel:
             raise RuntimeError("RUNTIME_TARGET_CONTROLLER_REQUIRED")
         if runtime_id is None:
             raise RuntimeError("RUNTIME_ID_REQUIRED")
+        if self.provider_factory is None:
+            raise RuntimeError("RUNTIME_TARGET_PROVIDER_FACTORY_REQUIRED")
+        previous_provider = self.provider
+
+        def prepare_candidate():
+            return self.provider_factory(new_target)
+
+        def install_candidate(candidate):
+            self.provider = candidate
+
+        def rollback_candidate(_candidate):
+            self.provider = previous_provider
+
         switch = self.runtime_target_controller.request_switch(runtime_id, new_target,
-            expected_current=expected_current, runtime_id=runtime_id, reason=reason)
-        if switch.state.value == "COMMITTED" and self.provider_factory is not None:
-            self.provider = self.provider_factory(new_target)
+            expected_current=expected_current, runtime_id=runtime_id, reason=reason,
+            prepare=prepare_candidate, install=install_candidate, rollback=rollback_candidate)
         active = getattr(self, "_active_snapshot", None)
         if active is not None and active.run_id == runtime_id and switch.state.value == "COMMITTED":
             active.effective_target = new_target
@@ -157,6 +169,8 @@ class NativeAgentKernel:
                 health = self.provider_health.get(snapshot.effective_target)
                 if health and health["state"] in {ProviderHealthState.QUOTA_BLOCKED.value, ProviderHealthState.AUTH_BLOCKED.value}:
                     return self._provider_failure(request, snapshot, ProviderFailureCategory(health["failure_category"] or ProviderFailureCategory.UNKNOWN_PROVIDER_FAILURE.value), next_turn, health.get("reason"))
+            if not self._assert_runtime_truth(snapshot):
+                return self._failed(request, snapshot, "RUNTIME_TARGET_DIVERGENCE")
             target_payload = {
                 "configured_target": snapshot.configured_target.safe_projection() if snapshot.configured_target else None,
                 "effective_target": snapshot.effective_target.safe_projection() if snapshot.effective_target else None,
@@ -343,6 +357,38 @@ class NativeAgentKernel:
         snapshot.effective_target = effective
         if changed:
             self._save(snapshot)
+
+    def _assert_runtime_truth(self, snapshot: ExecutionSnapshot) -> bool:
+        """Guard every provider call with the durable effective target."""
+        durable = snapshot.effective_target
+        if self.runtime_target_controller is not None:
+            binding = self.runtime_target_controller.current(snapshot.run_id)
+            durable = binding["effective_target"]
+            if snapshot.configured_target != binding["configured_target"] or snapshot.effective_target != durable:
+                snapshot.configured_target = binding["configured_target"]
+                snapshot.effective_target = durable
+                snapshot.fallback_reason = binding.get("fallback_reason")
+                snapshot.target_event_id = binding.get("switch_id")
+        actual = getattr(self.provider, "runtime_target", None)
+        if callable(actual):
+            actual = actual()
+        snapshot.actual_provider_target = actual
+        if actual == durable:
+            self._save(snapshot)
+            return True
+        snapshot.current_failure = {
+            "type": "RUNTIME_TARGET_DIVERGENCE",
+            "configured_target": snapshot.configured_target.safe_projection() if snapshot.configured_target else None,
+            "effective_target": durable.safe_projection() if durable else None,
+            "actual_provider_target": actual.safe_projection() if isinstance(actual, RuntimeTarget) else None,
+        }
+        self._save(snapshot)
+        self.events.append(EventType.NATIVE_PROVIDER_FAILURE, task_id=snapshot.task_id, run_id=snapshot.run_id,
+                           attempt_id=snapshot.attempt_id, payload={"failure_category": "RUNTIME_TARGET_DIVERGENCE",
+                           "configured_target": snapshot.configured_target.safe_projection() if snapshot.configured_target else None,
+                           "effective_target": durable.safe_projection() if durable else None,
+                           "actual_provider_target": actual.safe_projection() if isinstance(actual, RuntimeTarget) else None})
+        return False
 
     def _budget_exhausted(self, request: AgentRequest, snapshot: ExecutionSnapshot, budget: str) -> AgentResult:
         snapshot.phase = NativePhase.REPLANNING

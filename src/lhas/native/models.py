@@ -190,6 +190,7 @@ class ExecutionSnapshot(BaseModel):
     consumed_delivery_tokens: list[str] = Field(default_factory=list)
     configured_target: RuntimeTarget | None = None
     effective_target: RuntimeTarget | None = None
+    actual_provider_target: RuntimeTarget | None = None
     fallback_reason: str | None = Field(default=None, max_length=512)
     target_event_id: str | None = None
     model_turn_ordinal: int = Field(default=0, ge=0)

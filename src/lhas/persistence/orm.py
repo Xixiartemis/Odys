@@ -81,6 +81,7 @@ class PlanStepRow(Base):
     task_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
     output: Mapped[str | None] = _json_col()
     execution_context: Mapped[str | None] = _json_col()
+    semantic_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
 
 class RunRow(Base):

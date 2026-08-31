@@ -29,6 +29,7 @@ from lhas.native.provider import OfflineCompletionProvider, OpenAIChatProviderAd
 from lhas.native.models import RuntimeTarget
 from lhas.native.tools import NativeToolDispatcher
 from lhas.native.persistence import ExecutionSnapshotRepository
+from lhas.native.runtime import RuntimeTargetController, RuntimeTargetError
 from lhas.orchestrator_v2 import RecoveringOrchestrator
 from lhas.persistence.database import Database
 from lhas.persistence.event_store import EventStore
@@ -120,6 +121,57 @@ class ProviderSettings:
     profile: str
     model: str
     config: AgentsSdkModelConfig | None = None
+
+
+class CliNativeProviderFactory:
+    """Build the exact provider client named by a secret-free RuntimeTarget.
+
+    The current route uses the validated CLI settings. Additional migration
+    routes are opt-in through route-scoped environment variables; a different
+    provider is never silently rebuilt from the old persisted CLI profile.
+    """
+
+    def __init__(self, settings: ProviderSettings, configured_target: RuntimeTarget):
+        self.settings = settings
+        self.configured_target = configured_target
+
+    @staticmethod
+    def _suffix(route_id: str) -> str:
+        return re.sub(r"[^A-Za-z0-9]", "_", route_id).upper()
+
+    def __call__(self, target: RuntimeTarget):
+        if self.settings.profile == "offline":
+            provider = OfflineCompletionProvider()
+        elif target == self.configured_target:
+            config = self.settings.config
+            provider = OpenAIChatProviderAdapter(
+                model=target.model_id,
+                api_key=config.api_key,
+                base_url=config.base_url,
+                extra_body=config.provider_profile.extra_body_dict(),
+                provider_id=target.provider_id,
+                endpoint_identity=target.endpoint_identity,
+                credential_route_id=target.credential_route_id,
+                route_type=target.route_type,
+            )
+        else:
+            suffix = self._suffix(target.credential_route_id)
+            api_key = os.getenv(f"ODYS_AGENT_API_KEY_{suffix}")
+            if not api_key:
+                raise RuntimeTargetError("RUNTIME_TARGET_CREDENTIAL_ROUTE_UNAVAILABLE", "requested credential route is not configured")
+            base_url = os.getenv(f"ODYS_AGENT_ENDPOINT_{suffix}") or f"https://{target.endpoint_identity}"
+            provider = OpenAIChatProviderAdapter(
+                model=target.model_id,
+                api_key=api_key,
+                base_url=base_url,
+                provider_id=target.provider_id,
+                endpoint_identity=target.endpoint_identity,
+                credential_route_id=target.credential_route_id,
+                route_type=target.route_type,
+            )
+        if provider.runtime_target != target:
+            raise RuntimeTargetError("RUNTIME_TARGET_PROVIDER_MISMATCH", "provider factory constructed a different RuntimeTarget")
+        return provider
 
 
 def resolve_provider_settings(profile: str | None, *, persisted_model: str | None = None) -> ProviderSettings:
@@ -368,7 +420,11 @@ class ProductRuntime:
         if task is None:
             raise CliConfigurationError(f"task {run.task_id} not found")
         config = decode_cli_config(task)
-        settings = resolve_provider_settings(config["provider"], persisted_model=config["model"]) if run.status is RunStatus.RUNNING else ProviderSettings(config["provider"], config["model"])
+        settings = (
+            resolve_provider_settings(config["provider"], persisted_model=config["model"])
+            if config.get("kernel", "external") == "native"
+            else (resolve_provider_settings(config["provider"], persisted_model=config["model"]) if run.status is RunStatus.RUNNING else ProviderSettings(config["provider"], config["model"]))
+        )
         manager = self._workspace_manager_for_resume(run_id)
         kernel = str(config.get("kernel", "external"))
         orchestrator = self._build_orchestrator(task, manager, list(config["verify_argv"]), int(config["max_turns"]), settings, kernel)
@@ -380,31 +436,32 @@ class ProductRuntime:
         if settings.profile == "offline":
             configured_runtime_target = RuntimeTarget(provider_id="offline-native-provider", model_id="offline", endpoint_identity="local", credential_route_id="none", route_type="offline")
         else:
-            endpoint_identity = urlparse(settings.config.base_url).netloc if settings.config and settings.config.base_url else f"{settings.profile}-default"
+            endpoint_identity = f"{settings.profile}-default"
+            if settings.config and settings.config.base_url:
+                parsed_endpoint = urlparse(settings.config.base_url)
+                endpoint_identity = parsed_endpoint.hostname or endpoint_identity
+                if parsed_endpoint.port:
+                    endpoint_identity = f"{endpoint_identity}:{parsed_endpoint.port}"
             configured_runtime_target = RuntimeTarget(provider_id=settings.profile, model_id=settings.model,
                 endpoint_identity=endpoint_identity or f"{settings.profile}-default",
                 credential_route_id=f"{settings.profile}-default", route_type=settings.config.api_mode if settings.config else "chat_completions")
 
-        def executor_factory(workspace):
+        runtime_target_controller = RuntimeTargetController(self.db) if kernel_mode == "native" else None
+        provider_factory = CliNativeProviderFactory(settings, configured_runtime_target) if kernel_mode == "native" else None
+        if kernel_mode == "native" and (runtime_target_controller is None or provider_factory is None):
+            raise CliConfigurationError("NATIVE_CLI_RUNTIME_TARGET_CONTROLLER_AND_PROVIDER_FACTORY_REQUIRED")
+
+        def executor_factory(workspace, run_id=None):
             registry = ToolRegistry()
             register_staged_workspace_tools(registry, workspace, policy)
             if kernel_mode == "native":
-                if settings.profile == "offline":
-                    provider_adapter = OfflineCompletionProvider()
-                    runtime_target = configured_runtime_target
-                else:
-                    config = settings.config
-                    runtime_target = configured_runtime_target
-                    provider_adapter = OpenAIChatProviderAdapter(
-                        model=settings.model,
-                        api_key=config.api_key,
-                        base_url=config.base_url,
-                        extra_body=config.provider_profile.extra_body_dict(),
-                        provider_id=runtime_target.provider_id,
-                        endpoint_identity=runtime_target.endpoint_identity,
-                        credential_route_id=runtime_target.credential_route_id,
-                        route_type=runtime_target.route_type,
-                    )
+                runtime_target = configured_runtime_target
+                if run_id is not None and runtime_target_controller is not None:
+                    try:
+                        runtime_target = runtime_target_controller.current(run_id)["effective_target"]
+                    except RuntimeTargetError:
+                        pass
+                provider_adapter = provider_factory(runtime_target)
 
                 async def mutation_probe():
                     state = await workspace.diff()
@@ -423,6 +480,8 @@ class ProductRuntime:
                     provider=provider_adapter,
                     dispatcher=dispatcher,
                     completion_authority=authority,
+                    runtime_target_controller=runtime_target_controller,
+                    provider_factory=provider_factory,
                 )
                 return NativeAgentExecutor(
                     native_kernel,

@@ -355,9 +355,16 @@ class Orchestrator:
             "attempt_number": attempt.attempt_number,
         }
 
-    def _make_executor(self) -> AgentExecutor:
+    def _make_executor(self, run_id: str | None = None) -> AgentExecutor:
         if self.workspace_executor_factory is not None and self._workspace_session is not None:
-            return self.workspace_executor_factory(self._workspace_session.workspace)
+            factory = self.workspace_executor_factory
+            if run_id is not None:
+                try:
+                    return factory(self._workspace_session.workspace, run_id=run_id)
+                except TypeError as exc:
+                    if "run_id" not in str(exc) or "unexpected keyword" not in str(exc):
+                        raise
+            return factory(self._workspace_session.workspace)
         if self.executor_factory is None:
             raise ValueError("executor_factory is not configured")
         return self.executor_factory()

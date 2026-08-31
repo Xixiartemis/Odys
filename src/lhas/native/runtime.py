@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+import re
+from datetime import datetime
 from typing import Any, Iterable
-
-from sqlalchemy import select
 
 from lhas.domain.enums import EventType
 from lhas.domain.models import json_dumps, json_loads, new_id, utcnow
@@ -66,15 +65,30 @@ class ProviderFailureClassifier:
             status = None
         text = " ".join(str(getattr(error, key, "")) for key in ("code", "type", "message"))
         text += " " + str(error)
+        for key in ("body", "data", "details", "metadata"):
+            value = getattr(error, key, None)
+            if value:
+                text += " " + str(value)
         upper = text[:4000].upper()
-        if any(token in upper for token in ("MONTHLY USAGE", "QUOTA", "USAGE LIMIT", "RATE LIMIT.*RESET", "LIMIT REACHED")):
+        quota_evidence = (
+            re.search(r"\b(?:MONTHLY|WEEKLY|DAILY|ANNUAL)\s+(?:USAGE|QUOTA|LIMIT)\b", upper)
+            or re.search(r"\b(?:BILLING\s+PERIOD|SUBSCRIPTION|PLAN)\b.{0,80}\b(?:EXHAUST|LIMIT|QUOTA)\b", upper)
+            or re.search(r"\bUSAGE\s+LIMIT\b.{0,100}\bRESET\s+IN\s+(?:\d+\s+)?(?:DAY|DAYS|WEEK|WEEKS|MONTH|MONTHS)\b", upper)
+            or "PROVIDER QUOTA" in upper
+            or (status == 429 and "QUOTA" in upper)
+        )
+        transient_429_evidence = any(token in upper for token in (
+            "RATE LIMIT", "REQUESTS PER MINUTE", "TOKENS PER MINUTE", "RETRY-AFTER",
+            "BURST LIMIT", "TOO MANY REQUESTS",
+        ))
+        if quota_evidence:
             return ProviderFailureCategory.QUOTA_EXHAUSTED
         if any(token in upper for token in ("BILLING", "CREDIT", "INSUFFICIENT FUNDS", "PAYMENT REQUIRED")) or status == 402:
             return ProviderFailureCategory.BILLING_OR_CREDIT_EXHAUSTED
         if status in {401, 403} or any(token in upper for token in ("INVALID API KEY", "AUTHENTICATION", "UNAUTHORIZED", "FORBIDDEN")):
             return ProviderFailureCategory.AUTH_INVALID
         if status == 429:
-            return ProviderFailureCategory.TRANSIENT_RATE_LIMIT
+            return ProviderFailureCategory.TRANSIENT_RATE_LIMIT if transient_429_evidence else ProviderFailureCategory.UNKNOWN_PROVIDER_FAILURE
         if isinstance(error, TimeoutError) or "TIMEOUT" in upper:
             return ProviderFailureCategory.PROVIDER_TIMEOUT
         if status in {408, 425, 500, 502, 503, 504} or any(token in upper for token in ("UNAVAILABLE", "CONNECTION RESET", "SERVICE DOWN")):
@@ -169,7 +183,8 @@ class RuntimeTargetController:
                     "owner_run_id": row.owner_run_id, "owner_session_id": row.owner_session_id, "switch_id": row.switch_id}
 
     def request_switch(self, execution_id: str, requested_target: RuntimeTarget, *, expected_current: RuntimeTarget,
-                       confirm: Any = True, runtime_id: str | None = None, reason: str = "provider migration") -> TargetSwitch:
+                       confirm: Any = True, runtime_id: str | None = None, reason: str = "provider migration",
+                       prepare: Any = None, install: Any = None, rollback: Any = None) -> TargetSwitch:
         current = self.current(execution_id)
         if runtime_id is not None and runtime_id != execution_id:
             raise RuntimeTargetError("OWNERSHIP_CONFLICT", "stale runtime identity cannot switch this execution")
@@ -186,18 +201,50 @@ class RuntimeTargetController:
             row.state = TargetSwitchState.PENDING.value; row.pending_json = json_dumps(requested_target.safe_projection()); row.switch_id = switch.id; row.version += 1; row.updated_at = utcnow()
         switch.state = TargetSwitchState.PENDING
         self.events.append(EventType.RUNTIME_TARGET_SWITCH_PENDING, payload={"execution_id": execution_id, "switch_id": switch.id})
-        confirmed = confirm() if callable(confirm) else bool(confirm)
-        if hasattr(confirmed, "__await__"):
-            raise RuntimeTargetError("ASYNC_CONFIRMATION_UNSUPPORTED", "switch confirmation must be completed before commit")
-        if not confirmed:
-            switch.state = TargetSwitchState.FAILED; switch.failure_reason = "runtime confirmation rejected"
+        candidate = None
+        try:
+            candidate = prepare() if callable(prepare) else None
+            if hasattr(candidate, "__await__"):
+                raise RuntimeTargetError("ASYNC_PROVIDER_FACTORY_UNSUPPORTED", "provider factory must construct synchronously")
+            if candidate is not None:
+                actual = getattr(candidate, "runtime_target", None)
+                if actual != requested_target:
+                    raise RuntimeTargetError("RUNTIME_TARGET_PROVIDER_MISMATCH", "candidate provider target does not match requested target")
+            confirmed = confirm() if callable(confirm) else bool(confirm)
+            if hasattr(confirmed, "__await__"):
+                raise RuntimeTargetError("ASYNC_CONFIRMATION_UNSUPPORTED", "switch confirmation must be completed before commit")
+            if not confirmed:
+                raise RuntimeTargetError("RUNTIME_CONFIRMATION_REJECTED", "runtime confirmation rejected")
+            if callable(install):
+                install(candidate)
+            if hasattr(install, "__await__"):
+                raise RuntimeTargetError("ASYNC_PROVIDER_INSTALL_UNSUPPORTED", "provider install must complete synchronously")
+        except Exception as exc:
+            if callable(rollback) and candidate is not None:
+                try:
+                    rollback(candidate)
+                except Exception:
+                    pass
+            switch.state = TargetSwitchState.FAILED
+            switch.failure_reason = str(exc)[:512]
             self._fail(execution_id, switch)
             return switch
-        with self.db.session() as session:
-            row = session.get(NativeRuntimeTargetRow, execution_id)
-            if row is None or row.switch_id != switch.id:
-                raise RuntimeTargetError("OWNERSHIP_CONFLICT", "switch ownership changed before commit")
-            row.state = TargetSwitchState.COMMITTED.value; row.effective_json = json_dumps(requested_target.safe_projection()); row.pending_json = None; row.version += 1; row.updated_at = utcnow()
+        try:
+            with self.db.session() as session:
+                row = session.get(NativeRuntimeTargetRow, execution_id)
+                if row is None or row.switch_id != switch.id:
+                    raise RuntimeTargetError("OWNERSHIP_CONFLICT", "switch ownership changed before commit")
+                row.state = TargetSwitchState.COMMITTED.value; row.effective_json = json_dumps(requested_target.safe_projection()); row.pending_json = None; row.version += 1; row.updated_at = utcnow()
+        except Exception as exc:
+            if callable(rollback) and candidate is not None:
+                try:
+                    rollback(candidate)
+                except Exception:
+                    pass
+            switch.state = TargetSwitchState.FAILED
+            switch.failure_reason = str(exc)[:512]
+            self._fail(execution_id, switch)
+            return switch
         switch.state = TargetSwitchState.COMMITTED; switch.effective_target = requested_target; switch.updated_at = utcnow()
         self.events.append(EventType.RUNTIME_TARGET_SWITCH_COMMITTED, payload={"execution_id": execution_id, "switch_id": switch.id,
             "effective_target": requested_target.safe_projection()})
