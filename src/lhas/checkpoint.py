@@ -35,6 +35,8 @@ class WorkingState(BaseModel):
     tool_failures_by_type: dict[str, int] = Field(default_factory=dict)
     last_tool_failure_capability: str | None = None
     last_tool_failure_type: str | None = None
+    repeated_tool_failure_count: int = 0
+    strategy_changes_observed: int = 0
     strategy_change_required: bool = False
     event_cursor: int = 0
     truncated: bool = False
@@ -114,7 +116,12 @@ class WorkingStateProjector:
                     state.tool_failures_by_type[error_type]=state.tool_failures_by_type.get(error_type,0)+1
                     state.last_tool_failure_capability=safe_capability
                     state.last_tool_failure_type=error_type
+                    if int(payload.get("similar_failure_count") or payload.get("failure_repeat_count") or 0) >= 2:
+                        state.repeated_tool_failure_count += 1
                     state.strategy_change_required=state.strategy_change_required or bool(payload.get("strategy_change_required"))
+                if payload.get("strategy_change_observed") is True:
+                    state.strategy_changes_observed += 1
+                    state.strategy_change_required=False
             elif event.event_type in {EventType.INNER_AGENT_COMPLETED, EventType.INNER_AGENT_FAILED}:
                 state.last_attempt_status="SUCCESS" if event.event_type == EventType.INNER_AGENT_COMPLETED else "FAILURE"; state.attempts_completed += 1
                 state.last_attempt_number=max(state.last_attempt_number,int(payload.get("attempt_number",state.last_attempt_number)))
@@ -138,7 +145,14 @@ _SAFE_EVENT_FIELDS = {
         "capability", "status", "error_type", "path", "sha256", "truncated",
         "matched_paths", "match_count", "exit_code", "timed_out", "duration_ms",
         "stdout_truncated", "stderr_truncated", "command_name",
-        "failure_repeat_count", "strategy_change_required", "action",
+        "failure_category", "reason_category", "candidate_count", "match_mode",
+        "failure_repeat_count", "similar_failure_count", "repeat_count_truncated",
+        "strategy_change_required", "strategy_change_observed",
+        "strategy_change_from", "strategy_change_to", "strategy_change_failure_category",
+        "after_edit_failure", "meaningful_mutation", "verification_recommended",
+        "post_edit_inspection", "post_edit_verification", "inspection_before_verification",
+        "verification_kind", "pytest_observation", "tool_call_index",
+        "calls_since_mutation", "action",
     },
     EventType.ATTEMPT_STARTED: {"attempt_number"},
     EventType.ATTEMPT_FAILED: {"attempt_number", "reason", "error_type"},

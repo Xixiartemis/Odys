@@ -20,7 +20,7 @@ from lhas.context_builder import ContextBuilder
 from lhas.domain.enums import RunStatus
 from lhas.domain.models import Project
 from lhas.inner_agent import AgentsSdkModelConfig, InnerAgentExecutor, InnerAgentResult, InnerAgentStatus, OpenAIAgentsBackend
-from lhas.inner_agent.tool_adapter import safe_tool_summary
+from lhas.inner_agent.tool_adapter import ToolAwareObserver, _args_signature, safe_tool_summary
 from lhas.orchestrator_v2 import RecoveringOrchestrator
 from lhas.persistence.database import Database
 from lhas.persistence.event_store import EventStore
@@ -144,6 +144,7 @@ class OfflineDemoBackend:
     async def run(self, request):
         trace: list[dict[str, Any]] = []
         tool_calls = 0
+        observer = ToolAwareObserver()
 
         async def call(capability: str, arguments: dict[str, Any]):
             nonlocal tool_calls
@@ -159,7 +160,11 @@ class OfflineDemoBackend:
                 context=request.context,
                 metadata=request.metadata,
             ))
-            summary = safe_tool_summary(capability, arguments, result)
+            summary = observer.decorate(
+                capability, arguments, result,
+                safe_tool_summary(capability, arguments, result),
+                _args_signature(arguments),
+            )
             trace.append({"event": "TOOL_OBSERVATION_SUMMARY", **summary})
             trace.append({"event": "TOOL_COMPLETED", "tool_name": capability, "tool_call_id": f"offline-{tool_calls}"})
             if result.status.value == "SUCCESS" and capability in {"workspace.edit_lines", "workspace.diff"}:

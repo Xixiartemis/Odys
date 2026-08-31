@@ -19,7 +19,9 @@ from lhas.cli_runtime import inspect_run_async
 _UI_EVENT_FIELDS = {
     "event_id", "event_type", "capability", "status", "error_type", "path",
     "files_changed", "turn_number", "attempt_number", "action",
-    "failure_repeat_count", "strategy_change_required",
+    "failure_category", "failure_repeat_count", "similar_failure_count",
+    "strategy_change_required", "strategy_change_observed",
+    "verification_kind", "pytest_observation",
     "agent_id", "session_id", "route", "delegation_id", "child_agent_id",
     "child_task_id", "parent_agent_id", "parent_run_id", "spawn_depth", "role", "validation",
     "plan_id", "step_id", "task_id", "run_id",

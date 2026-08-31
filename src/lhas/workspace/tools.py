@@ -3,7 +3,7 @@ from __future__ import annotations
 from lhas.planning.models import CapabilitySpec
 from lhas.tools.protocol import ToolResult, ToolResultStatus
 
-from .errors import BinaryFileError, WorkspacePathEscape
+from .errors import BinaryFileError, WorkspaceEditError, WorkspacePathEscape
 from .safe_cli import SafeCli
 
 _OBJECT = {"type": "object", "additionalProperties": False}
@@ -27,44 +27,72 @@ _DIFF_SCHEMA = {**_OBJECT, "properties": {"path": {"type": "string"}, "max_diff_
 _RESTORE_SCHEMA = {**_OBJECT, "properties": {"path": {"type": "string"}}, "required": ["path"]}
 
 
-def recovery_metadata(error_type: str, *, allowed_prefixes=None) -> dict:
+def recovery_metadata(error_type: str, *, allowed_prefixes=None, diagnostics=None, path_kind="path") -> dict:
     mapping = {
         "EDIT_TARGET_NOT_FOUND": {
+            "failure_category": "EDIT_TARGET_NOT_FOUND",
             "action": "REREAD_THEN_LINE_EDIT",
             "retry_same_arguments": False,
+            "refresh_target_required": True,
             "suggested_capabilities": ["workspace.read", "workspace.edit_lines"],
         },
         "EDIT_TARGET_AMBIGUOUS": {
+            "failure_category": "EDIT_TARGET_AMBIGUOUS",
             "action": "NARROW_TARGET_OR_LINE_EDIT",
             "retry_same_arguments": False,
             "suggested_capabilities": ["workspace.read", "workspace.edit_lines"],
         },
+        "INVALID_EDIT_RANGE": {
+            "failure_category": "INVALID_EDIT_RANGE",
+            "action": "REREAD_AND_REBUILD_LINE_RANGE",
+            "retry_same_arguments": False,
+            "refresh_target_required": True,
+            "suggested_capabilities": ["workspace.read"],
+        },
+        "NO_CHANGE": {
+            "failure_category": "NO_CHANGE",
+            "action": "INSPECT_CURRENT_STATE",
+            "retry_same_arguments": False,
+            "suggested_capabilities": ["workspace.read", "workspace.diff"],
+        },
         "STALE_FILE_VERSION": {
+            "failure_category": "STALE_FILE_VERSION",
             "action": "REFRESH_FILE_VERSION",
             "retry_same_arguments": False,
             "suggested_capabilities": ["workspace.read"],
         },
-        "WORKSPACE_PATH_ESCAPE": {
-            "action": "USE_WORKSPACE_RELATIVE_CWD",
-            "retry_same_arguments": False,
-        },
     }
-    metadata = dict(mapping.get(error_type, {}))
+    metadata = dict(mapping.get(error_type, {"failure_category": error_type}))
+    if error_type == "WORKSPACE_PATH_ESCAPE":
+        metadata = {
+            "failure_category": "WORKSPACE_PATH_ERROR",
+            "reason_category": "OUTSIDE_WORKSPACE",
+            "action": "USE_WORKSPACE_RELATIVE_CWD" if path_kind == "cwd" else "USE_WORKSPACE_RELATIVE_PATH",
+            "retry_same_arguments": False,
+            "path_policy": "WORKSPACE_RELATIVE_ONLY",
+            "workspace_root_exposed": False,
+        }
     if error_type == "COMMAND_NOT_ALLOWED":
         metadata = {
+            "failure_category": "COMMAND_POLICY_ERROR",
+            "reason_category": "PREFIX_NOT_ALLOWLISTED",
             "action": "USE_ALLOWED_COMMAND_PREFIX",
             "retry_same_arguments": False,
+            "command_policy": "EXPLICIT_ARGV_PREFIX_ALLOWLIST",
             "allowed_command_prefixes": (allowed_prefixes or [])[:20],
         }
+    for key, value in (diagnostics or {}).items():
+        if key in {"candidate_count", "candidates_truncated", "normalization_attempted", "match_mode", "start_line", "end_line", "total_lines"}:
+            metadata[key] = value
     return metadata
 
 
-def _failure(error_type: str, message: str, *, allowed_prefixes=None) -> ToolResult:
+def _failure(error_type: str, message: str, *, allowed_prefixes=None, diagnostics=None, path_kind="path") -> ToolResult:
     return ToolResult(
         status=ToolResultStatus.FAILURE,
         error_type=error_type,
         error_message=message,
-        metadata=recovery_metadata(error_type, allowed_prefixes=allowed_prefixes),
+        metadata=recovery_metadata(error_type, allowed_prefixes=allowed_prefixes, diagnostics=diagnostics, path_kind=path_kind),
     )
 
 
@@ -81,7 +109,7 @@ def _result(fn):
         except IsADirectoryError:
             return _failure("NOT_A_FILE", "directory is not a file")
         except ValueError as exc:
-            known = {"STALE_FILE_VERSION", "EDIT_TARGET_NOT_FOUND", "EDIT_TARGET_AMBIGUOUS", "INVALID_LINE_RANGE", "INVALID_ARGUMENTS"}
+            known = {"STALE_FILE_VERSION", "EDIT_TARGET_NOT_FOUND", "EDIT_TARGET_AMBIGUOUS", "INVALID_EDIT_RANGE", "NO_CHANGE", "INVALID_ARGUMENTS"}
             error_type = str(exc) if str(exc) in known else "INVALID_ARGUMENTS"
             return _failure(error_type, str(exc))
     return run
@@ -113,7 +141,7 @@ class SafeCliTool:
         try:
             output, error = await self.cli.execute(args.get("argv"), args.get("cwd", "."), args.get("timeout_seconds"))
         except WorkspacePathEscape:
-            return _failure("WORKSPACE_PATH_ESCAPE", "cwd outside workspace")
+            return _failure("WORKSPACE_PATH_ESCAPE", "cwd outside workspace", path_kind="cwd")
         if error:
             error_type, error_message = error if isinstance(error, tuple) else (error, error)
             return _failure(error_type, error_message, allowed_prefixes=self.cli.policy.allowed_prefixes())
@@ -121,17 +149,21 @@ class SafeCliTool:
 
 
 class WorkspaceEditTool:
-    capability = CapabilitySpec(name="workspace.edit", description="Exact replacement in staged workspace", input_schema=_EDIT_SCHEMA, risk_level="MEDIUM", side_effect=True)
-    def __init__(self, workspace): self.workspace = workspace
+    capability = CapabilitySpec(name="workspace.edit", description="Unique exact or safe whole-line normalized replacement in staged workspace", input_schema=_EDIT_SCHEMA, risk_level="MEDIUM", side_effect=True)
+    def __init__(self, workspace, *, allow_safe_normalization=True):
+        self.workspace = workspace
+        self.allow_safe_normalization = allow_safe_normalization
     async def execute(self, request):
         try:
-            return ToolResult(status=ToolResultStatus.SUCCESS, output=await self.workspace.edit_file(**request.arguments))
+            return ToolResult(status=ToolResultStatus.SUCCESS, output=await self.workspace.edit_file(**request.arguments, allow_safe_normalization=self.allow_safe_normalization))
         except WorkspacePathEscape:
             return _failure("WORKSPACE_PATH_ESCAPE", "path outside workspace")
         except BinaryFileError:
             return _failure("BINARY_FILE", "binary file")
         except (FileNotFoundError, IsADirectoryError):
-            return _failure("EDIT_TARGET_NOT_FOUND", "edit target unavailable")
+            return _failure("EDIT_TARGET_NOT_FOUND", "edit target unavailable", diagnostics={"candidate_count": 0})
+        except WorkspaceEditError as exc:
+            return _failure(exc.code, exc.code, diagnostics=exc.diagnostics)
         except ValueError as exc:
             return _failure(str(exc), str(exc))
 
@@ -147,7 +179,9 @@ class WorkspaceEditLinesTool:
         except BinaryFileError:
             return _failure("BINARY_FILE", "binary file")
         except (FileNotFoundError, IsADirectoryError):
-            return _failure("EDIT_TARGET_NOT_FOUND", "edit target unavailable")
+            return _failure("EDIT_TARGET_NOT_FOUND", "edit target unavailable", diagnostics={"candidate_count": 0})
+        except WorkspaceEditError as exc:
+            return _failure(exc.code, exc.code, diagnostics=exc.diagnostics)
         except ValueError as exc:
             return _failure(str(exc), str(exc))
 

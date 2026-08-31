@@ -70,7 +70,7 @@ def test_edit_lines_invalid_ranges(tmp_path, start, end):
     source = _source(tmp_path)
     workspace = StagedWorkspace.create(source, tmp_path / "stage")
     digest = hashlib.sha256((source / "sample.txt").read_bytes()).hexdigest()
-    with pytest.raises(ValueError, match="INVALID_LINE_RANGE"):
+    with pytest.raises(ValueError, match="INVALID_EDIT_RANGE"):
         asyncio.run(workspace.edit_lines("sample.txt", start, end, ["x"], digest))
 
 
@@ -83,7 +83,8 @@ def test_edit_lines_path_escape(tmp_path):
         "new_lines": ["x"], "expected_sha256": "0" * 64,
     })))
     assert result.error_type == "WORKSPACE_PATH_ESCAPE"
-    assert result.metadata["action"] == "USE_WORKSPACE_RELATIVE_CWD"
+    assert result.metadata["action"] == "USE_WORKSPACE_RELATIVE_PATH"
+    assert result.metadata["failure_category"] == "WORKSPACE_PATH_ERROR"
 
 
 @pytest.mark.parametrize(
@@ -110,11 +111,11 @@ def test_edit_failure_recovery_hints(tmp_path):
         "path": "sample.txt", "old_text": "absent", "new_text": "x", "expected_sha256": digest,
     })))
     assert missing.error_type == "EDIT_TARGET_NOT_FOUND"
-    assert missing.metadata == {
-        "action": "REREAD_THEN_LINE_EDIT",
-        "retry_same_arguments": False,
-        "suggested_capabilities": ["workspace.read", "workspace.edit_lines"],
-    }
+    assert missing.metadata["action"] == "REREAD_THEN_LINE_EDIT"
+    assert missing.metadata["retry_same_arguments"] is False
+    assert missing.metadata["suggested_capabilities"] == ["workspace.read", "workspace.edit_lines"]
+    assert missing.metadata["failure_category"] == "EDIT_TARGET_NOT_FOUND"
+    assert missing.metadata["candidate_count"] == 0
     ambiguous_source = tmp_path / "ambiguous"
     ambiguous_source.mkdir()
     (ambiguous_source / "x.txt").write_text("same same", encoding="utf-8")
