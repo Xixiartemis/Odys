@@ -1,4 +1,9 @@
-"""One agent loop contract shared by Root, Planner, Worker and children."""
+"""Agent-loop protocol, deterministic fixtures, and compatibility adapters.
+
+The production Odys-owned implementation is exported from
+``lhas.native.NativeAgentKernel``. ``WorkerAgentKernelAdapter`` preserves the
+external-runtime compatibility path.
+"""
 
 from __future__ import annotations
 

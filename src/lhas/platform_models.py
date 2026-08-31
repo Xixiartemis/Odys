@@ -62,6 +62,7 @@ class DelegationRequest(BaseModel):
     parent_agent_id: str
     parent_task_id: str
     parent_run_id: str
+    parent_attempt_id: str | None = None
     child_agent_id: str = Field(default_factory=lambda: f"child-{new_id()}")
     goal: str = Field(min_length=1, max_length=20_000)
     context: dict[str, Any] = Field(default_factory=dict)

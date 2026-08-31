@@ -74,10 +74,53 @@ class ToolAwareObserver:
         self._signature_failures: dict[tuple[str,str,str],int]={}
         self._last_similar_failure: tuple[str,str,str] | None=None
         self._similar_failure_count=0
-        self._strategy_pending: tuple[str,str] | None=None
+        self._strategy_pending: tuple[str,str,str] | None=None
         self._edit_failure_pending=False
         self._last_mutation_call: int | None=None
         self._mutation_inspected=False
+
+    def snapshot(self) -> dict[str, Any]:
+        """Return a bounded safe state that can survive a process restart."""
+        signatures = [
+            {"capability": key[0], "args_sha256": key[1], "error_type": key[2], "count": value}
+            for key, value in list(self._signature_failures.items())[:_MAX_SIGNATURE_KEYS]
+        ]
+        return {
+            "call_index": min(self.call_index, 100_000),
+            "signature_failures": signatures,
+            "last_similar_failure": list(self._last_similar_failure) if self._last_similar_failure else None,
+            "similar_failure_count": min(self._similar_failure_count, _MAX_REPEAT_COUNT),
+            "strategy_pending": list(self._strategy_pending) if self._strategy_pending else None,
+            "edit_failure_pending": self._edit_failure_pending,
+            "last_mutation_call": self._last_mutation_call,
+            "mutation_inspected": self._mutation_inspected,
+        }
+
+    def restore(self, state: dict[str, Any] | None) -> None:
+        """Restore only this attempt's state; callers create one observer per attempt."""
+        if not isinstance(state, dict):
+            return
+        self.call_index = max(0, min(int(state.get("call_index", 0)), 100_000))
+        self._signature_failures = {}
+        for item in list(state.get("signature_failures") or [])[:_MAX_SIGNATURE_KEYS]:
+            if not isinstance(item, dict):
+                continue
+            key = (
+                str(item.get("capability", ""))[:128],
+                str(item.get("args_sha256", ""))[:64],
+                str(item.get("error_type", "UNKNOWN"))[:128],
+            )
+            if key[0] and len(key[1]) == 64:
+                self._signature_failures[key] = max(1, min(int(item.get("count", 1)), _MAX_REPEAT_COUNT))
+        similar = state.get("last_similar_failure")
+        self._last_similar_failure = tuple(str(item)[:512] for item in similar[:3]) if isinstance(similar, list) and len(similar) == 3 else None
+        self._similar_failure_count = max(0, min(int(state.get("similar_failure_count", 0)), _MAX_REPEAT_COUNT))
+        pending = state.get("strategy_pending")
+        self._strategy_pending = tuple(str(item)[:512] for item in pending[:3]) if isinstance(pending, list) and len(pending) == 3 else None
+        self._edit_failure_pending = bool(state.get("edit_failure_pending", False))
+        last_mutation = state.get("last_mutation_call")
+        self._last_mutation_call = int(last_mutation) if isinstance(last_mutation, int) and last_mutation >= 0 else None
+        self._mutation_inspected = bool(state.get("mutation_inspected", False))
 
     @staticmethod
     def _bounded_increment(value: int) -> tuple[int,bool]:

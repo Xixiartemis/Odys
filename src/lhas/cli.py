@@ -330,6 +330,7 @@ def product_run(
     max_attempts: int = typer.Option(3, "--max-attempts", min=1),
     max_turns: int = typer.Option(20, "--max-turns", min=1),
     provider: Optional[str] = typer.Option(None, "--provider", help="Provider profile (default: configured profile or mimo; offline for deterministic demo)"),
+    kernel: str = typer.Option("external", "--kernel", help="Agent loop owner: native or external"),
     no_ui: bool = typer.Option(False, "--no-ui", help="Use plain deterministic console output"),
     yes: bool = typer.Option(False, "--yes", help="Skip launch confirmation"),
     db_override: Optional[Path] = typer.Option(None, "--db", help="SQLite database path"),
@@ -359,6 +360,7 @@ def product_run(
             max_attempts=max_attempts,
             max_turns=max_turns,
             provider=settings.profile,
+            kernel=kernel,
         )
         console.print("Odys", style="bold cyan")
         console.print("Plan. Act. Recover. Finish.")

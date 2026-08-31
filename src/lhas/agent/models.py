@@ -29,6 +29,7 @@ class AgentBudget(BaseModel):
 
     max_turns: int = Field(default=20, ge=1, le=200)
     max_tool_calls: int = Field(default=100, ge=0, le=1000)
+    max_delegations: int = Field(default=8, ge=0, le=100)
     max_context_chars: int = Field(default=40_000, ge=1_000, le=500_000)
 
 

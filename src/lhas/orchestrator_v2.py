@@ -114,6 +114,11 @@ class RecoveringOrchestrator(Orchestrator):
     # ------------------------------------------------------------------ API
 
     async def execute_task(self, task_id: str) -> Run:
+        run = await self.prepare_task_run(task_id)
+        return await self.continue_prepared_run(run.id)
+
+    async def prepare_task_run(self, task_id: str) -> Run:
+        """Persist Task/Run/workspace ownership before executor dispatch."""
         task = self._require_task(task_id)
         self._emit(EventType.TASK_STARTED, task=task, payload={"status": TaskStatus.RUNNING.value})
         task.status = TaskStatus.RUNNING
@@ -129,6 +134,19 @@ class RecoveringOrchestrator(Orchestrator):
         if self.workspace_manager is not None:
             self._workspace_session = self.workspace_manager.create_for_run(task, run)
             self._crash(CrashPoint.AFTER_WORKSPACE_BOUND, task=task, run=run)
+        return run
+
+    async def continue_prepared_run(self, run_id: str) -> Run:
+        run = self.run_repo.get(run_id)
+        if run is None:
+            raise KeyError(f"Run {run_id} not found")
+        if run.status is not RunStatus.RUNNING:
+            return run
+        task = self.task_repo.get(run.task_id)
+        if task is None:
+            raise KeyError(f"Task {run.task_id} not found")
+        if self.workspace_manager is not None and self._workspace_session is None:
+            self._workspace_session = self.workspace_manager.ensure_for_run(task, run)
         return await self._continue_run(run.id)
 
     async def resume_run(self, run_id: str) -> Run:
@@ -185,6 +203,12 @@ class RecoveringOrchestrator(Orchestrator):
             if action is ResumeAction.START_FIRST_ATTEMPT:
                 await self._execute_attempt(state, 1)
                 continue
+            if action is ResumeAction.START_PENDING_ATTEMPT:
+                await self._execute_attempt(state, state.latest_attempt.attempt_number)
+                continue
+            if action is ResumeAction.RESUME_NATIVE_ATTEMPT:
+                await self._resume_native_attempt(state)
+                continue
             if action is ResumeAction.START_NEXT_ATTEMPT:
                 await self._execute_attempt(state, state.latest_attempt.attempt_number + 1)
                 continue
@@ -212,11 +236,12 @@ class RecoveringOrchestrator(Orchestrator):
 
     async def _execute_attempt(self, state, number: int) -> None:
         task, run = state.task, state.run
-        previous = list(state.attempts)
+        pending = state.latest_attempt if state.latest_attempt is not None and state.latest_attempt.status is AttemptStatus.PENDING and state.latest_attempt.attempt_number == number else None
+        previous = [item for item in state.attempts if pending is None or item.id != pending.id]
         latest = state.latest_attempt
         report = state.failure_report
         action = state.recovery_action
-        attempt = self._create_attempt(run, number)
+        attempt = pending or self._create_attempt(run, number)
         self._emit(EventType.ATTEMPT_STARTED, task=task, run=run, attempt=attempt,
                     payload={"attempt_number": number, "resume_origin": "PROCESS_RESUME" if number > 1 else None})
         attempt.status = AttemptStatus.RUNNING
@@ -267,6 +292,24 @@ class RecoveringOrchestrator(Orchestrator):
             output=json.dumps({"recovery_origin": "PROCESS_RESUME", "workspace_recovery": recovery_state}, sort_keys=True),
         )
         await self._validate_result(task, run, attempt, result, recovery_origin=True)
+
+    async def _resume_native_attempt(self, state) -> None:
+        """Re-enter the Odys-owned loop at its durable same-Attempt snapshot."""
+        task, run, attempt = state.task, state.run, state.latest_attempt
+        if run.executor_type != "NativeAgentExecutor" or attempt.status is not AttemptStatus.RUNNING:
+            raise RunNotResumable("NATIVE_ATTEMPT_RESUME_STATE_INVALID")
+        snapshot = state.context_snapshot
+        if snapshot is not None:
+            self._current_snapshot = snapshot
+        executor = self._make_executor()
+        self._emit(
+            EventType.EXECUTOR_STARTED,
+            task=task,
+            run=run,
+            attempt=attempt,
+            payload={"executor": getattr(executor, "name", executor.__class__.__name__), "resume_same_attempt": True},
+        )
+        await self._run_executor(task, run, attempt, executor)
 
     async def _validate_persisted_attempt(self, state, *, outcome_arbitration: bool = False) -> None:
         result = self._result_for_attempt(state.latest_attempt)

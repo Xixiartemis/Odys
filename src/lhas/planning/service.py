@@ -41,8 +41,26 @@ class _ToolExecutor:
     async def cancel(self, run_id): return None
     async def status(self, run_id): return {"run_id": run_id}
 
+
+class _TaskGraphAgentExecutor:
+    """Expose the canonical Plan/PlanStep projection to an injected executor."""
+    name = "TaskGraphAgentExecutor"
+    def __init__(self, executor, plan, step): self.executor, self.plan, self.step = executor, plan, step
+    async def execute(self, request):
+        completed=[item.id for item in self.plan.steps if item.status == PlanStepStatus.COMPLETED]
+        pending=[item.id for item in self.plan.steps if item.id != self.step.id and item.status in {PlanStepStatus.PENDING,PlanStepStatus.READY,PlanStepStatus.RUNNING}]
+        context={**request.context,"taskgraph":{"plan_id":self.plan.id,"active_node":self.step.id,"completed_nodes":completed,"pending_nodes":pending,"depends_on":list(self.step.depends_on)}}
+        return await self.executor.execute(request.model_copy(update={"context":context}))
+    async def resume(self, request): return await self.execute(request)
+    async def cancel(self, run_id): return await self.executor.cancel(run_id)
+    async def status(self, run_id): return await self.executor.status(run_id)
+
 class PlanExecutionService:
-    def __init__(self, db: Database, planner: Planner, registry: ToolRegistry): self.db, self.planner, self.registry = db, planner, registry
+    def __init__(self, db: Database, planner: Planner, registry: ToolRegistry, agent_executor_factory=None): self.db, self.planner, self.registry, self.agent_executor_factory = db, planner, registry, agent_executor_factory
+    def _step_executor(self, plan, step, context):
+        if self.agent_executor_factory is not None:
+            return _TaskGraphAgentExecutor(self.agent_executor_factory(step),plan,step)
+        return _ToolExecutor(self.registry,step,self.db,context)
     def _emit(self, typ, payload): EventStore(self.db).append(typ, payload=payload)
     async def execute_goal(self, goal: Goal, *, context: dict[str, Any] | None = None, experiment_id: str | None = None, approved_step_ids: set[str] | None = None, resume_plan_id: str | None = None) -> Plan:
         self._emit(EventType.GOAL_CREATED, {"goal": goal.model_dump(mode="json")})
@@ -76,7 +94,7 @@ class PlanExecutionService:
             task = Task(project_id=goal.project_id, title=step.title, objective=step.objective, constraints=goal.constraints, acceptance_criteria=step.success_criteria, max_attempts=2)
             task_repo.create(task); step.task_id = task.id; step.status = PlanStepStatus.RUNNING
             self._emit(EventType.PLAN_STEP_STARTED, {"plan_id": plan.id, "step_id": step.id, "task_id": task.id})
-            orch = RecoveringOrchestrator(self.db, executor_factory=lambda s=step: _ToolExecutor(self.registry, s, self.db, execution_context), executor_type="ToolRegistryExecutor", provider="tool-registry", model="deterministic", harness_version=HARNESS_VERSION, dataset_version="PLANNING-V0.1", experiment_id=experiment_id)
+            orch = RecoveringOrchestrator(self.db, executor_factory=lambda s=step,p=plan: self._step_executor(p,s,execution_context), executor_type="TaskGraphAgentExecutor" if self.agent_executor_factory else "ToolRegistryExecutor", provider="native-kernel" if self.agent_executor_factory else "tool-registry", model="provider-adapter" if self.agent_executor_factory else "deterministic", harness_version=HARNESS_VERSION, dataset_version="PLANNING-V0.1", experiment_id=experiment_id)
             run = await orch.execute_task(task.id)
             if run.status.value != "COMPLETED":
                 step.status = PlanStepStatus.FAILED; plan.status = PlanStatus.FAILED; plans.update(plan); self._emit(EventType.PLAN_STEP_FAILED, {"plan_id": plan.id, "step_id": step.id, "run_id": run.id}); self._emit(EventType.PLAN_FAILED, {"plan_id": plan.id}); return plan
@@ -123,7 +141,7 @@ class PlanExecutionService:
                 step.status=PlanStepStatus.RUNNING; step.execution_context=build_step_dependency_context(plan,step,execution_context)
                 task=Task(project_id=goal.project_id,title=step.title,objective=step.objective,constraints=goal.constraints,acceptance_criteria=step.success_criteria,max_attempts=2); tasks.create(task); step.task_id=task.id
                 self._emit(EventType.PLAN_STEP_STARTED,{"plan_id":plan.id,"step_id":step.id,"task_id":task.id})
-                orch=RecoveringOrchestrator(self.db,executor_factory=lambda s=step: _ToolExecutor(self.registry,s,self.db,step.execution_context),executor_type="ToolRegistryExecutor",provider="tool-registry",model="deterministic",harness_version=HARNESS_VERSION,dataset_version="PLANNING-V0.1",experiment_id=experiment_id)
+                orch=RecoveringOrchestrator(self.db,executor_factory=lambda s=step,p=plan: self._step_executor(p,s,step.execution_context),executor_type="TaskGraphAgentExecutor" if self.agent_executor_factory else "ToolRegistryExecutor",provider="native-kernel" if self.agent_executor_factory else "tool-registry",model="provider-adapter" if self.agent_executor_factory else "deterministic",harness_version=HARNESS_VERSION,dataset_version="PLANNING-V0.1",experiment_id=experiment_id)
                 run=await orch.execute_task(task.id)
                 if run.status.value != "COMPLETED":
                     step.status=PlanStepStatus.FAILED; self._emit(EventType.PLAN_STEP_FAILED,{"plan_id":plan.id,"step_id":step.id,"run_id":run.id}); plans.update(plan); continue

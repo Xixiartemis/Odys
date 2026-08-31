@@ -21,6 +21,11 @@ from lhas.domain.enums import RunStatus
 from lhas.domain.models import Project
 from lhas.inner_agent import AgentsSdkModelConfig, InnerAgentExecutor, InnerAgentResult, InnerAgentStatus, OpenAIAgentsBackend
 from lhas.inner_agent.tool_adapter import ToolAwareObserver, _args_signature, safe_tool_summary
+from lhas.native.completion import AcceptedCompletionValidator, CompletionAuthority
+from lhas.native.executor import NativeAgentExecutor
+from lhas.native.kernel import NativeAgentKernel
+from lhas.native.provider import OfflineCompletionProvider, OpenAIChatProviderAdapter
+from lhas.native.tools import NativeToolDispatcher
 from lhas.orchestrator_v2 import RecoveringOrchestrator
 from lhas.persistence.database import Database
 from lhas.persistence.event_store import EventStore
@@ -74,13 +79,14 @@ def _task_title(goal: str) -> str:
     return (compact[:125] + "...") if len(compact) > 128 else compact
 
 
-def encode_cli_config(*, verify_argv: list[str], max_turns: int, provider: str, model: str) -> str:
+def encode_cli_config(*, verify_argv: list[str], max_turns: int, provider: str, model: str, kernel: str = "external") -> str:
     payload = {
         "schema_version": "odys-cli-run-v1",
         "verify_argv": verify_argv,
         "max_turns": max_turns,
         "provider": provider,
         "model": model,
+        "kernel": kernel,
     }
     return CLI_CONFIG_PREFIX + json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
@@ -99,6 +105,9 @@ def decode_cli_config(task) -> dict[str, Any]:
                 or not all(isinstance(item, str) and item for item in data["verify_argv"])
             ):
                 raise CliConfigurationError("PERSISTED_CLI_CONFIG_INVALID")
+            if data.get("kernel", "external") not in {"native", "external"}:
+                raise CliConfigurationError("PERSISTED_CLI_CONFIG_INVALID")
+            data["kernel"] = data.get("kernel", "external")
             return data
     raise CliConfigurationError("PERSISTED_CLI_CONFIG_MISSING")
 
@@ -259,6 +268,7 @@ class PreparedExecution:
     max_turns: int
     provider: str
     model: str
+    kernel: str = "external"
     resume_run_id: str | None = None
 
     async def execute(self):
@@ -299,12 +309,15 @@ class ProductRuntime:
         max_attempts: int,
         max_turns: int,
         provider: str | None,
+        kernel: str = "external",
     ) -> PreparedExecution:
         source = Path(repo).expanduser().resolve()
         if not source.is_dir():
             raise CliConfigurationError(f"repository path does not exist or is not a directory: {source}")
         if max_attempts < 1 or max_turns < 1:
             raise CliConfigurationError("max attempts and max turns must be positive")
+        if kernel not in {"native", "external"}:
+            raise CliConfigurationError("kernel must be 'native' or 'external'")
         settings = resolve_provider_settings(provider)
         sessions_root = self._sessions_root_for_new(source)
         if _paths_overlap(sessions_root, source):
@@ -321,6 +334,7 @@ class ProductRuntime:
             max_turns=max_turns,
             provider=settings.profile,
             model=settings.model,
+            kernel=kernel,
         )
         task = create_task(
             self.db,
@@ -340,8 +354,8 @@ class ProductRuntime:
             timeout_seconds=max(300.0, float(max_turns) * 90.0),
         )
         manager = RunWorkspaceManager(self.db, sessions_root, source_root=source)
-        orchestrator = self._build_orchestrator(task, manager, verify_argv, max_turns, settings)
-        return PreparedExecution(self, task, orchestrator, verify_argv, max_turns, settings.profile, settings.model)
+        orchestrator = self._build_orchestrator(task, manager, verify_argv, max_turns, settings, kernel)
+        return PreparedExecution(self, task, orchestrator, verify_argv, max_turns, settings.profile, settings.model, kernel)
 
     def prepare_resume(self, run_id: str) -> PreparedExecution:
         run = RunRepository(self.db).get(run_id)
@@ -353,15 +367,53 @@ class ProductRuntime:
         config = decode_cli_config(task)
         settings = resolve_provider_settings(config["provider"], persisted_model=config["model"]) if run.status is RunStatus.RUNNING else ProviderSettings(config["provider"], config["model"])
         manager = self._workspace_manager_for_resume(run_id)
-        orchestrator = self._build_orchestrator(task, manager, list(config["verify_argv"]), int(config["max_turns"]), settings)
-        return PreparedExecution(self, task, orchestrator, list(config["verify_argv"]), int(config["max_turns"]), settings.profile, settings.model, resume_run_id=run_id)
+        kernel = str(config.get("kernel", "external"))
+        orchestrator = self._build_orchestrator(task, manager, list(config["verify_argv"]), int(config["max_turns"]), settings, kernel)
+        return PreparedExecution(self, task, orchestrator, list(config["verify_argv"]), int(config["max_turns"]), settings.profile, settings.model, kernel, resume_run_id=run_id)
 
-    def _build_orchestrator(self, task, manager, verify_argv, max_turns, settings):
+    def _build_orchestrator(self, task, manager, verify_argv, max_turns, settings, kernel_mode="external"):
         policy = explicit_command_policy(verify_argv)
+        acceptance_validator = ExplicitCommandValidator(self.db, manager, verify_argv)
 
         def executor_factory(workspace):
             registry = ToolRegistry()
             register_staged_workspace_tools(registry, workspace, policy)
+            if kernel_mode == "native":
+                if settings.profile == "offline":
+                    provider_adapter = OfflineCompletionProvider()
+                else:
+                    config = settings.config
+                    provider_adapter = OpenAIChatProviderAdapter(
+                        model=settings.model,
+                        api_key=config.api_key,
+                        base_url=config.base_url,
+                        extra_body=config.provider_profile.extra_body_dict(),
+                    )
+
+                async def mutation_probe():
+                    state = await workspace.diff()
+                    return bool(state.get("files_changed") or state.get("changed_files"))
+
+                dispatcher = NativeToolDispatcher(
+                    db=self.db,
+                    registry=registry,
+                    allowed_capabilities=set(ALLOWED_CAPABILITIES),
+                    allowed_side_effect_capabilities=set(ALLOWED_SIDE_EFFECTS),
+                    mutation_probe=mutation_probe,
+                )
+                authority = CompletionAuthority(db=self.db, validator=acceptance_validator)
+                native_kernel = NativeAgentKernel(
+                    db=self.db,
+                    provider=provider_adapter,
+                    dispatcher=dispatcher,
+                    completion_authority=authority,
+                )
+                return NativeAgentExecutor(
+                    native_kernel,
+                    allowed_capabilities=ALLOWED_CAPABILITIES,
+                    allowed_side_effect_capabilities=ALLOWED_SIDE_EFFECTS,
+                    max_turns=max_turns,
+                )
             backend = OfflineDemoBackend(registry, verify_argv) if settings.profile == "offline" else OpenAIAgentsBackend(registry, config=settings.config)
             return InnerAgentExecutor(
                 backend,
@@ -371,14 +423,14 @@ class ProductRuntime:
                 max_turns=max_turns,
             )
 
-        validator = ExplicitCommandValidator(self.db, manager, verify_argv)
+        validator = AcceptedCompletionValidator(self.db) if kernel_mode == "native" else acceptance_validator
         return RecoveringOrchestrator(
             self.db,
             workspace_executor_factory=executor_factory,
             workspace_manager=manager,
             validator=validator,
             context_builder=ContextBuilder(policy="CP-3"),
-            executor_type="InnerAgentExecutor",
+            executor_type="NativeAgentExecutor" if kernel_mode == "native" else "InnerAgentExecutor",
             provider=settings.profile,
             model=settings.model,
             harness_version=HARNESS_VERSION,
