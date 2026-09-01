@@ -23,6 +23,10 @@ class ProviderAdapter(Protocol):
     ) -> Any: ...
 
 
+class ProviderResponseNormalizationError(ValueError):
+    """The SDK returned a response shape the native parser cannot consume."""
+
+
 class OpenAIChatProviderAdapter:
     """Single-turn OpenAI-compatible Chat Completions adapter.
 
@@ -87,10 +91,26 @@ class OpenAIChatProviderAdapter:
             kwargs.update({"tools": tools, "tool_choice": "auto"})
         if self.extra_body:
             kwargs["extra_body"] = self.extra_body
-        return await asyncio.wait_for(
+        raw = await asyncio.wait_for(
             self.client.chat.completions.create(**kwargs),
             timeout=max(0.1, float(timeout_seconds)),
         )
+        return self._normalize_response(raw)
+
+    @staticmethod
+    def _normalize_response(raw: Any) -> dict[str, Any]:
+        """Convert SDK response models to the parser's stable dict contract."""
+        if isinstance(raw, dict):
+            return raw
+        dump = getattr(raw, "model_dump", None)
+        if callable(dump):
+            normalized = dump(mode="python")
+        else:
+            as_dict = getattr(raw, "dict", None)
+            normalized = as_dict() if callable(as_dict) else None
+        if not isinstance(normalized, dict):
+            raise ProviderResponseNormalizationError("PROVIDER_RESPONSE_NOT_NORMALIZABLE")
+        return normalized
 
 
 class ScriptedProviderAdapter:

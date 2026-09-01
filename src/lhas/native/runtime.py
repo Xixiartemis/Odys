@@ -70,6 +70,8 @@ class ProviderFailureClassifier:
             if value:
                 text += " " + str(value)
         upper = text[:4000].upper()
+        if "PROVIDER_RESPONSE_NOT_NORMALIZABLE" in upper:
+            return ProviderFailureCategory.MALFORMED_PROVIDER_RESPONSE
         quota_evidence = (
             re.search(r"\b(?:MONTHLY|WEEKLY|DAILY|ANNUAL)\s+(?:USAGE|QUOTA|LIMIT)\b", upper)
             or re.search(r"\b(?:BILLING\s+PERIOD|SUBSCRIPTION|PLAN)\b.{0,80}\b(?:EXHAUST|LIMIT|QUOTA)\b", upper)
@@ -94,6 +96,21 @@ class ProviderFailureClassifier:
         if status in {408, 425, 500, 502, 503, 504} or any(token in upper for token in ("UNAVAILABLE", "CONNECTION RESET", "SERVICE DOWN")):
             return ProviderFailureCategory.PROVIDER_UNAVAILABLE
         return ProviderFailureCategory.UNKNOWN_PROVIDER_FAILURE
+
+    @staticmethod
+    def taxonomy_code(category: ProviderFailureCategory | str) -> str:
+        """Stable, secret-free lower-case taxonomy for user-facing evidence."""
+        category = ProviderFailureCategory(category)
+        return {
+            ProviderFailureCategory.PROVIDER_TIMEOUT: "provider_timeout",
+            ProviderFailureCategory.QUOTA_EXHAUSTED: "quota_exhausted",
+            ProviderFailureCategory.TRANSIENT_RATE_LIMIT: "rate_limit",
+            ProviderFailureCategory.PROVIDER_UNAVAILABLE: "connection_error",
+            ProviderFailureCategory.MALFORMED_PROVIDER_RESPONSE: "invalid_response",
+            ProviderFailureCategory.UNKNOWN_PROVIDER_FAILURE: "unknown_provider_failure",
+            ProviderFailureCategory.BILLING_OR_CREDIT_EXHAUSTED: "billing_or_credit_exhausted",
+            ProviderFailureCategory.AUTH_INVALID: "auth_invalid",
+        }[category]
 
     @classmethod
     def report(cls, error: Any) -> dict[str, Any]:

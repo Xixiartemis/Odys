@@ -95,6 +95,10 @@ class RuleFailureClassifier:
         if "MALFORMED_PROVIDER_RESPONSE" in error_text or "PROVIDER_MALFORMED_RESPONSE" in error_text:
             return self._report(attempt, FailureType.MALFORMED_PROVIDER_RESPONSE, FailureClass.EXECUTION, evidence,
                                 "provider returned a malformed response", 0.95, "fail closed and inspect provider")
+        if "UNKNOWN_PROVIDER_FAILURE" in error_text:
+            return self._report(attempt, FailureType.UNKNOWN_PROVIDER_FAILURE, FailureClass.EXECUTION, evidence,
+                                "provider failed without a recognizable provider-specific signature", 0.4,
+                                "retry within budget; inspect provider evidence before changing route")
         if status.value == "TIMED_OUT":
             return self._report(attempt, FailureType.TIMEOUT, FailureClass.EXECUTION, evidence,
                                 "executor exceeded its time budget",

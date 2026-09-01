@@ -677,6 +677,7 @@ def inspect_run(db: Database, run_id: str, *, include_events: bool = False, rece
             "attempt_number": attempt.attempt_number,
             "status": attempt.status.value,
             "error_type": attempt.error_type,
+            "error_message": _bounded_text(attempt.error_message),
             "context_policy": snapshot.policy if snapshot else None,
             "turn_count": turns,
             "tool_calls": calls,
@@ -742,6 +743,22 @@ def inspect_run(db: Database, run_id: str, *, include_events: bool = False, rece
             "status": "PASS" if latest_validation.passed else "FAIL",
             "evidence": evidence,
         }
+    configured_target = (
+        latest_native_snapshot.configured_target.safe_projection()
+        if latest_native_snapshot and latest_native_snapshot.configured_target
+        else None
+    )
+    effective_target = (
+        latest_native_snapshot.effective_target.safe_projection()
+        if latest_native_snapshot and latest_native_snapshot.effective_target
+        else None
+    )
+    runtime_truth = {
+        "configured": configured_target,
+        "effective": effective_target,
+        "transport": latest_native_snapshot.actual_transport_endpoint_identity if latest_native_snapshot else None,
+        "fingerprint": latest_native_snapshot.actual_transport_endpoint_fingerprint if latest_native_snapshot else None,
+    }
     config = decode_cli_config(task)
     result = {
         "run": {
@@ -755,8 +772,9 @@ def inspect_run(db: Database, run_id: str, *, include_events: bool = False, rece
             "workspace_session": workspace["session_id"],
             "provider": run.provider,
             "model": run.model,
-            "configured_target": latest_native_snapshot.configured_target.safe_projection() if latest_native_snapshot and latest_native_snapshot.configured_target else None,
-            "effective_target": latest_native_snapshot.effective_target.safe_projection() if latest_native_snapshot and latest_native_snapshot.effective_target else None,
+            "configured_target": configured_target,
+            "effective_target": effective_target,
+            "runtime_truth": runtime_truth,
             "runtime_target_state": "FALLBACK" if latest_native_snapshot and latest_native_snapshot.fallback_reason else (latest_native_snapshot.phase.value if latest_native_snapshot else None),
             "fallback_reason": latest_native_snapshot.fallback_reason if latest_native_snapshot else None,
             "duration_ms": _duration_ms(run),

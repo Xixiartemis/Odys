@@ -247,6 +247,11 @@ def test_cli_provider_migration_resumes_same_native_execution(monkeypatch, tmp_p
     ])
     assert result.exit_code == 0, result.output
     assert "RESULT: PASS" in result.output
+    assert "RUNTIME TARGET" in result.output
+    assert "configured:" in result.output
+    assert "effective:" in result.output
+    assert "transport:" in result.output
+    assert "fingerprint:" in result.output
 
     runtime = ProductRuntime(db_path)
     try:

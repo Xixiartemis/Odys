@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import re
 import time
 from typing import Any
 
@@ -175,6 +176,20 @@ class NativeAgentKernel:
                 "configured_target": snapshot.configured_target.safe_projection() if snapshot.configured_target else None,
                 "effective_target": snapshot.effective_target.safe_projection() if snapshot.effective_target else None,
             }
+            actual_target = self.provider.runtime_target
+            self.events.append(
+                EventType.MODEL_CALL_STARTED,
+                task_id=task_id,
+                run_id=run_id,
+                attempt_id=attempt_id,
+                payload={
+                    "turn": next_turn,
+                    "runtime_target_identity": actual_target.endpoint_identity if isinstance(actual_target, RuntimeTarget) else None,
+                    "provider_id": actual_target.provider_id if isinstance(actual_target, RuntimeTarget) else None,
+                    "model_id": actual_target.model_id if isinstance(actual_target, RuntimeTarget) else None,
+                    "endpoint_fingerprint": actual_target.endpoint_fingerprint if isinstance(actual_target, RuntimeTarget) else None,
+                },
+            )
             self.events.append(EventType.NATIVE_MODEL_TURN_STARTED, task_id=task_id, run_id=run_id, attempt_id=attempt_id, payload={"turn": next_turn, "model_turn_ordinal": next_turn, "provider": getattr(self.provider, "name", type(self.provider).__name__), **target_payload, "context_chars": context.chars_used, "context_budget": context.budget_chars})
             started = time.monotonic()
             try:
@@ -184,10 +199,21 @@ class NativeAgentKernel:
                     timeout_seconds=self.provider_timeout_seconds,
                 )
             except asyncio.TimeoutError as exc:
-                return self._provider_failure(request, snapshot, ProviderFailureCategory.PROVIDER_TIMEOUT, next_turn, str(exc))
+                category = ProviderFailureCategory.PROVIDER_TIMEOUT
+                self._record_model_response_rejected(task_id, run_id, attempt_id, next_turn, category, str(exc), stage="PROVIDER_GENERATE")
+                return self._provider_failure(request, snapshot, category, next_turn, str(exc))
             except Exception as exc:
-                return self._provider_failure(request, snapshot, ProviderFailureClassifier.classify(exc), next_turn, str(exc))
+                category = ProviderFailureClassifier.classify(exc)
+                self._record_model_response_rejected(task_id, run_id, attempt_id, next_turn, category, str(exc), stage="PROVIDER_GENERATE")
+                return self._provider_failure(request, snapshot, category, next_turn, str(exc))
             duration_ms = int((time.monotonic() - started) * 1000)
+            self.events.append(
+                EventType.MODEL_RESPONSE_RECEIVED,
+                task_id=task_id,
+                run_id=run_id,
+                attempt_id=attempt_id,
+                payload=self._response_shape(raw, turn=next_turn),
+            )
             try:
                 response = self.parser.parse(raw)
             except ModelResponseError as exc:
@@ -195,9 +221,24 @@ class NativeAgentKernel:
                 snapshot.phase = NativePhase.FAILED
                 snapshot.current_failure = {"type": "PROVIDER_MALFORMED_RESPONSE", "failure_category": "MALFORMED_PROVIDER_RESPONSE", "category": str(exc)[:128]}
                 self._save(snapshot)
-                self.events.append(EventType.NATIVE_MODEL_RESPONSE_REJECTED, task_id=task_id, run_id=run_id, attempt_id=attempt_id, payload={"turn": next_turn, "error_type": "PROVIDER_MALFORMED_RESPONSE", "category": str(exc)[:128]})
+                rejected = {"turn": next_turn, "error_type": "PROVIDER_MALFORMED_RESPONSE", "failure_code": "invalid_response", "category": str(exc)[:128]}
+                self.events.append(EventType.MODEL_RESPONSE_REJECTED, task_id=task_id, run_id=run_id, attempt_id=attempt_id, payload=rejected)
+                self.events.append(EventType.NATIVE_MODEL_RESPONSE_REJECTED, task_id=task_id, run_id=run_id, attempt_id=attempt_id, payload=rejected)
                 self._create_replan(snapshot, "PROVIDER_MALFORMED_RESPONSE", {"category": str(exc)[:128]})
-                return self._failed(request, snapshot, "PROVIDER_MALFORMED_RESPONSE")
+                return self._failed(request, snapshot, "PROVIDER_MALFORMED_RESPONSE", detail=str(exc))
+
+            self.events.append(
+                EventType.MODEL_RESPONSE_PARSED,
+                task_id=task_id,
+                run_id=run_id,
+                attempt_id=attempt_id,
+                payload={
+                    "turn": next_turn,
+                    "content_length": len(response.content),
+                    "tool_call_count": len(response.tool_calls),
+                    "completion_claim": response.completion_claim,
+                },
+            )
 
             snapshot.model_turn_count = next_turn
             snapshot.model_turn_ordinal = next_turn
@@ -320,15 +361,16 @@ class NativeAgentKernel:
         snapshot.model_turn_count = turn
         snapshot.model_turn_ordinal = turn
         snapshot.phase = NativePhase.RECOVERING
-        snapshot.current_failure = {"type": category.value, "category": category.value, "detail": (detail or "")[:512],
+        safe_detail = self._safe_error(detail)
+        snapshot.current_failure = {"type": category.value, "category": category.value, "failure_code": ProviderFailureClassifier.taxonomy_code(category), "detail": safe_detail,
                                     "same_target_retryable": category in {ProviderFailureCategory.TRANSIENT_RATE_LIMIT, ProviderFailureCategory.PROVIDER_UNAVAILABLE, ProviderFailureCategory.PROVIDER_TIMEOUT}}
         self._save(snapshot)
         if snapshot.effective_target is not None:
             health_state = ProviderHealthState.QUOTA_BLOCKED if category is ProviderFailureCategory.QUOTA_EXHAUSTED else ProviderHealthState.AUTH_BLOCKED if category is ProviderFailureCategory.AUTH_INVALID else ProviderHealthState.TRANSIENTLY_UNAVAILABLE if category in {ProviderFailureCategory.PROVIDER_UNAVAILABLE, ProviderFailureCategory.PROVIDER_TIMEOUT, ProviderFailureCategory.TRANSIENT_RATE_LIMIT} else ProviderHealthState.UNKNOWN
-            self.provider_health.record(snapshot.effective_target, health_state, category=category, reason=(detail or category.value))
+            self.provider_health.record(snapshot.effective_target, health_state, category=category, reason=(safe_detail or category.value))
             self.events.append(EventType.PROVIDER_HEALTH_CHANGED, task_id=snapshot.task_id, run_id=snapshot.run_id, attempt_id=snapshot.attempt_id, payload={"target": snapshot.effective_target.safe_projection(), "state": health_state.value, "failure_category": category.value})
-        self.events.append(EventType.NATIVE_PROVIDER_FAILURE, task_id=snapshot.task_id, run_id=snapshot.run_id, attempt_id=snapshot.attempt_id, payload={"turn": turn, "failure_category": category.value, "configured_target": snapshot.configured_target.safe_projection() if snapshot.configured_target else None, "effective_target": snapshot.effective_target.safe_projection() if snapshot.effective_target else None})
-        return self._failed(request, snapshot, category.value)
+        self.events.append(EventType.NATIVE_PROVIDER_FAILURE, task_id=snapshot.task_id, run_id=snapshot.run_id, attempt_id=snapshot.attempt_id, payload={"turn": turn, "failure_category": category.value, "failure_code": ProviderFailureClassifier.taxonomy_code(category), "detail": safe_detail, "configured_target": snapshot.configured_target.safe_projection() if snapshot.configured_target else None, "effective_target": snapshot.effective_target.safe_projection() if snapshot.effective_target else None})
+        return self._failed(request, snapshot, category.value, detail=safe_detail)
 
     def _ensure_runtime_target(self, request: AgentRequest, snapshot: ExecutionSnapshot) -> None:
         metadata = request.metadata or {}
@@ -438,12 +480,61 @@ class NativeAgentKernel:
         self._states[request.agent_id] = AgentStatus.COMPLETED
         return AgentResult(status=AgentStatus.COMPLETED, final_output=output, completion_claim=True, turn_count=snapshot.model_turn_count, tool_call_count=snapshot.tool_call_count, safe_trace=snapshot.recent_tool_outcomes[-100:], artifacts={"completion_candidate_id": snapshot.completion_candidate_id, "execution_snapshot_id": snapshot.id})
 
-    def _failed(self, request: AgentRequest, snapshot: ExecutionSnapshot, error_type: str) -> AgentResult:
+    def _failed(self, request: AgentRequest, snapshot: ExecutionSnapshot, error_type: str, *, detail: str | None = None) -> AgentResult:
         self._states[request.agent_id] = AgentStatus.FAILED
         if snapshot.phase not in {NativePhase.REPLANNING, NativePhase.RECOVERING}:
             snapshot.phase = NativePhase.FAILED
             self._save(snapshot)
-        return AgentResult(status=AgentStatus.FAILED, completion_claim=False, turn_count=snapshot.model_turn_count, tool_call_count=snapshot.tool_call_count, safe_trace=snapshot.recent_tool_outcomes[-100:], artifacts={"execution_snapshot_id": snapshot.id, "workspace_mutation_version": snapshot.workspace_mutation_version}, error_type=error_type)
+        return AgentResult(status=AgentStatus.FAILED, completion_claim=False, turn_count=snapshot.model_turn_count, tool_call_count=snapshot.tool_call_count, safe_trace=snapshot.recent_tool_outcomes[-100:], artifacts={"execution_snapshot_id": snapshot.id, "workspace_mutation_version": snapshot.workspace_mutation_version}, error_type=error_type, error_message=(detail or "")[:512] or None)
+
+    @staticmethod
+    def _response_shape(value: Any, *, turn: int) -> dict[str, Any]:
+        """Project response shape only; never persist provider content."""
+        keys: list[str] = []
+        if isinstance(value, dict):
+            keys = sorted(str(key) for key in value.keys())[:50]
+        else:
+            dump = getattr(value, "model_dump", None)
+            if callable(dump):
+                try:
+                    projected = dump(mode="python")
+                    if isinstance(projected, dict):
+                        keys = sorted(str(key) for key in projected.keys())[:50]
+                except Exception:
+                    keys = []
+        return {"turn": turn, "response_python_type": type(value).__name__, "dict_keys": keys}
+
+    def _record_model_response_rejected(
+        self,
+        task_id: str,
+        run_id: str,
+        attempt_id: str,
+        turn: int,
+        category: ProviderFailureCategory,
+        detail: str,
+        *,
+        stage: str,
+    ) -> None:
+        self.events.append(
+            EventType.MODEL_RESPONSE_REJECTED,
+            task_id=task_id,
+            run_id=run_id,
+            attempt_id=attempt_id,
+            payload={
+                "turn": turn,
+                "stage": stage,
+                "error_type": category.value,
+                "failure_code": ProviderFailureClassifier.taxonomy_code(category),
+                "detail": self._safe_error(detail),
+            },
+        )
+
+    @staticmethod
+    def _safe_error(detail: str | None) -> str:
+        """Keep provider diagnostics useful without persisting credentials."""
+        value = str(detail or "")
+        value = re.sub(r"(?i)(api[_-]?key|authorization|bearer|token|secret|password)(\s*[:=]\s*)[^,\s]+", r"\1\2<redacted>", value)
+        return value[:512]
 
     @staticmethod
     def _safe_usage(usage: dict[str, Any]) -> dict[str, Any]:

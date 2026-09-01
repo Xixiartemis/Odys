@@ -72,6 +72,7 @@ class AgentResult(BaseModel):
     safe_trace: list[dict[str, Any]] = Field(default_factory=list)
     child_run_refs: list[str] = Field(default_factory=list)
     error_type: str | None = Field(default=None, max_length=128)
+    error_message: str | None = Field(default=None, max_length=512)
 
     @field_validator("safe_trace")
     @classmethod

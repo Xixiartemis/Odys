@@ -51,7 +51,7 @@ class NativeAgentExecutor:
             status=ExecutionStatus.SUCCESS if result.status is AgentStatus.COMPLETED else ExecutionStatus.FAILURE,
             output=result.final_output or None,
             error_type=result.error_type,
-            error_message=None if result.status is AgentStatus.COMPLETED else "native agent attempt did not reach accepted completion",
+            error_message=(None if result.status is AgentStatus.COMPLETED else (result.error_message or "native agent attempt did not reach accepted completion")),
             usage=result.usage,
             artifacts=result.artifacts,
             raw=result.model_dump(mode="json"),

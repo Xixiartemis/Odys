@@ -310,6 +310,13 @@ def _print_product_summary(data: dict) -> None:
     exit_code = (validation or {}).get("evidence", {}).get("exit_code")
     console.print(f"Validation exit code: {exit_code if exit_code is not None else 'N/A'}")
     console.print(f"Duration: {run['duration_ms']} ms")
+    _print_runtime_truth(run)
+    attempt_failures = [item for item in data["attempts"] if item.get("error_type")]
+    if attempt_failures:
+        console.print("Attempt failure types: " + ", ".join(item["error_type"] for item in attempt_failures[-5:]))
+        last_failure = attempt_failures[-1]
+        if last_failure.get("error_message"):
+            console.print(f"Last attempt error: {last_failure['error_message']}")
     if result == "FAIL":
         top = data["tools"]["failures_by_type"]
         if top:
@@ -320,6 +327,15 @@ def _print_product_summary(data: dict) -> None:
     console.print(f"odys inspect {run['id']}")
     if run["status"] == "RUNNING":
         console.print(f"odys resume {run['id']}")
+
+
+def _print_runtime_truth(run: dict) -> None:
+    truth = run.get("runtime_truth") or {}
+    console.print("RUNTIME TARGET")
+    console.print(f"configured: {json.dumps(truth.get('configured'), ensure_ascii=False, sort_keys=True)}")
+    console.print(f"effective: {json.dumps(truth.get('effective'), ensure_ascii=False, sort_keys=True)}")
+    console.print(f"transport: {truth.get('transport') or 'NOT_RECORDED'}")
+    console.print(f"fingerprint: {truth.get('fingerprint') or 'NOT_RECORDED'}")
 
 
 @app.command("run")
@@ -424,6 +440,7 @@ def _human_inspect(data: dict, *, show_events: bool) -> None:
         f"[bold]Duration[/bold] {run['duration_ms']} ms",
         title="Odys Inspect",
     ))
+    _print_runtime_truth(run)
     attempts = Table(title="Attempts")
     for column in ("#", "Status", "Error", "Context", "Turns", "Calls", "Failures", "Validation"):
         attempts.add_column(column)
