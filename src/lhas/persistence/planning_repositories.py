@@ -1,8 +1,12 @@
-from sqlalchemy import select
+from sqlalchemy import select, update as sa_update
 from lhas.domain.models import json_dumps, json_loads
 from lhas.persistence.database import Database
 from lhas.persistence.orm import GoalRow, PlanRow, PlanStepRow
 from lhas.planning.models import Goal, Plan, PlanStep
+
+
+class PlanVersionConflict(RuntimeError):
+    code = "REPLAN_VERSION_CONFLICT"
 
 class GoalRepository:
     def __init__(self, db): self.db=db
@@ -35,6 +39,28 @@ class PlanRepository:
     def update(self,p):
         with self.db.session() as s:
             r=s.get(PlanRow,p.id); r.status=p.status.value; r.version=p.version; r.metadata_json=json_dumps({**p.metadata, "replan_count": p.replan_count}); r.invalidated_step_ids=json_dumps(p.invalidated_step_ids)
+            for x in p.steps:
+                q=s.get(PlanStepRow,x.id)
+                if q is None:
+                    q=PlanStepRow(id=x.id,plan_id=p.id,position=p.steps.index(x),title=x.title,objective=x.objective,capability=x.capability,depends_on=json_dumps(x.depends_on),inputs=json_dumps(_step_inputs(x)),expected_output=x.expected_output,success_criteria=json_dumps(x.success_criteria),status=x.status.value,task_id=x.task_id,output=json_dumps(x.output),execution_context=json_dumps(x.execution_context),semantic_fingerprint=x.semantic_fingerprint); s.add(q)
+                else:
+                    q.position=p.steps.index(x); q.title=x.title; q.objective=x.objective; q.capability=x.capability; q.depends_on=json_dumps(x.depends_on); q.inputs=json_dumps(_step_inputs(x)); q.expected_output=x.expected_output; q.success_criteria=json_dumps(x.success_criteria); q.status=x.status.value; q.task_id=x.task_id; q.output=json_dumps(x.output); q.execution_context=json_dumps(x.execution_context); q.semantic_fingerprint=x.semantic_fingerprint
+        return p
+    def update_if_version(self, p, *, expected_version: str):
+        """Commit an authoritative replan only if its base is still current."""
+        with self.db.session() as s:
+            result = s.execute(
+                sa_update(PlanRow)
+                .where(PlanRow.id == p.id, PlanRow.version == expected_version)
+                .values(
+                    status=p.status.value,
+                    version=p.version,
+                    metadata_json=json_dumps({**p.metadata, "replan_count": p.replan_count}),
+                    invalidated_step_ids=json_dumps(p.invalidated_step_ids),
+                )
+            )
+            if result.rowcount != 1:
+                raise PlanVersionConflict("REPLAN_VERSION_CONFLICT")
             for x in p.steps:
                 q=s.get(PlanStepRow,x.id)
                 if q is None:

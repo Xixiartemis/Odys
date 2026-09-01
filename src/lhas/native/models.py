@@ -4,12 +4,14 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import Enum
+import hashlib
 from typing import Any
 from urllib.parse import urlparse
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from lhas.domain.models import new_id, utcnow
+from lhas.native.transport import canonical_transport_identity
 
 
 class NativePhase(str, Enum):
@@ -35,6 +37,8 @@ class RuntimeTarget(BaseModel):
     provider_id: str = Field(min_length=1, max_length=128)
     model_id: str = Field(min_length=1, max_length=128)
     endpoint_identity: str = Field(min_length=1, max_length=256)
+    endpoint_host: str | None = Field(default=None, min_length=1, max_length=256)
+    endpoint_fingerprint: str | None = Field(default=None, min_length=64, max_length=64)
     credential_route_id: str = Field(min_length=1, max_length=128)
     route_type: str = Field(min_length=1, max_length=64)
 
@@ -43,9 +47,16 @@ class RuntimeTarget(BaseModel):
     def normalize_endpoint_identity(cls, value: Any) -> str:
         value = str(value)
         if "://" in value:
-            parsed = urlparse(value)
-            value = parsed.hostname or "unknown-endpoint"
+            value = canonical_transport_identity(value).endpoint_identity
         return value.split("@", 1)[-1][:256]
+
+    def model_post_init(self, __context: Any) -> None:
+        parsed = urlparse(self.endpoint_identity)
+        host = parsed.hostname or self.endpoint_identity
+        fingerprint = hashlib.sha256(self.endpoint_identity.encode("utf-8")).hexdigest()
+        # These are derived evidence, never caller-authoritative labels.
+        object.__setattr__(self, "endpoint_host", host)
+        object.__setattr__(self, "endpoint_fingerprint", fingerprint)
 
     @property
     def composite_id(self) -> str:
@@ -191,6 +202,8 @@ class ExecutionSnapshot(BaseModel):
     configured_target: RuntimeTarget | None = None
     effective_target: RuntimeTarget | None = None
     actual_provider_target: RuntimeTarget | None = None
+    actual_transport_endpoint_identity: str | None = None
+    actual_transport_endpoint_fingerprint: str | None = None
     fallback_reason: str | None = Field(default=None, max_length=512)
     target_event_id: str | None = None
     model_turn_ordinal: int = Field(default=0, ge=0)

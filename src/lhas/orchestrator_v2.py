@@ -363,6 +363,19 @@ class RecoveringOrchestrator(Orchestrator):
             payload={"executor": getattr(executor, "name", executor.__class__.__name__), "resume_same_attempt": True},
         )
         await self._run_executor(task, run, attempt, executor)
+        # A provider-migration resume can complete the same Attempt after that
+        # Attempt previously produced a quota-era failed validation. Revalidate
+        # immediately before ResumeDecision can observe the stale terminal
+        # recovery action; _validate_result updates the same durable row.
+        if state.validation is not None and not state.validation.passed:
+            refreshed = self.attempt_repo.get(attempt.id)
+            if refreshed is not None and refreshed.status is AttemptStatus.COMPLETED:
+                await self._validate_result(
+                    task,
+                    run,
+                    refreshed,
+                    self._result_for_attempt(refreshed),
+                )
 
     async def _validate_persisted_attempt(self, state, *, outcome_arbitration: bool = False) -> None:
         result = self._result_for_attempt(state.latest_attempt)
@@ -384,7 +397,15 @@ class RecoveringOrchestrator(Orchestrator):
         outcome_arbitration: bool = False,
     ) -> ValidationResult:
         existing = self.validation_repo.get_for_attempt(attempt.id)
-        if existing is not None:
+        migration_revalidation = bool(
+            existing is not None
+            and not existing.passed
+            and attempt.status is AttemptStatus.COMPLETED
+            and result.status is ExecutionStatus.SUCCESS
+            and attempt.error_type is None
+            and run.executor_type == "NativeAgentExecutor"
+        )
+        if existing is not None and not migration_revalidation:
             return existing
         payload: dict[str, Any] = {}
         if recovery_origin:
@@ -400,7 +421,11 @@ class RecoveringOrchestrator(Orchestrator):
         self._emit(EventType.VALIDATION_STARTED, task=task, run=run, attempt=attempt,
                    payload=payload or None)
         validation = await self.validator.validate(task=task, attempt=attempt, result=result)
-        self.validation_repo.create(validation)
+        if migration_revalidation:
+            validation.id = existing.id
+            self.validation_repo.update(validation)
+        else:
+            self.validation_repo.create(validation)
         self._crash(CrashPoint.AFTER_VALIDATION_PERSISTED, task=task, run=run, attempt=attempt)
         event = EventType.VALIDATION_PASSED if validation.passed else EventType.VALIDATION_FAILED
         self._emit(event, task=task, run=run, attempt=attempt,

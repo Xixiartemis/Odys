@@ -382,13 +382,21 @@ def product_run(
 @app.command("resume")
 def product_resume(
     run_id: str = typer.Argument(..., help="Durable Run ID"),
+    migrate_provider: Optional[str] = typer.Option(None, "--migrate-provider", help="Explicit provider id for a blocked native run"),
+    migrate_model: Optional[str] = typer.Option(None, "--migrate-model", help="Explicit model id for provider migration"),
+    credential_route: Optional[str] = typer.Option(None, "--credential-route", help="Route id resolved from ODYS_AGENT_*_<ROUTE>"),
     no_ui: bool = typer.Option(False, "--no-ui", help="Use plain deterministic console output"),
     db_override: Optional[Path] = typer.Option(None, "--db", help="SQLite database path"),
 ) -> None:
     """Resume an interrupted durable run in its existing workspace."""
     runtime = ProductRuntime(_product_db_path(db_override))
     try:
-        prepared = runtime.prepare_resume(run_id)
+        prepared = runtime.prepare_resume(
+            run_id,
+            migrate_provider=migrate_provider,
+            migrate_model=migrate_model,
+            credential_route=credential_route,
+        )
         try:
             run, data, _ = asyncio.run(execute_with_progress(prepared, no_ui=no_ui, console=console))
         except KeyboardInterrupt:

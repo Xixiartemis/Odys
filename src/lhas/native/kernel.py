@@ -372,8 +372,19 @@ class NativeAgentKernel:
         actual = getattr(self.provider, "runtime_target", None)
         if callable(actual):
             actual = actual()
+        transport = getattr(self.provider, "transport_identity", None)
+        if callable(transport):
+            transport = transport()
         snapshot.actual_provider_target = actual
-        if actual == durable:
+        snapshot.actual_transport_endpoint_identity = getattr(transport, "endpoint_identity", None)
+        snapshot.actual_transport_endpoint_fingerprint = getattr(transport, "endpoint_fingerprint", None)
+        transport_matches_provider = bool(
+            isinstance(actual, RuntimeTarget)
+            and transport is not None
+            and actual.endpoint_identity == transport.endpoint_identity
+            and actual.endpoint_fingerprint == transport.endpoint_fingerprint
+        )
+        if actual == durable and transport_matches_provider:
             self._save(snapshot)
             return True
         snapshot.current_failure = {
@@ -381,13 +392,17 @@ class NativeAgentKernel:
             "configured_target": snapshot.configured_target.safe_projection() if snapshot.configured_target else None,
             "effective_target": durable.safe_projection() if durable else None,
             "actual_provider_target": actual.safe_projection() if isinstance(actual, RuntimeTarget) else None,
+            "actual_transport_endpoint_identity": snapshot.actual_transport_endpoint_identity,
+            "actual_transport_endpoint_fingerprint": snapshot.actual_transport_endpoint_fingerprint,
         }
         self._save(snapshot)
         self.events.append(EventType.NATIVE_PROVIDER_FAILURE, task_id=snapshot.task_id, run_id=snapshot.run_id,
                            attempt_id=snapshot.attempt_id, payload={"failure_category": "RUNTIME_TARGET_DIVERGENCE",
                            "configured_target": snapshot.configured_target.safe_projection() if snapshot.configured_target else None,
                            "effective_target": durable.safe_projection() if durable else None,
-                           "actual_provider_target": actual.safe_projection() if isinstance(actual, RuntimeTarget) else None})
+                           "actual_provider_target": actual.safe_projection() if isinstance(actual, RuntimeTarget) else None,
+                           "actual_transport_endpoint_identity": snapshot.actual_transport_endpoint_identity,
+                           "actual_transport_endpoint_fingerprint": snapshot.actual_transport_endpoint_fingerprint})
         return False
 
     def _budget_exhausted(self, request: AgentRequest, snapshot: ExecutionSnapshot, budget: str) -> AgentResult:

@@ -7,10 +7,10 @@ import hashlib
 import json
 import os
 import re
-from urllib.parse import urlparse
 from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from enum import Enum
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
@@ -30,6 +30,7 @@ from lhas.native.models import RuntimeTarget
 from lhas.native.tools import NativeToolDispatcher
 from lhas.native.persistence import ExecutionSnapshotRepository
 from lhas.native.runtime import RuntimeTargetController, RuntimeTargetError
+from lhas.native.transport import canonical_transport_identity
 from lhas.orchestrator_v2 import RecoveringOrchestrator
 from lhas.persistence.database import Database
 from lhas.persistence.event_store import EventStore
@@ -139,6 +140,34 @@ class CliNativeProviderFactory:
     def _suffix(route_id: str) -> str:
         return re.sub(r"[^A-Za-z0-9]", "_", route_id).upper()
 
+    @classmethod
+    def resolve_route_target(
+        cls,
+        *,
+        provider_id: str,
+        model_id: str,
+        credential_route_id: str,
+        route_type: str = "chat_completions",
+    ) -> RuntimeTarget:
+        suffix = cls._suffix(credential_route_id)
+        api_key = os.getenv(f"ODYS_AGENT_API_KEY_{suffix}")
+        endpoint = os.getenv(f"ODYS_AGENT_ENDPOINT_{suffix}")
+        if not api_key or not endpoint:
+            raise RuntimeTargetError(
+                "RUNTIME_TARGET_CREDENTIAL_ROUTE_UNAVAILABLE",
+                "requested credential route requires both API key and endpoint",
+            )
+        transport = canonical_transport_identity(endpoint)
+        return RuntimeTarget(
+            provider_id=provider_id,
+            model_id=model_id,
+            endpoint_identity=transport.endpoint_identity,
+            endpoint_host=transport.endpoint_host,
+            endpoint_fingerprint=transport.endpoint_fingerprint,
+            credential_route_id=credential_route_id,
+            route_type=os.getenv(f"ODYS_AGENT_API_MODE_{suffix}") or route_type,
+        )
+
     def __call__(self, target: RuntimeTarget):
         if self.settings.profile == "offline":
             provider = OfflineCompletionProvider()
@@ -150,22 +179,31 @@ class CliNativeProviderFactory:
                 base_url=config.base_url,
                 extra_body=config.provider_profile.extra_body_dict(),
                 provider_id=target.provider_id,
-                endpoint_identity=target.endpoint_identity,
                 credential_route_id=target.credential_route_id,
                 route_type=target.route_type,
             )
         else:
             suffix = self._suffix(target.credential_route_id)
             api_key = os.getenv(f"ODYS_AGENT_API_KEY_{suffix}")
-            if not api_key:
+            base_url = os.getenv(f"ODYS_AGENT_ENDPOINT_{suffix}")
+            if not api_key or not base_url:
                 raise RuntimeTargetError("RUNTIME_TARGET_CREDENTIAL_ROUTE_UNAVAILABLE", "requested credential route is not configured")
-            base_url = os.getenv(f"ODYS_AGENT_ENDPOINT_{suffix}") or f"https://{target.endpoint_identity}"
+            resolved = self.resolve_route_target(
+                provider_id=target.provider_id,
+                model_id=target.model_id,
+                credential_route_id=target.credential_route_id,
+                route_type=target.route_type,
+            )
+            if resolved != target:
+                raise RuntimeTargetError(
+                    "RUNTIME_TARGET_TRANSPORT_MISMATCH",
+                    "requested target does not match the route transport",
+                )
             provider = OpenAIChatProviderAdapter(
                 model=target.model_id,
                 api_key=api_key,
                 base_url=base_url,
                 provider_id=target.provider_id,
-                endpoint_identity=target.endpoint_identity,
                 credential_route_id=target.credential_route_id,
                 route_type=target.route_type,
             )
@@ -314,6 +352,11 @@ class OfflineDemoBackend:
         )
 
 
+class ResumeControlIntent(str, Enum):
+    NORMAL_RESUME = "NORMAL_RESUME"
+    PROVIDER_MIGRATION_RESUME = "PROVIDER_MIGRATION_RESUME"
+
+
 @dataclass
 class PreparedExecution:
     runtime: "ProductRuntime"
@@ -325,9 +368,18 @@ class PreparedExecution:
     model: str
     kernel: str = "external"
     resume_run_id: str | None = None
+    control_intent: ResumeControlIntent = ResumeControlIntent.NORMAL_RESUME
+    migration_target: RuntimeTarget | None = None
 
     async def execute(self):
         if self.resume_run_id:
+            if self.control_intent is ResumeControlIntent.PROVIDER_MIGRATION_RESUME:
+                if self.migration_target is None:
+                    raise CliConfigurationError("PROVIDER_MIGRATION_TARGET_REQUIRED")
+                return await self.orchestrator.resume_task(
+                    self.task.id,
+                    runtime_target=self.migration_target,
+                )
             return await self.orchestrator.resume_run(self.resume_run_id)
         return await self.orchestrator.execute_task(self.task.id)
 
@@ -412,7 +464,14 @@ class ProductRuntime:
         orchestrator = self._build_orchestrator(task, manager, verify_argv, max_turns, settings, kernel)
         return PreparedExecution(self, task, orchestrator, verify_argv, max_turns, settings.profile, settings.model, kernel)
 
-    def prepare_resume(self, run_id: str) -> PreparedExecution:
+    def prepare_resume(
+        self,
+        run_id: str,
+        *,
+        migrate_provider: str | None = None,
+        migrate_model: str | None = None,
+        credential_route: str | None = None,
+    ) -> PreparedExecution:
         run = RunRepository(self.db).get(run_id)
         if run is None:
             raise CliConfigurationError(f"run {run_id} not found")
@@ -420,6 +479,14 @@ class ProductRuntime:
         if task is None:
             raise CliConfigurationError(f"task {run.task_id} not found")
         config = decode_cli_config(task)
+        migration_values = (migrate_provider, migrate_model, credential_route)
+        if any(value is not None for value in migration_values) and not all(
+            isinstance(value, str) and value.strip() for value in migration_values
+        ):
+            raise CliConfigurationError("PARTIAL_PROVIDER_MIGRATION_SPECIFICATION")
+        migration_requested = all(isinstance(value, str) and value.strip() for value in migration_values)
+        if migration_requested and config.get("kernel", "external") != "native":
+            raise CliConfigurationError("PROVIDER_MIGRATION_REQUIRES_NATIVE_EXECUTOR")
         settings = (
             resolve_provider_settings(config["provider"], persisted_model=config["model"])
             if config.get("kernel", "external") == "native"
@@ -428,7 +495,34 @@ class ProductRuntime:
         manager = self._workspace_manager_for_resume(run_id)
         kernel = str(config.get("kernel", "external"))
         orchestrator = self._build_orchestrator(task, manager, list(config["verify_argv"]), int(config["max_turns"]), settings, kernel)
-        return PreparedExecution(self, task, orchestrator, list(config["verify_argv"]), int(config["max_turns"]), settings.profile, settings.model, kernel, resume_run_id=run_id)
+        migration_target = None
+        if migration_requested:
+            try:
+                migration_target = CliNativeProviderFactory.resolve_route_target(
+                    provider_id=str(migrate_provider).strip(),
+                    model_id=str(migrate_model).strip(),
+                    credential_route_id=str(credential_route).strip(),
+                )
+            except (RuntimeTargetError, ValueError) as exc:
+                code = exc.code if isinstance(exc, RuntimeTargetError) else str(exc)
+                raise CliConfigurationError(code) from exc
+        return PreparedExecution(
+            self,
+            task,
+            orchestrator,
+            list(config["verify_argv"]),
+            int(config["max_turns"]),
+            settings.profile,
+            settings.model,
+            kernel,
+            resume_run_id=run_id,
+            control_intent=(
+                ResumeControlIntent.PROVIDER_MIGRATION_RESUME
+                if migration_requested
+                else ResumeControlIntent.NORMAL_RESUME
+            ),
+            migration_target=migration_target,
+        )
 
     def _build_orchestrator(self, task, manager, verify_argv, max_turns, settings, kernel_mode="external"):
         policy = explicit_command_policy(verify_argv)
@@ -436,14 +530,11 @@ class ProductRuntime:
         if settings.profile == "offline":
             configured_runtime_target = RuntimeTarget(provider_id="offline-native-provider", model_id="offline", endpoint_identity="local", credential_route_id="none", route_type="offline")
         else:
-            endpoint_identity = f"{settings.profile}-default"
-            if settings.config and settings.config.base_url:
-                parsed_endpoint = urlparse(settings.config.base_url)
-                endpoint_identity = parsed_endpoint.hostname or endpoint_identity
-                if parsed_endpoint.port:
-                    endpoint_identity = f"{endpoint_identity}:{parsed_endpoint.port}"
+            transport = canonical_transport_identity(settings.config.base_url if settings.config else None)
             configured_runtime_target = RuntimeTarget(provider_id=settings.profile, model_id=settings.model,
-                endpoint_identity=endpoint_identity or f"{settings.profile}-default",
+                endpoint_identity=transport.endpoint_identity,
+                endpoint_host=transport.endpoint_host,
+                endpoint_fingerprint=transport.endpoint_fingerprint,
                 credential_route_id=f"{settings.profile}-default", route_type=settings.config.api_mode if settings.config else "chat_completions")
 
         runtime_target_controller = RuntimeTargetController(self.db) if kernel_mode == "native" else None

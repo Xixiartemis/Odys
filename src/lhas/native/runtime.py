@@ -215,9 +215,13 @@ class RuntimeTargetController:
                 raise RuntimeTargetError("ASYNC_CONFIRMATION_UNSUPPORTED", "switch confirmation must be completed before commit")
             if not confirmed:
                 raise RuntimeTargetError("RUNTIME_CONFIRMATION_REJECTED", "runtime confirmation rejected")
+            install_result = None
             if callable(install):
-                install(candidate)
-            if hasattr(install, "__await__"):
+                install_result = install(candidate)
+            if hasattr(install_result, "__await__"):
+                close = getattr(install_result, "close", None)
+                if callable(close):
+                    close()
                 raise RuntimeTargetError("ASYNC_PROVIDER_INSTALL_UNSUPPORTED", "provider install must complete synchronously")
         except Exception as exc:
             if callable(rollback) and candidate is not None:
@@ -226,7 +230,8 @@ class RuntimeTargetController:
                 except Exception:
                     pass
             switch.state = TargetSwitchState.FAILED
-            switch.failure_reason = str(exc)[:512]
+            code = f"{exc.code}: " if isinstance(exc, RuntimeTargetError) else ""
+            switch.failure_reason = (code + str(exc))[:512]
             self._fail(execution_id, switch)
             return switch
         try:
@@ -242,7 +247,8 @@ class RuntimeTargetController:
                 except Exception:
                     pass
             switch.state = TargetSwitchState.FAILED
-            switch.failure_reason = str(exc)[:512]
+            code = f"{exc.code}: " if isinstance(exc, RuntimeTargetError) else ""
+            switch.failure_reason = (code + str(exc))[:512]
             self._fail(execution_id, switch)
             return switch
         switch.state = TargetSwitchState.COMMITTED; switch.effective_target = requested_target; switch.updated_at = utcnow()

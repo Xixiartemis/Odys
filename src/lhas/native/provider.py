@@ -7,6 +7,7 @@ from collections.abc import Iterable
 from typing import Any, Protocol, runtime_checkable
 
 from lhas.native.models import ModelContext, ProviderResponse, RuntimeTarget
+from lhas.native.transport import canonical_transport_identity, opaque_transport_identity
 
 
 @runtime_checkable
@@ -48,7 +49,9 @@ class OpenAIChatProviderAdapter:
             raise ValueError("model and api_key are required")
         self.model = model
         self.provider_id = provider_id or self.name
-        self.endpoint_identity = endpoint_identity or (base_url or "default")
+        # Accepted for source compatibility only. Runtime identity is always
+        # recomputed from the transport used by the actual client.
+        self.requested_endpoint_identity = endpoint_identity
         self.credential_route_id = credential_route_id
         self.route_type = route_type
         self.api_key = api_key
@@ -64,9 +67,19 @@ class OpenAIChatProviderAdapter:
 
     @property
     def runtime_target(self) -> RuntimeTarget:
+        transport = self.transport_identity
         return RuntimeTarget(provider_id=self.provider_id, model_id=self.model,
-            endpoint_identity=self.endpoint_identity, credential_route_id=self.credential_route_id,
+            endpoint_identity=transport.endpoint_identity,
+            endpoint_host=transport.endpoint_host,
+            endpoint_fingerprint=transport.endpoint_fingerprint,
+            credential_route_id=self.credential_route_id,
             route_type=self.route_type)
+
+    @property
+    def transport_identity(self):
+        # client.base_url is authoritative when present. This also detects a
+        # transport replacement between preparation and a later model call.
+        return canonical_transport_identity(getattr(self.client, "base_url", None) or self.base_url)
 
     async def generate(self, *, context: ModelContext, tools: list[dict[str, Any]], timeout_seconds: float) -> Any:
         kwargs: dict[str, Any] = {"model": self.model, "messages": context.messages}
@@ -97,6 +110,10 @@ class ScriptedProviderAdapter:
     def runtime_target(self) -> RuntimeTarget:
         return self._runtime_target
 
+    @property
+    def transport_identity(self):
+        return opaque_transport_identity(self._runtime_target.endpoint_identity)
+
     async def generate(self, *, context: ModelContext, tools: list[dict[str, Any]], timeout_seconds: float) -> Any:
         self.calls.append({
             "context": context.model_dump(mode="json"),
@@ -121,6 +138,10 @@ class OfflineCompletionProvider:
     @property
     def runtime_target(self) -> RuntimeTarget:
         return RuntimeTarget(provider_id=self.name, model_id="offline", endpoint_identity="local", credential_route_id="none", route_type="offline")
+
+    @property
+    def transport_identity(self):
+        return opaque_transport_identity("local")
 
     async def generate(self, *, context: ModelContext, tools: list[dict[str, Any]], timeout_seconds: float) -> ProviderResponse:
         return ProviderResponse(

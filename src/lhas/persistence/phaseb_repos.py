@@ -91,6 +91,20 @@ class ValidationResultRepository:
             )
         return v
 
+    def update(self, v: ValidationResult) -> ValidationResult:
+        with self._db.session() as session:
+            row = session.get(ValidationResultRow, v.id)
+            if row is None:
+                raise KeyError(f"validation result not found: {v.id}")
+            row.passed = bool(v.passed)
+            row.level = v.level
+            row.checks = json_dumps([c.model_dump(mode="json") for c in v.checks])
+            row.evidence = v.evidence
+            row.stdout = v.stdout
+            row.stderr = v.stderr
+            row.duration_ms = v.duration_ms
+        return v
+
     def list_for_attempt(self, attempt_id: str) -> list[ValidationResult]:
         with self._db.session() as session:
             rows = session.execute(
