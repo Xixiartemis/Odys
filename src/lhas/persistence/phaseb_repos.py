@@ -86,6 +86,7 @@ class ValidationResultRepository:
                     id=v.id, attempt_id=v.attempt_id, passed=bool(v.passed), level=v.level,
                     checks=json_dumps([c.model_dump(mode="json") for c in v.checks]),
                     evidence=v.evidence, stdout=v.stdout, stderr=v.stderr,
+                    exit_code=v.exit_code,
                     duration_ms=v.duration_ms, created_at=_now(),
                 )
             )
@@ -102,6 +103,7 @@ class ValidationResultRepository:
             row.evidence = v.evidence
             row.stdout = v.stdout
             row.stderr = v.stderr
+            row.exit_code = v.exit_code
             row.duration_ms = v.duration_ms
         return v
 
@@ -121,7 +123,8 @@ class ValidationResultRepository:
         return ValidationResult(
             id=r.id, attempt_id=r.attempt_id, passed=bool(r.passed), level=r.level,
             checks=[ValidationCheck(**c) for c in (json_loads(r.checks) or [])],
-            evidence=r.evidence, stdout=r.stdout, stderr=r.stderr, duration_ms=r.duration_ms,
+            evidence=r.evidence, stdout=r.stdout, stderr=r.stderr, exit_code=r.exit_code,
+            duration_ms=r.duration_ms,
         )
 
 
