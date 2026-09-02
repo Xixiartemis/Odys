@@ -45,6 +45,9 @@ class ValidationResult(BaseModel):
     evidence: Optional[str] = None
     stdout: Optional[str] = None
     stderr: Optional[str] = None
+    # Source evidence from a validator subprocess.  ``None`` means that no
+    # subprocess result exists; it must never be inferred from ``passed``.
+    exit_code: Optional[int] = None
     duration_ms: int = 0
 
 class Validator(Protocol):

@@ -91,6 +91,7 @@ class ExplicitCommandValidator:
             }
             stdout = ""
             stderr = ""
+            exit_code = None
             passed = False
         else:
             evidence = {
@@ -103,6 +104,7 @@ class ExplicitCommandValidator:
             }
             stdout = output["stdout"]
             stderr = output["stderr"]
+            exit_code = output["exit_code"]
             passed = output["exit_code"] == 0 and not output["timed_out"]
         return ValidationResult(
             attempt_id=attempt.id,
@@ -118,5 +120,6 @@ class ExplicitCommandValidator:
             evidence=json.dumps(evidence, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
             stdout=stdout,
             stderr=stderr,
+            exit_code=exit_code,
             duration_ms=int(evidence["duration_ms"]),
         )

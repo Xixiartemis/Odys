@@ -6,7 +6,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator, Optional
 
-from sqlalchemy import Engine, create_engine
+from sqlalchemy import Engine, create_engine, inspect, text
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -47,6 +47,13 @@ class Database:
         from lhas.persistence import orm  # noqa: F401
 
         Base.metadata.create_all(self.engine)
+        # ``create_all`` does not add columns to an existing SQLite database.
+        # Keep already-created runtime databases readable while introducing
+        # the nullable source-evidence field.
+        columns = {column["name"] for column in inspect(self.engine).get_columns("validation_results")}
+        if "exit_code" not in columns:
+            with self.engine.begin() as connection:
+                connection.execute(text("ALTER TABLE validation_results ADD COLUMN exit_code INTEGER"))
 
     @contextmanager
     def session(self) -> Iterator[Session]:

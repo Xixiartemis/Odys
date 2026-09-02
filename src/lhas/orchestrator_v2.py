@@ -429,7 +429,11 @@ class RecoveringOrchestrator(Orchestrator):
         self._crash(CrashPoint.AFTER_VALIDATION_PERSISTED, task=task, run=run, attempt=attempt)
         event = EventType.VALIDATION_PASSED if validation.passed else EventType.VALIDATION_FAILED
         self._emit(event, task=task, run=run, attempt=attempt,
-                   payload={"evidence": validation.evidence, "recovery_origin": "PROCESS_RESUME"} if recovery_origin else {"evidence": validation.evidence})
+                   payload={
+                       "evidence": validation.evidence,
+                       "exit_code": validation.exit_code,
+                       **({"recovery_origin": "PROCESS_RESUME"} if recovery_origin else {}),
+                   })
         return validation
 
     async def _classify_state(self, state) -> FailureReport:
