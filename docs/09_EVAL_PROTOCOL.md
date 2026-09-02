@@ -1,88 +1,93 @@
-# Eval Protocol
+# Evaluation Protocol
 
-## Eval 目标
-评测 LHAS 是否：
-- 更有效
-- 更稳定
-- 更省人工
-- 更高效
-- 更可解释
-- 更可复现
+## Primary objectives
 
-## 六类核心指标
+Primary success metric: **Verified Completion Rate**.
 
-### A. Effectiveness
-- Task Success Rate
-- First Pass Success Rate
-- Final Success Rate
-- Recovery Success Rate
+Primary efficiency metric: **Cost per Verified Completion**.
 
-Recovery Success 定义：
-> 首次 Attempt 失败，但没有人工修改核心结果，系统通过 Recovery 最终完成 Task。
+Repeated reliability metric: **Repeated Reliability / `pass^k`**.
 
-### B. Reliability
-- executor_crash_rate
-- timeout_rate
-- validation_failure_rate
-- unknown_failure_rate
-- regression_rate
+```text
+total execution cost / validator-accepted tasks
+```
 
-### C. Efficiency
-- attempt_count
-- wall_clock_time
-- executor_time
-- validation_time
-- tool_calls
-- input_tokens
-- output_tokens
-- estimated_cost
+Minimum raw token usage is not the product objective. A lightweight failure can be less efficient than a more reliable run when measured per accepted outcome.
 
-### D. Autonomy
-- human_intervention_count
-- human_intervention_rate
+## Required metric families
 
-类型：
-- NONE
-- TASK_CLARIFICATION
-- ENVIRONMENT_FIX
-- MANUAL_CONTEXT_SUPPLY
-- MANUAL_RECOVERY
-- MANUAL_CODE_FIX
-- HUMAN_APPROVAL
+### Effectiveness and completion integrity
 
-### E. Context Efficiency
-- context_size
-- context_tokens
-- files_or_sources_supplied
-- failure_context_size
-- recovery_context_delta
+- task success and validator acceptance;
+- first-pass and final verified completion;
+- recovery success;
+- false-completion rate;
+- stale-plan execution;
+- duplicate side effects.
 
-### F. Quality
+Recovery success means an initial Attempt failed, no human modified the core result, and automated recovery ultimately produced validator-accepted completion.
 
-Job Benchmark：
-- hard_constraint_accuracy
-- fit_classification_accuracy
-- precision_at_5
-- recall_at_10
-- ranking_quality
-- evidence_accuracy
-- hallucination_rate
-- duplicate_detection_rate
-- expired_job_detection_rate
-- human_acceptance_rate
+### Reliability
 
-SWE Benchmark：
-- tests_pass
-- regression_pass
-- lint_pass
-- typecheck_pass
-- acceptance_pass
+- executor crash and timeout rate;
+- validation failure and unknown failure rate;
+- provider failure classification;
+- regression rate;
+- liveness and stalled-run evidence.
 
-## 正式结论要求
-允许：
-> CP-2 在当前 Dataset 上提高了 Recovery Success，但平均 Context Token 上升。
+### Efficiency
 
-禁止：
-> 新 Harness 更聪明。
+Track when available:
 
-除非有可靠指标支持。
+- fresh input tokens and cached input tokens;
+- output tokens;
+- model calls and tool calls;
+- dead-end turns and redundant tool calls;
+- recovery turns and attempts;
+- executor and validation time;
+- wall time;
+- provider cost;
+- cost per verified completion.
+
+A missing measurement is `NOT_MEASURED`; it must never be estimated or fabricated without a documented method.
+
+### Verified workflow
+
+- `dependency_violation_rate`;
+- `stale_plan_execution_rate`;
+- `verified_transition_rate`;
+- `false_completion_rate`;
+- `repair_scope`;
+- `lost_work_after_failure`;
+- `duplicate_side_effect_rate`;
+- `checkpoint_recovery_rate`;
+- `workflow_completion_ratio`;
+- `control_overhead_ratio`.
+
+### Autonomy
+
+Track human intervention count and type, including clarification, environment repair, context supply, manual recovery, manual code repair, and explicit approval.
+
+### Context efficiency
+
+Track selected context size/tokens, sources supplied, failure-context size, recovery-context delta, cache reuse, and whether progressive disclosure was used. Durable state size is not prompt size.
+
+### Quality
+
+Benchmark-specific deterministic criteria remain authoritative. SWE tasks may include tests, regression, lint, typecheck, and acceptance checks. Domain benchmarks must preserve frozen ground truth and validation criteria.
+
+## Paired benchmark philosophy
+
+Future comparison targets are Pi, Hermes, and Odys. Where technically possible, paired runs use the same model, task, repository, capabilities, validation criteria, and similar budget. The research question is whether adaptive reliability improves long-horizon verified completion while keeping cost per verified completion close to lightweight runtimes.
+
+Do not claim that Odys, Pi, or Hermes categorically lacks a mechanism or that Odys is superior without paired evidence.
+
+## Formal conclusion discipline
+
+Allowed example:
+
+> Under the frozen task/model/validator contract, the DURABLE policy increased validator-accepted completion from X to Y while cost per verified completion changed from A to B.
+
+Not allowed without evidence:
+
+> Odys is smarter, production-ready, token-optimal, or categorically better than Pi or Hermes.

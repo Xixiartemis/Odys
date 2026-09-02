@@ -76,6 +76,29 @@ class RuleFailureClassifier:
         evidence = " | ".join(evidence_bits) if evidence_bits else "no evidence recorded"
 
         # --- EXECUTION family -------------------------------------------------
+        if "QUOTA_EXHAUSTED" in error_text:
+            return self._report(attempt, FailureType.QUOTA_EXHAUSTED, FailureClass.EXECUTION, evidence,
+                                "provider quota is exhausted for the selected route", 1.0,
+                                "switch provider route; same-target retry is disabled")
+        if "BILLING_OR_CREDIT_EXHAUSTED" in error_text:
+            return self._report(attempt, FailureType.BILLING_OR_CREDIT_EXHAUSTED, FailureClass.EXECUTION, evidence,
+                                "provider billing or credits are exhausted", 1.0, "switch provider route or restore billing")
+        if "AUTH_INVALID" in error_text:
+            return self._report(attempt, FailureType.AUTH_INVALID, FailureClass.EXECUTION, evidence,
+                                "provider authentication is invalid", 1.0, "switch credential route or repair credentials")
+        if "PROVIDER_TIMEOUT" in error_text:
+            return self._report(attempt, FailureType.PROVIDER_TIMEOUT, FailureClass.EXECUTION, evidence,
+                                "provider request timed out", 1.0, "controlled retry if budget allows")
+        if "PROVIDER_UNAVAILABLE" in error_text:
+            return self._report(attempt, FailureType.PROVIDER_UNAVAILABLE, FailureClass.EXECUTION, evidence,
+                                "provider endpoint is unavailable", 0.9, "controlled migration or retry")
+        if "MALFORMED_PROVIDER_RESPONSE" in error_text or "PROVIDER_MALFORMED_RESPONSE" in error_text:
+            return self._report(attempt, FailureType.MALFORMED_PROVIDER_RESPONSE, FailureClass.EXECUTION, evidence,
+                                "provider returned a malformed response", 0.95, "fail closed and inspect provider")
+        if "UNKNOWN_PROVIDER_FAILURE" in error_text:
+            return self._report(attempt, FailureType.UNKNOWN_PROVIDER_FAILURE, FailureClass.EXECUTION, evidence,
+                                "provider failed without a recognizable provider-specific signature", 0.4,
+                                "retry within budget; inspect provider evidence before changing route")
         if status.value == "TIMED_OUT":
             return self._report(attempt, FailureType.TIMEOUT, FailureClass.EXECUTION, evidence,
                                 "executor exceeded its time budget",

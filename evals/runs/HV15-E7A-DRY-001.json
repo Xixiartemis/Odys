@@ -1,0 +1,154 @@
+{
+  "baseline": {
+    "attempt_budget": {
+      "inner_turn_budget": 20,
+      "max_attempts": 3
+    },
+    "changed_files": [
+      "src/message_router.py",
+      "src/session_store.py"
+    ],
+    "final_functional_validation": "PASS",
+    "first_verification_turn": 9,
+    "metrics": {
+      "cli_exec_calls": 1,
+      "cli_exec_failures": 0,
+      "cli_failure_categories": {},
+      "edit_failure_categories": {
+        "EDIT_TARGET_NOT_FOUND": 2
+      },
+      "first_pytest_tool_call": 9,
+      "pytest_executions": 1,
+      "pytest_fail_observations": 0,
+      "pytest_pass_observations": 1,
+      "repeated_edit_failures": 1,
+      "strategy_changes_after_repeated_failure": 1,
+      "total_tool_calls": 9,
+      "total_tool_failures": 2,
+      "workspace_edit_calls": 2,
+      "workspace_edit_failures": 2,
+      "workspace_edit_successes": 0,
+      "workspace_read_search_after_edit_failure": 1
+    },
+    "orchestrator": "RecoveringOrchestrator",
+    "outer_run_result": "COMPLETED",
+    "outer_task_result": "COMPLETED",
+    "outer_validator_calls": 1,
+    "policy": "legacy_exact_only",
+    "production_tool_invocations": true,
+    "task_contract_sha256": "1900fc864ae80e2bac72b0dfdf1098bb143531ecd32961a052152c8f68d2d5f7",
+    "turn_mapping": "one scripted tool call equals one deterministic turn",
+    "validator": "FixturePytestValidator",
+    "verification_argv": [
+      "pytest",
+      "-q"
+    ],
+    "workspace_tree_sha256": "8310b20abac36af8aabdacea52eab23729aa3c2e27b0c59f5347bb31e49f26a7"
+  },
+  "canonical_artifact_sha256": {
+    "HV12-LIVE-001.json": "144985bc68dbc2d3e8ecbde669c7f14d28adb4d8c3a693668b4b5acaa1603af9",
+    "HV13-LIVE-001.claim.json": "67b8977da846e78cc933c3893ecbc4851b870c8620de00ac222205b26a21cc03",
+    "HV13-LIVE-001.json": "3e6ecf1b718d2e8f0a292fa4cf8f1d2d71c455128f3d0a23fabad81079840bb5"
+  },
+  "checks": {
+    "baseline_final_validation_passes": true,
+    "baseline_outer_validator_completes": true,
+    "canonical_artifacts_unchanged": true,
+    "e7a_edit_failures_reduced": true,
+    "e7a_final_validation_passes": true,
+    "e7a_outer_validator_completes": true,
+    "e7a_verifies_earlier": true,
+    "fixture_unchanged": true,
+    "initial_fixture_tests_fail": true,
+    "production_tool_invocations": true,
+    "same_attempt_and_turn_budget": true,
+    "same_outer_components": true,
+    "same_task_contract": true,
+    "same_verification_policy": true
+  },
+  "comparison": {
+    "edit_failure_rate_baseline": 1.0,
+    "edit_failure_rate_e7a": 0.0,
+    "final_functional_validation_baseline": "PASS",
+    "final_functional_validation_e7a": "PASS",
+    "first_verification_turn_baseline": 9,
+    "first_verification_turn_e7a": 8,
+    "outer_task_result_baseline": "COMPLETED",
+    "outer_task_result_e7a": "COMPLETED",
+    "repeated_edit_target_not_found_baseline": 1,
+    "repeated_edit_target_not_found_e7a": 0,
+    "tool_failure_rate_baseline": 0.222222,
+    "tool_failure_rate_e7a": 0.0
+  },
+  "comparison_scope": "same fixture; legacy exact-only edit policy versus E7-A safe unique normalization",
+  "controlled_variables": {
+    "attempt_budget": {
+      "inner_turn_budget": 20,
+      "max_attempts": 3
+    },
+    "fixture_version": "HV12-SESSION-LIFECYCLE-1",
+    "only_mechanism_difference": "workspace.edit safe unique normalization enabled in E7-A arm",
+    "orchestrator": "RecoveringOrchestrator",
+    "task_contract_sha256": "1900fc864ae80e2bac72b0dfdf1098bb143531ecd32961a052152c8f68d2d5f7",
+    "validator": "FixturePytestValidator",
+    "verification_argv": [
+      "pytest",
+      "-q"
+    ]
+  },
+  "e7a": {
+    "attempt_budget": {
+      "inner_turn_budget": 20,
+      "max_attempts": 3
+    },
+    "changed_files": [
+      "src/message_router.py",
+      "src/session_store.py"
+    ],
+    "final_functional_validation": "PASS",
+    "first_verification_turn": 8,
+    "metrics": {
+      "cli_exec_calls": 1,
+      "cli_exec_failures": 0,
+      "cli_failure_categories": {},
+      "edit_failure_categories": {},
+      "first_pytest_tool_call": 8,
+      "pytest_executions": 1,
+      "pytest_fail_observations": 0,
+      "pytest_pass_observations": 1,
+      "repeated_edit_failures": 0,
+      "strategy_changes_after_repeated_failure": 0,
+      "total_tool_calls": 8,
+      "total_tool_failures": 0,
+      "workspace_edit_calls": 1,
+      "workspace_edit_failures": 0,
+      "workspace_edit_successes": 1,
+      "workspace_read_search_after_edit_failure": 0
+    },
+    "orchestrator": "RecoveringOrchestrator",
+    "outer_run_result": "COMPLETED",
+    "outer_task_result": "COMPLETED",
+    "outer_validator_calls": 1,
+    "policy": "safe_unique_normalization",
+    "production_tool_invocations": true,
+    "task_contract_sha256": "1900fc864ae80e2bac72b0dfdf1098bb143531ecd32961a052152c8f68d2d5f7",
+    "turn_mapping": "one scripted tool call equals one deterministic turn",
+    "validator": "FixturePytestValidator",
+    "verification_argv": [
+      "pytest",
+      "-q"
+    ],
+    "workspace_tree_sha256": "8310b20abac36af8aabdacea52eab23729aa3c2e27b0c59f5347bb31e49f26a7"
+  },
+  "evaluation_id": "HV15-E7A-DRY-001",
+  "fixture_tree_sha256_after": "ea204576e55f677e23e8ab110c50eac4edaa90b848f0d0a5279b399bf37f4ecc",
+  "fixture_tree_sha256_before": "ea204576e55f677e23e8ab110c50eac4edaa90b848f0d0a5279b399bf37f4ecc",
+  "fixture_version": "HV12-SESSION-LIFECYCLE-1",
+  "harness_version": "HV-1.5",
+  "mode": "deterministic_dry_comparison",
+  "outer_validator_authority": "PRESERVED; both arms complete through RecoveringOrchestrator and FixturePytestValidator",
+  "phase": "E7A_TOOL_AWARE_RECOVERY_AND_VERIFICATION",
+  "real_model_executed": false,
+  "status": "PASS",
+  "stochastic_success_rate_claimed": false
+}

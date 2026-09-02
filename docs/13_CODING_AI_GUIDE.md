@@ -2,12 +2,17 @@
 
 ## 开工前必须阅读
 每次 Coding AI 开工前至少读取：
-1. `00_PROJECT_CHARTER.md`
+1. `ARCHITECTURE_FREEZE.md`
 2. `01_ARCHITECTURE.md`
-3. `02_DOMAIN_MODEL.md`
-4. `03_ENGINEERING_CONSTRAINTS.md`
-5. 当前 Task Spec
-6. 当前阶段相关专项文档
+3. `PRODUCT_DIRECTION.md`
+4. `02_DOMAIN_MODEL.md`
+5. `03_ENGINEERING_CONSTRAINTS.md`
+6. 当前 Task Spec
+7. 当前阶段相关专项文档
+
+提出或实现任何架构改动前，必须完整读取 `docs/ARCHITECTURE_FREEZE.md`。若改动触及冻结的 runtime ownership、planning ownership、workflow semantics、reuse policy、adaptive levels 或开发顺序，必须满足其中的 benchmark evidence 与 ADR 要求。
+
+> Read `docs/ARCHITECTURE_FREEZE.md` before proposing architecture changes.
 
 不要默认读取全部历史 Experiment。
 
@@ -68,3 +73,5 @@ AI Coding 负责：
 - trade-offs
 
 关键设计决策需要通过 ADR 保留。
+
+默认原则：**EXTEND, DO NOT REWRITE.**

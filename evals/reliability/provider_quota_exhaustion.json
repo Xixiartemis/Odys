@@ -1,0 +1,20 @@
+{
+  "scenario_id": "provider-quota-exhaustion-v1",
+  "family": "provider_quota_exhaustion",
+  "fairness": {
+    "model": "FROZEN_BY_LIVE_RUN",
+    "provider": "FROZEN_BY_LIVE_RUN",
+    "task_objective": "Park a meaningful long task on a monthly provider quota response and resume it after explicit provider migration.",
+    "fixture_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "initial_repository_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "tool_capabilities": ["workspace.edit", "workspace.diff", "runtime.target.switch"],
+    "timeout_seconds": 900,
+    "turn_budget": 20,
+    "api_call_budget": 20,
+    "acceptance_validator": "workspace-and-taskgraph-validator",
+    "failure_injection_point": "monthly-usage-limit",
+    "effective_provider_constraints": {"same_target_retry_allowed": false, "expiry_may_be_recorded": true}
+  },
+  "expected_invariants": {"same_target_useless_retries": 0, "task_state_preserved": true, "provider_block_detected": true, "manual_reexplanation_required": false, "duplicate_side_effects": 0},
+  "metric_names": ["same_target_useless_retries", "task_state_preserved", "provider_block_detected", "manual_reexplanation_required", "duplicate_side_effects"]
+}

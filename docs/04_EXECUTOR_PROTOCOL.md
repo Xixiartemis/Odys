@@ -1,5 +1,7 @@
 # AgentExecutor Protocol
 
+Status: **Compatibility contract.** Canonical architecture is `docs/01_ARCHITECTURE.md`. An executor/capability does not own a competing long-horizon runtime or completion authority.
+
 ## 定位
 Executor 是“干活的人”，不是“决定任务是否成功的人”。
 

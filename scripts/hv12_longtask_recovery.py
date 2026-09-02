@@ -140,7 +140,7 @@ def _pytest(root: Path, timeout_seconds: float = 90.0) -> dict[str, Any]:
     started = time.monotonic()
     try:
         completed = subprocess.run(
-            ["pytest", "-q"],
+            [sys.executable, "-m", "pytest", "-q"],
             cwd=str(root),
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,

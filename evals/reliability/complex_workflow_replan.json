@@ -1,0 +1,25 @@
+{
+  "scenario_id": "complex-workflow-replan-v1",
+  "family": "complex_workflow_replan",
+  "fairness": {
+    "model": "FROZEN_BY_LIVE_RUN",
+    "provider": "FROZEN_BY_LIVE_RUN",
+    "task_objective": "Complete a multi-step workflow after new evidence invalidates the initial implementation path.",
+    "fixture_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "initial_repository_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "tool_capabilities": ["workspace.read", "workspace.edit", "workspace.diff", "cli.exec", "validator"],
+    "timeout_seconds": 900,
+    "turn_budget": 30,
+    "api_call_budget": 30,
+    "acceptance_validator": "fixture-authoritative-validator",
+    "failure_injection_point": "deterministic-invalidating-evidence",
+    "effective_provider_constraints": {"same_external_model_and_provider": true, "no_live_tokens_in_deterministic_run": true}
+  },
+  "expected_invariants": {
+    "macro_replan_required": true,
+    "completed_early_steps_preserved": true,
+    "final_acceptance": true,
+    "stale_plan_fails_closed": true
+  },
+  "metric_names": ["task_success", "initial_plan_nodes", "final_plan_nodes", "replan_signals", "replans_attempted", "replans_accepted", "stale_plan_executions", "dead_end_turns", "redundant_tool_calls", "tool_failures", "turns_to_replan", "turns_after_replan", "validator_rejections", "human_intervention", "final_acceptance"]
+}

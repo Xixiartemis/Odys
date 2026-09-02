@@ -29,6 +29,8 @@ class CrashPoint(str, Enum):
 class ResumeAction(str, Enum):
     INITIALIZE_WORKSPACE = "INITIALIZE_WORKSPACE"
     START_FIRST_ATTEMPT = "START_FIRST_ATTEMPT"
+    START_PENDING_ATTEMPT = "START_PENDING_ATTEMPT"
+    RESUME_NATIVE_ATTEMPT = "RESUME_NATIVE_ATTEMPT"
     RECOVER_INTERRUPTED_ATTEMPT = "RECOVER_INTERRUPTED_ATTEMPT"
     VALIDATE_COMPLETED_ATTEMPT = "VALIDATE_COMPLETED_ATTEMPT"
     VALIDATE_NON_SUCCESS_ATTEMPT = "VALIDATE_NON_SUCCESS_ATTEMPT"
@@ -133,7 +135,11 @@ class ResumeDecisionService:
         latest = state.latest_attempt
         if latest is None:
             return ResumeDecision(ResumeAction.START_FIRST_ATTEMPT, "no attempt is persisted")
+        if latest.status is AttemptStatus.PENDING:
+            return ResumeDecision(ResumeAction.START_PENDING_ATTEMPT, "pending attempt was durably prepared", latest.id)
         if latest.status is AttemptStatus.RUNNING:
+            if run.executor_type == "NativeAgentExecutor":
+                return ResumeDecision(ResumeAction.RESUME_NATIVE_ATTEMPT, "native execution snapshot can resume the same attempt", latest.id)
             action = ResumeAction.RECOVER_INTERRUPTED_ATTEMPT if self.workspace_enabled else ResumeAction.CLASSIFY_ATTEMPT_FAILURE
             return ResumeDecision(action, "latest attempt is still RUNNING", latest.id)
         if latest.status is AttemptStatus.COMPLETED:

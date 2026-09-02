@@ -14,7 +14,7 @@ class TaskGraphScheduler:
         by_id={s.id:s for s in plan.steps}; ready=[]; blocked=[]; pending=[]; waiting=[]
         for step in plan.steps:
             if step.status == PlanStepStatus.WAITING_FOR_HUMAN_APPROVAL: waiting.append(step); continue
-            if step.status in {PlanStepStatus.COMPLETED,PlanStepStatus.FAILED,PlanStepStatus.BLOCKED}: continue
+            if step.status in {PlanStepStatus.COMPLETED,PlanStepStatus.FAILED,PlanStepStatus.BLOCKED,PlanStepStatus.STALE}: continue
             deps=[by_id[d] for d in step.depends_on]
             if any(d.status in {PlanStepStatus.FAILED,PlanStepStatus.BLOCKED} for d in deps): blocked.append(step)
             elif all(d.status == PlanStepStatus.COMPLETED for d in deps): ready.append(step)

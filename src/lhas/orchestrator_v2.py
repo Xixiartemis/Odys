@@ -114,6 +114,11 @@ class RecoveringOrchestrator(Orchestrator):
     # ------------------------------------------------------------------ API
 
     async def execute_task(self, task_id: str) -> Run:
+        run = await self.prepare_task_run(task_id)
+        return await self.continue_prepared_run(run.id)
+
+    async def prepare_task_run(self, task_id: str) -> Run:
+        """Persist Task/Run/workspace ownership before executor dispatch."""
         task = self._require_task(task_id)
         self._emit(EventType.TASK_STARTED, task=task, payload={"status": TaskStatus.RUNNING.value})
         task.status = TaskStatus.RUNNING
@@ -129,6 +134,19 @@ class RecoveringOrchestrator(Orchestrator):
         if self.workspace_manager is not None:
             self._workspace_session = self.workspace_manager.create_for_run(task, run)
             self._crash(CrashPoint.AFTER_WORKSPACE_BOUND, task=task, run=run)
+        return run
+
+    async def continue_prepared_run(self, run_id: str) -> Run:
+        run = self.run_repo.get(run_id)
+        if run is None:
+            raise KeyError(f"Run {run_id} not found")
+        if run.status is not RunStatus.RUNNING:
+            return run
+        task = self.task_repo.get(run.task_id)
+        if task is None:
+            raise KeyError(f"Task {run.task_id} not found")
+        if self.workspace_manager is not None and self._workspace_session is None:
+            self._workspace_session = self.workspace_manager.ensure_for_run(task, run)
         return await self._continue_run(run.id)
 
     async def resume_run(self, run_id: str) -> Run:
@@ -146,15 +164,68 @@ class RecoveringOrchestrator(Orchestrator):
         task = self.task_repo.get(run.task_id)
         if task is None:
             raise KeyError(f"Task {run.task_id} not found")
-        if self.workspace_manager is None:
+        if self.workspace_manager is None and run.executor_type != "NativeAgentExecutor":
             raise RunNotResumable("WORKSPACE_SESSION_NOT_CONFIGURED")
-        self._workspace_session = self.workspace_manager.ensure_for_run(task, run)
-        self._emit(EventType.RUN_RESUME_STARTED, task=task, run=run, payload={"session_id": self._workspace_session.manifest.session_id})
+        if self.workspace_manager is not None:
+            self._workspace_session = self.workspace_manager.ensure_for_run(task, run)
+            session_id = self._workspace_session.manifest.session_id
+        else:
+            session_id = None
+        self._emit(EventType.RUN_RESUME_STARTED, task=task, run=run, payload={"session_id": session_id, "control_intent": "resume_run"})
         self._resume_mode = True
         try:
             return await self._continue_run(run_id)
         finally:
             self._resume_mode = False
+
+    async def resume_task(self, task_id: str, *, runtime_target: Any = None) -> Run:
+        """Resume a parked task through the control plane after migration."""
+        task = self.task_repo.get(task_id)
+        if task is None:
+            raise KeyError(f"Task {task_id} not found")
+        runs = self.run_repo.list_for_task(task_id)
+        if not runs:
+            raise RunNotResumable("TASK_HAS_NO_RUN")
+        run = runs[-1]
+        if runtime_target is not None or task.status is TaskStatus.BLOCKED_PROVIDER or run.status is RunStatus.BLOCKED_PROVIDER:
+            if run.status not in {RunStatus.RUNNING, RunStatus.BLOCKED_PROVIDER}:
+                raise RunNotResumable("RUN_NOT_RESUMABLE")
+            if runtime_target is None:
+                raise RunNotResumable("RUNTIME_TARGET_REQUIRED_FOR_PROVIDER_MIGRATION")
+            from lhas.native.models import RuntimeTarget
+            requested = runtime_target if isinstance(runtime_target, RuntimeTarget) else RuntimeTarget.model_validate(runtime_target)
+            if run.executor_type != "NativeAgentExecutor":
+                raise RunNotResumable("PROVIDER_MIGRATION_REQUIRES_NATIVE_EXECUTOR")
+            if self.workspace_manager is not None:
+                self._workspace_session = self.workspace_manager.ensure_for_run(task, run)
+            executor = self._make_executor(run.id)
+            kernel = getattr(executor, "kernel", None)
+            if kernel is None or getattr(kernel, "runtime_target_controller", None) is None:
+                raise RunNotResumable("RUNTIME_TARGET_CONTROLLER_NOT_WIRED")
+            current = kernel.runtime_target_controller.current(run.id)
+            switch = kernel.switch_runtime_target(
+                requested,
+                expected_current=current["effective_target"],
+                runtime_id=run.id,
+                reason="explicit resume_task provider migration",
+            )
+            if switch.state.value != "COMMITTED":
+                raise RunNotResumable("RUNTIME_TARGET_SWITCH_FAILED")
+        if task.status is TaskStatus.BLOCKED_PROVIDER:
+            task.status = TaskStatus.RUNNING
+            self.task_repo.update(task)
+        if run.status is RunStatus.BLOCKED_PROVIDER:
+            run.status = RunStatus.RUNNING
+            self.run_repo.update(run)
+        latest = self.attempt_repo.list_for_run(run.id)[-1] if self.attempt_repo.list_for_run(run.id) else None
+        if latest is not None and latest.error_type in {"QUOTA_EXHAUSTED", "BILLING_OR_CREDIT_EXHAUSTED", "AUTH_INVALID"} and run.executor_type == "NativeAgentExecutor":
+            # Re-open the same native Attempt so its durable snapshot and
+            # completed side effects remain the continuation point.
+            latest.status = AttemptStatus.RUNNING
+            latest.error_type = None
+            latest.error_message = None
+            self.attempt_repo.update(latest)
+        return await self.resume_run(run.id)
 
     async def _recovered_workspace_state(self) -> dict[str, Any]:
         diff = await self._workspace_session.workspace.diff()
@@ -185,6 +256,12 @@ class RecoveringOrchestrator(Orchestrator):
             if action is ResumeAction.START_FIRST_ATTEMPT:
                 await self._execute_attempt(state, 1)
                 continue
+            if action is ResumeAction.START_PENDING_ATTEMPT:
+                await self._execute_attempt(state, state.latest_attempt.attempt_number)
+                continue
+            if action is ResumeAction.RESUME_NATIVE_ATTEMPT:
+                await self._resume_native_attempt(state)
+                continue
             if action is ResumeAction.START_NEXT_ATTEMPT:
                 await self._execute_attempt(state, state.latest_attempt.attempt_number + 1)
                 continue
@@ -212,11 +289,12 @@ class RecoveringOrchestrator(Orchestrator):
 
     async def _execute_attempt(self, state, number: int) -> None:
         task, run = state.task, state.run
-        previous = list(state.attempts)
+        pending = state.latest_attempt if state.latest_attempt is not None and state.latest_attempt.status is AttemptStatus.PENDING and state.latest_attempt.attempt_number == number else None
+        previous = [item for item in state.attempts if pending is None or item.id != pending.id]
         latest = state.latest_attempt
         report = state.failure_report
         action = state.recovery_action
-        attempt = self._create_attempt(run, number)
+        attempt = pending or self._create_attempt(run, number)
         self._emit(EventType.ATTEMPT_STARTED, task=task, run=run, attempt=attempt,
                     payload={"attempt_number": number, "resume_origin": "PROCESS_RESUME" if number > 1 else None})
         attempt.status = AttemptStatus.RUNNING
@@ -239,7 +317,7 @@ class RecoveringOrchestrator(Orchestrator):
         self._emit(EventType.CONTEXT_BUILT, task=task, run=run, attempt=attempt,
                     payload={"context_snapshot_id": snapshot.id, "policy": snapshot.policy})
         self._crash(CrashPoint.AFTER_CONTEXT_BUILT, task=task, run=run, attempt=attempt)
-        executor = self._make_executor()
+        executor = self._make_executor(run.id)
         self._emit(EventType.EXECUTOR_STARTED, task=task, run=run, attempt=attempt,
                    payload={"executor": getattr(executor, "name", executor.__class__.__name__)})
         self._current_snapshot = snapshot
@@ -268,6 +346,37 @@ class RecoveringOrchestrator(Orchestrator):
         )
         await self._validate_result(task, run, attempt, result, recovery_origin=True)
 
+    async def _resume_native_attempt(self, state) -> None:
+        """Re-enter the Odys-owned loop at its durable same-Attempt snapshot."""
+        task, run, attempt = state.task, state.run, state.latest_attempt
+        if run.executor_type != "NativeAgentExecutor" or attempt.status is not AttemptStatus.RUNNING:
+            raise RunNotResumable("NATIVE_ATTEMPT_RESUME_STATE_INVALID")
+        snapshot = state.context_snapshot
+        if snapshot is not None:
+            self._current_snapshot = snapshot
+        executor = self._make_executor(run.id)
+        self._emit(
+            EventType.EXECUTOR_STARTED,
+            task=task,
+            run=run,
+            attempt=attempt,
+            payload={"executor": getattr(executor, "name", executor.__class__.__name__), "resume_same_attempt": True},
+        )
+        await self._run_executor(task, run, attempt, executor)
+        # A provider-migration resume can complete the same Attempt after that
+        # Attempt previously produced a quota-era failed validation. Revalidate
+        # immediately before ResumeDecision can observe the stale terminal
+        # recovery action; _validate_result updates the same durable row.
+        if state.validation is not None and not state.validation.passed:
+            refreshed = self.attempt_repo.get(attempt.id)
+            if refreshed is not None and refreshed.status is AttemptStatus.COMPLETED:
+                await self._validate_result(
+                    task,
+                    run,
+                    refreshed,
+                    self._result_for_attempt(refreshed),
+                )
+
     async def _validate_persisted_attempt(self, state, *, outcome_arbitration: bool = False) -> None:
         result = self._result_for_attempt(state.latest_attempt)
         await self._validate_result(
@@ -288,7 +397,15 @@ class RecoveringOrchestrator(Orchestrator):
         outcome_arbitration: bool = False,
     ) -> ValidationResult:
         existing = self.validation_repo.get_for_attempt(attempt.id)
-        if existing is not None:
+        migration_revalidation = bool(
+            existing is not None
+            and not existing.passed
+            and attempt.status is AttemptStatus.COMPLETED
+            and result.status is ExecutionStatus.SUCCESS
+            and attempt.error_type is None
+            and run.executor_type == "NativeAgentExecutor"
+        )
+        if existing is not None and not migration_revalidation:
             return existing
         payload: dict[str, Any] = {}
         if recovery_origin:
@@ -304,7 +421,11 @@ class RecoveringOrchestrator(Orchestrator):
         self._emit(EventType.VALIDATION_STARTED, task=task, run=run, attempt=attempt,
                    payload=payload or None)
         validation = await self.validator.validate(task=task, attempt=attempt, result=result)
-        self.validation_repo.create(validation)
+        if migration_revalidation:
+            validation.id = existing.id
+            self.validation_repo.update(validation)
+        else:
+            self.validation_repo.create(validation)
         self._crash(CrashPoint.AFTER_VALIDATION_PERSISTED, task=task, run=run, attempt=attempt)
         event = EventType.VALIDATION_PASSED if validation.passed else EventType.VALIDATION_FAILED
         self._emit(event, task=task, run=run, attempt=attempt,
@@ -376,6 +497,16 @@ class RecoveringOrchestrator(Orchestrator):
         action = state.recovery_action
         if action is None:
             raise RunNotResumable("RUN_NOT_RESUMABLE")
+        if action.action_type is RecoveryActionType.BLOCK_PROVIDER:
+            # Keep the durable Run resumable. The Task is parked until an
+            # explicit resume_task control intent performs provider migration.
+            state.task.status = TaskStatus.BLOCKED_PROVIDER
+            self.task_repo.update(state.task)
+            run.status = RunStatus.BLOCKED_PROVIDER
+            self.run_repo.update(run)
+            self._emit(EventType.TASK_FAILED, task=state.task, run=run, attempt=state.latest_attempt,
+                        payload={"reason": action.reason, "blocked_provider": True})
+            return run
         run.status = RunStatus.ESCALATED if action.action_type in {RecoveryActionType.ESCALATE, RecoveryActionType.HUMAN_APPROVAL} else RunStatus.FAILED
         run.finished_at = self._now()
         self.run_repo.update(run)

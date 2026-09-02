@@ -7,8 +7,9 @@ __version__ = "0.1.0"
 # Hardening modified Prompt Template / Validation / Recovery Context wiring;
 # Phase E5 introduced durable checkpoints and bounded context reconstruction;
 # E6-C adds deterministic crash-window-aware resume and generalized continuation;
-# E6-D adds post-non-success arbitration for durable workspace FAILED/TIMED_OUT attempts -> HV-1.3.
-HARNESS_VERSION = "HV-1.3"
+# E6-D adds post-non-success arbitration for durable workspace FAILED/TIMED_OUT attempts -> HV-1.3;
+# Agent Platform adds durable delegation, sessions and the AgentKernel boundary -> HV-1.5.
+HARNESS_VERSION = "HV-1.5"
 
 from .resume import CrashPoint, NoOpCrashInjector, ResumeAction, ResumeDecision, ResumeDecisionService, ResumeInspection
 

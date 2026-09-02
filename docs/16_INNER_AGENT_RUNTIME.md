@@ -1,5 +1,13 @@
 # Odys Inner Agent Runtime (Phase E2)
 
+Status: **Historical / Superseded as target architecture**
+
+Canonical architecture: `docs/ARCHITECTURE_FREEZE.md`
+
+Superseded by: `docs/01_ARCHITECTURE.md` and `docs/PRODUCT_DIRECTION.md`
+
+The Outer Runtime / Inner Agent split described below remains a compatibility boundary during migration, not the desired final ownership model. Odys owns execution lifecycle; capabilities must not own a competing long-horizon runtime.
+
 Odys keeps the outer runtime authoritative: `Goal → Macro TaskGraph → Subgoal → InnerAgentExecutor → InnerAgentBackend → Agent SDK loop → Odys ToolRegistry → ToolResult → final claim → Outer Validator`. The inner backend may use multiple model turns and tool calls, but one outer Attempt remains one complete inner run.
 
 `InnerAgentBackend` and its request/result models are provider-neutral. `ScriptedInnerAgentBackend` supports deterministic offline tests; `OpenAIAgentsBackend` is an optional OpenAI Agents SDK implementation. SDK tools are dynamically built only from the allow-listed, non-side-effect Odys capabilities. Tool failures are structured observations rather than immediate outer failures. The outer Validator still decides task completion.

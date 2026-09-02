@@ -1,5 +1,7 @@
 # Benchmark Tasks
 
+Status: **Historical benchmark catalogue.** Canonical comparison philosophy and current development gates are defined in `docs/PRODUCT_DIRECTION.md` and `docs/14_ROADMAP.md`.
+
 ## Benchmark 目标
 测试集必须固定、可重复、可对比。
 

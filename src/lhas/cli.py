@@ -8,6 +8,9 @@ from pathlib import Path
 from typing import Optional
 
 import typer
+from rich.console import Console
+from rich.panel import Panel
+from rich.table import Table
 
 from lhas import HARNESS_VERSION, DEFAULT_CONTEXT_POLICY_VERSION, DEFAULT_DATASET_VERSION
 from lhas.config import db_path, log_dir
@@ -27,10 +30,33 @@ from lhas.planning.planner import DeterministicPlanner
 from lhas.planning.service import PlanExecutionService
 from lhas.persistence.planning_repositories import GoalRepository, PlanRepository
 from lhas.persistence.phaseb_repos import FailureReportRepository, RecoveryActionRepository
+from lhas.cli_runtime import (
+    CliConfigurationError,
+    ProductRuntime,
+    inspect_run,
+    list_recent_runs,
+    resolve_provider_settings,
+)
+from lhas.cli_ui import execute_with_progress, project_agent_tree
+from lhas.command_validation import parse_verification_command
+from lhas.agent.platform import OfflineAgentPlatform
+from lhas.agent.profile import AgentProfileRegistry
+from lhas.memory import BuiltinMemoryProvider
+from lhas.skills import SkillRegistry
 
-app = typer.Typer(help="LHAS — Long-Horizon Agent System runtime / harness CLI.")
+app = typer.Typer(
+    help="Odys - Plan. Act. Recover. Finish.",
+    no_args_is_help=True,
+)
 goal_app = typer.Typer(help="Run and inspect constrained goals")
+skills_app = typer.Typer(help="Discover progressively disclosed skills")
+memory_app = typer.Typer(help="Inspect bounded persistent memory")
+mcp_app = typer.Typer(help="Inspect Model Context Protocol servers")
 app.add_typer(goal_app, name="goal")
+app.add_typer(skills_app, name="skills")
+app.add_typer(memory_app, name="memory")
+app.add_typer(mcp_app, name="mcp")
+console = Console()
 
 
 def _open_db() -> Database:
@@ -39,6 +65,85 @@ def _open_db() -> Database:
     db = Database(path)
     db.init_db()
     return db
+
+
+def _platform_db(override: Optional[Path]) -> Database:
+    path=(override or Path(".odys/platform.db")).expanduser().resolve()
+    path.parent.mkdir(parents=True,exist_ok=True)
+    db=Database(path); db.init_db(); return db
+
+
+@app.command("chat")
+def chat(
+    message: str = typer.Argument(..., help="Message or long-running goal"),
+    repo: Path = typer.Option(Path("."), "--repo", help="Project context root"),
+    offline: bool = typer.Option(False, "--offline", help="Use the deterministic no-network platform"),
+    db_override: Optional[Path] = typer.Option(None, "--db", help="SQLite database path"),
+) -> None:
+    """Talk to RootAgent; long goals route through the Odys control plane."""
+    if not offline:
+        raise typer.BadParameter("Agent Platform Foundation chat currently requires --offline")
+    root=repo.expanduser().resolve()
+    if not root.is_dir(): raise typer.BadParameter(f"repository path does not exist: {root}")
+    db=_platform_db(db_override)
+    async def execute():
+        platform=await OfflineAgentPlatform.create(db,root,memory_root=(Path(db_override).resolve().parent/"memory" if db_override else root/".odys"/"memory"))
+        try:
+            return await platform.root.handle(message,project_id=platform.project.id)
+        finally:
+            await platform.close()
+    try:
+        response=asyncio.run(execute())
+        console.print(f"Route: {response.route.value}")
+        console.print(response.output)
+        console.print(f"Session: {response.session_id}")
+        if response.goal_id: console.print(f"Goal: {response.goal_id}")
+        if response.plan_id: console.print(f"Plan: {response.plan_id}")
+        for run_id in response.run_refs: console.print(f"Run: {run_id}")
+        tree=project_agent_tree(EventStore(db).list_all())
+        if tree:
+            console.print("Agent tree:")
+            for node in tree: console.print(f"  {node['role']} {node['agent_id']} {node['status']}")
+    finally:
+        db.close()
+
+
+@app.command("agents")
+def agents() -> None:
+    """List installed role profiles sharing the AgentKernel contract."""
+    for profile in AgentProfileRegistry().list():
+        console.print(f"{profile.role.value}\t{profile.name}\t{profile.provider}/{profile.model}\ttoolsets={','.join(sorted(profile.toolsets))}")
+
+
+def _cli_skills() -> SkillRegistry:
+    return SkillRegistry([Path.cwd()/".odys"/"skills",Path.home()/".odys"/"skills"])
+
+
+@skills_app.command("list")
+def skills_list() -> None:
+    for item in _cli_skills().list(): console.print(f"{item.name}\t{item.description}")
+
+
+@skills_app.command("show")
+def skills_show(name: str, reference: Optional[str] = typer.Option(None,"--reference")) -> None:
+    document=_cli_skills().view(name,reference); console.print(document.content)
+
+
+@memory_app.command("show")
+def memory_show() -> None:
+    provider=BuiltinMemoryProvider(Path.home()/".odys"/"memory")
+    for item in provider.list(): console.print(f"{item.scope}\t{item.id}\t{item.content}")
+
+
+@memory_app.command("search")
+def memory_search(query: str) -> None:
+    provider=BuiltinMemoryProvider(Path.home()/".odys"/"memory")
+    for item in provider.search(query): console.print(f"{item.scope}\t{item.id}\t{item.content}")
+
+
+@mcp_app.command("list")
+def mcp_list() -> None:
+    console.print("No persistent MCP servers configured. Offline acceptance uses stdio server 'offline'.")
 
 @goal_app.command("run")
 def goal_run(goal: str = typer.Option(...,"--goal"), file: Path = typer.Option(...,"--file"), live: bool = typer.Option(False,"--live"), output_dir: Path = typer.Option(Path("artifacts"),"--output-dir")):
@@ -145,7 +250,7 @@ def task_list(project: Optional[str] = typer.Option(None, help="Filter by projec
     db.close()
 
 
-@app.command("run")
+@app.command("task-run")
 def run_task(
     task_id: str = typer.Argument(..., help="Task id"),
     scenario: MockScenario = typer.Option(MockScenario.SUCCESS, help="MockExecutor scenario"),
@@ -171,6 +276,267 @@ def run_task(
     for ev in events:
         print(f"  #{ev.id:03d} {ev.event_type.value:<20} attempt={ev.attempt_id or '-'}")
     db.close()
+
+
+def _product_db_path(override: Optional[Path]) -> Path:
+    return (override or db_path()).expanduser().resolve()
+
+
+def _print_interrupt(run_id: Optional[str]) -> None:
+    console.print("\nRESULT: INTERRUPTED", style="bold yellow")
+    if run_id:
+        console.print(f"Run ID: {run_id}")
+        console.print(f"odys resume {run_id}")
+
+
+def _print_product_summary(data: dict) -> None:
+    run = data["run"]
+    tools = data["tools"]
+    workspace = data["workspace"]
+    validation = data.get("validation")
+    result = "PASS" if run["status"] == "COMPLETED" else "FAIL"
+    console.print(f"\nRESULT: {result}", style="bold green" if result == "PASS" else "bold red")
+    console.print(f"Run ID: {run['id']}")
+    console.print(f"Task status: {'COMPLETED' if run['status'] == 'COMPLETED' else run['status']}")
+    console.print(f"Run status: {run['status']}")
+    console.print(f"Attempts: {len(data['attempts'])}")
+    console.print(f"Total turns: {tools['total_turns']}")
+    console.print(f"Total tool calls: {tools['total_calls']}")
+    console.print(f"Total tool failures: {tools['total_failures']}")
+    console.print(f"Tool failure rate: {tools['failure_rate'] * 100:.2f}%")
+    console.print(f"Changed files: {workspace['changed_file_count']}")
+    console.print(f"Validation status: {validation['status'] if validation else 'UNKNOWN'}")
+    console.print(f"Validation command: {json.dumps(data['verification_command'], ensure_ascii=False)}")
+    exit_code = (validation or {}).get("evidence", {}).get("exit_code")
+    console.print(f"Validation exit code: {exit_code if exit_code is not None else 'N/A'}")
+    console.print(f"Duration: {run['duration_ms']} ms")
+    _print_runtime_truth(run)
+    _print_liveness(run)
+    attempt_failures = [item for item in data["attempts"] if item.get("error_type")]
+    if attempt_failures:
+        console.print("Attempt failure types: " + ", ".join(item["error_type"] for item in attempt_failures[-5:]))
+        last_failure = attempt_failures[-1]
+        if last_failure.get("error_message"):
+            console.print(f"Last attempt error: {last_failure['error_message']}")
+    if result == "FAIL":
+        top = data["tools"]["failures_by_type"]
+        if top:
+            console.print("Top failure types: " + ", ".join(f"{name}={count}" for name, count in list(top.items())[:5]))
+        actions = [item.get("recovery_action") for item in data["recovery"] if item.get("recovery_action")]
+        if actions:
+            console.print(f"Last recovery action: {actions[-1]['action']}")
+    console.print(f"odys inspect {run['id']}")
+    if run["status"] == "RUNNING":
+        console.print(f"odys resume {run['id']}")
+
+
+def _print_runtime_truth(run: dict) -> None:
+    truth = run.get("runtime_truth") or {}
+    console.print("RUNTIME TARGET")
+    console.print(f"configured: {json.dumps(truth.get('configured'), ensure_ascii=False, sort_keys=True)}")
+    console.print(f"effective: {json.dumps(truth.get('effective'), ensure_ascii=False, sort_keys=True)}")
+    console.print(f"transport: {truth.get('transport') or 'NOT_RECORDED'}")
+    console.print(f"fingerprint: {truth.get('fingerprint') or 'NOT_RECORDED'}")
+
+
+def _print_liveness(run: dict) -> None:
+    liveness = run.get("liveness") or {}
+    health = liveness.get("execution_health") or "UNKNOWN"
+    no_progress_ms = liveness.get("no_progress_duration_ms")
+    console.print("LIVENESS")
+    console.print(f"Health: {health}")
+    console.print(f"RUN_HEALTH={health}")
+    console.print(f"Current Operation: {liveness.get('current_operation') or 'UNKNOWN'}")
+    console.print(f"CURRENT_OPERATION={liveness.get('current_operation') or 'UNKNOWN'}")
+    console.print(f"Operation Age: {liveness.get('operation_age_ms') if liveness.get('operation_age_ms') is not None else 'N/A'} ms")
+    console.print(f"No Progress: {no_progress_ms if no_progress_ms is not None else 'N/A'} ms")
+    console.print(f"NO_PROGRESS_MS={no_progress_ms if no_progress_ms is not None else 'UNKNOWN'}")
+    console.print(f"Last Event: #{liveness.get('last_event_cursor', 0)} {liveness.get('last_event_type') or 'UNKNOWN'}")
+    console.print(f"LAST_EVENT_CURSOR={liveness.get('last_event_cursor', 0)}")
+    if health == "STALLED":
+        console.print("WARNING: POSSIBLE STALL")
+        console.print(
+            f"No durable progress for {no_progress_ms if no_progress_ms is not None else 'unknown'} ms."
+        )
+
+
+@app.command("run")
+def product_run(
+    goal: str = typer.Argument(..., help="Natural-language engineering goal"),
+    repo: Path = typer.Option(..., "--repo", help="Local source repository"),
+    verify: str = typer.Option(..., "--verify", help="Authoritative verification command"),
+    max_attempts: int = typer.Option(3, "--max-attempts", min=1),
+    max_turns: int = typer.Option(20, "--max-turns", min=1),
+    provider: Optional[str] = typer.Option(None, "--provider", help="Provider profile (default: configured profile or mimo; offline for deterministic demo)"),
+    kernel: str = typer.Option("external", "--kernel", help="Agent loop owner: native or external"),
+    no_ui: bool = typer.Option(False, "--no-ui", help="Use plain deterministic console output"),
+    yes: bool = typer.Option(False, "--yes", help="Skip launch confirmation"),
+    db_override: Optional[Path] = typer.Option(None, "--db", help="SQLite database path"),
+) -> None:
+    """Run a goal against an immutable local source repository."""
+    source = repo.expanduser().resolve()
+    if not source.is_dir():
+        raise typer.BadParameter(f"repository path does not exist or is not a directory: {source}", param_hint="--repo")
+    try:
+        verify_argv = parse_verification_command(verify)
+        settings = resolve_provider_settings(provider)
+    except (ValueError, CliConfigurationError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    if not yes:
+        confirmed = typer.confirm(
+            f"Run Odys against {source} using {settings.profile}/{settings.model}? "
+            "The source stays immutable; work occurs in a durable staged workspace."
+        )
+        if not confirmed:
+            raise typer.Abort()
+    runtime = ProductRuntime(_product_db_path(db_override))
+    try:
+        prepared = runtime.prepare_new(
+            goal=goal,
+            repo=source,
+            verify_argv=verify_argv,
+            max_attempts=max_attempts,
+            max_turns=max_turns,
+            provider=settings.profile,
+            kernel=kernel,
+        )
+        console.print("Odys", style="bold cyan")
+        console.print("Plan. Act. Recover. Finish.")
+        try:
+            run, data, _ = asyncio.run(execute_with_progress(prepared, no_ui=no_ui, console=console))
+        except KeyboardInterrupt:
+            latest = runtime.latest_run_for_task(prepared.task.id)
+            _print_interrupt(latest.id if latest else None)
+            raise typer.Exit(code=130)
+        _print_product_summary(data)
+        if run.status.value != "COMPLETED":
+            raise typer.Exit(code=1)
+    except CliConfigurationError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    finally:
+        runtime.close()
+
+
+@app.command("resume")
+def product_resume(
+    run_id: str = typer.Argument(..., help="Durable Run ID"),
+    migrate_provider: Optional[str] = typer.Option(None, "--migrate-provider", help="Explicit provider id for a blocked native run"),
+    migrate_model: Optional[str] = typer.Option(None, "--migrate-model", help="Explicit model id for provider migration"),
+    credential_route: Optional[str] = typer.Option(None, "--credential-route", help="Route id resolved from ODYS_AGENT_*_<ROUTE>"),
+    no_ui: bool = typer.Option(False, "--no-ui", help="Use plain deterministic console output"),
+    db_override: Optional[Path] = typer.Option(None, "--db", help="SQLite database path"),
+) -> None:
+    """Resume an interrupted durable run in its existing workspace."""
+    runtime = ProductRuntime(_product_db_path(db_override))
+    try:
+        prepared = runtime.prepare_resume(
+            run_id,
+            migrate_provider=migrate_provider,
+            migrate_model=migrate_model,
+            credential_route=credential_route,
+        )
+        try:
+            run, data, _ = asyncio.run(execute_with_progress(prepared, no_ui=no_ui, console=console))
+        except KeyboardInterrupt:
+            _print_interrupt(run_id)
+            raise typer.Exit(code=130)
+        _print_product_summary(data)
+        if run.status.value != "COMPLETED":
+            raise typer.Exit(code=1)
+    except CliConfigurationError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    finally:
+        runtime.close()
+
+
+def _human_inspect(data: dict, *, show_events: bool) -> None:
+    run = data["run"]
+    console.print(Panel.fit(
+        f"[bold]Run ID[/bold] {run['id']}\n"
+        f"[bold]Status[/bold] {run['status']}\n"
+        f"[bold]Harness[/bold] {run['harness']}\n"
+        f"[bold]Task[/bold] {run['task_title']}\n"
+        f"[bold]Source[/bold] {run['source_root']}\n"
+        f"[bold]Workspace[/bold] {run['workspace_session']}\n"
+        f"[bold]Provider/model[/bold] {run['provider']}/{run['model']}\n"
+        f"[bold]Duration[/bold] {run['duration_ms']} ms",
+        title="Odys Inspect",
+    ))
+    _print_runtime_truth(run)
+    _print_liveness(run)
+    attempts = Table(title="Attempts")
+    for column in ("#", "Status", "Error", "Context", "Turns", "Calls", "Failures", "Validation"):
+        attempts.add_column(column)
+    for item in data["attempts"]:
+        attempts.add_row(
+            str(item["attempt_number"]), item["status"], item["error_type"] or "-",
+            item["context_policy"] or "-", str(item["turn_count"]), str(item["tool_calls"]),
+            str(item["tool_failures"]), item["validation"] or "UNKNOWN",
+        )
+    console.print(attempts)
+    workspace = data["workspace"]
+    console.print(f"Workspace: changed_files={workspace['changed_file_count']} source_unchanged={workspace['source_unchanged']}")
+    for path in workspace["changed_files"]:
+        console.print(f"  {path}")
+    console.print("Diff summary: " + json.dumps(workspace["diff_summary"], ensure_ascii=False, sort_keys=True))
+    tools = data["tools"]
+    console.print("Tools calls: " + json.dumps(tools["calls_by_capability"], sort_keys=True))
+    console.print("Tool failures: " + json.dumps(tools["failures_by_capability"], sort_keys=True))
+    console.print("Failure types: " + json.dumps(tools["failures_by_type"], sort_keys=True))
+    console.print(f"Validation: {(data.get('validation') or {}).get('status', 'UNKNOWN')}")
+    for item in data["recovery"]:
+        console.print("Recovery: " + json.dumps(item, ensure_ascii=False, sort_keys=True))
+    if show_events:
+        console.print("Events:")
+        for event in data.get("events", []):
+            console.print("  " + json.dumps(event, ensure_ascii=False, sort_keys=True))
+
+
+@app.command("inspect")
+def product_inspect(
+    run_id: str = typer.Argument(..., help="Run ID"),
+    events: bool = typer.Option(False, "--events", help="Include bounded safe lifecycle events"),
+    as_json: bool = typer.Option(False, "--json", help="Emit bounded safe JSON"),
+    db_override: Optional[Path] = typer.Option(None, "--db", help="SQLite database path"),
+) -> None:
+    """Inspect a persisted run without exposing secrets or raw model data."""
+    runtime = ProductRuntime(_product_db_path(db_override))
+    try:
+        data = inspect_run(runtime.db, run_id, include_events=events)
+        if as_json:
+            console.print_json(json.dumps(data, ensure_ascii=False, sort_keys=True))
+        else:
+            _human_inspect(data, show_events=events)
+    except CliConfigurationError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    finally:
+        runtime.close()
+
+
+@app.command("runs")
+def product_runs(
+    limit: int = typer.Option(20, "--limit", min=1, max=100),
+    status: Optional[str] = typer.Option(None, "--status", help="Filter by Run status"),
+    db_override: Optional[Path] = typer.Option(None, "--db", help="SQLite database path"),
+) -> None:
+    """List recent durable runs."""
+    runtime = ProductRuntime(_product_db_path(db_override))
+    try:
+        rows = list_recent_runs(runtime.db, limit=limit, status=status)
+        if not console.is_terminal:
+            console.print("STATUS\tRUN_ID\tTASK\tATTEMPTS\tPROVIDER/MODEL\tUPDATED")
+            for item in rows:
+                console.print(
+                    f"{item['status']}\t{item['run_id']}\t{item['task_title']}\t"
+                    f"{item['attempts']}\t{item['provider_model']}\t{item['updated_at']}"
+                )
+            return
+        table = Table("Status", "Run ID", "Task", "Attempts", "Provider/model", "Updated")
+        for item in rows:
+            table.add_row(item["status"], item["run_id"], item["task_title"], str(item["attempts"]), item["provider_model"], item["updated_at"])
+        console.print(table)
+    finally:
+        runtime.close()
 
 
 @app.command("events")
@@ -306,7 +672,10 @@ def jobbench(
 @app.command()
 def version() -> None:
     """Print version info."""
-    print(f"lhas {__import__('lhas').__version__} harness={HARNESS_VERSION}")
+    console.print("Odys", style="bold cyan")
+    console.print("Plan. Act. Recover. Finish.")
+    console.print(f"Harness: {HARNESS_VERSION}")
+    console.print(f"Package: {__import__('lhas').__version__}")
 
 
 if __name__ == "__main__":

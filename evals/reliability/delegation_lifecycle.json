@@ -1,0 +1,25 @@
+{
+  "scenario_id": "native-reliability-delegation-lifecycle-v1",
+  "family": "delegation_lifecycle",
+  "fairness": {
+    "model": "FROZEN_BY_LIVE_RUN",
+    "provider": "FROZEN_BY_LIVE_RUN",
+    "task_objective": "Complete a parent task with one durable child while surviving child, parent, and delivery interruption points.",
+    "fixture_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "initial_repository_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "tool_capabilities": ["platform.delegate", "workspace.read", "workspace.diff", "cli.exec"],
+    "timeout_seconds": 900,
+    "turn_budget": 20,
+    "api_call_budget": 20,
+    "acceptance_validator": "shared-parent-and-child-validator",
+    "failure_injection_point": "parameterized-delegation-lifecycle-boundary"
+  },
+  "expected_invariants": {
+    "lost_child_result": false,
+    "duplicate_logical_delivery": false,
+    "ghost_running_child": false,
+    "parent_false_completion": false,
+    "eventual_convergence": true
+  },
+  "metric_names": ["lost_child_result", "duplicate_logical_delivery", "ghost_running_child", "parent_false_completion", "eventual_convergence"]
+}

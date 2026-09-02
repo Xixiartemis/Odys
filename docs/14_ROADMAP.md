@@ -1,125 +1,129 @@
-# LHAS Roadmap
+# Odys Roadmap
 
-## Phase A — Core Runtime
-实现：
-- Task
-- Run
-- Attempt
-- Event
-- SQLite
-- MockExecutor
+Status: **FROZEN**
 
-Gate：
-- Stage 0 全部通过
-- Fail → Recover → Pass 能由 Mock 跑通
-- 连续失败可 Escalate
+Canonical authority: `docs/ARCHITECTURE_FREEZE.md`
 
-## Phase B — Validation / Recovery
-实现：
-- Validator
-- FailureClassifier
-- RecoveryPolicy
-- Context Snapshot
+The order below must not change without the evidence and ADR process defined by the architecture freeze.
 
-Gate：
-- 真实 FailureReport
-- RecoveryAction 有完整日志
-- 第二 Attempt 自动执行
+## Phase 0 — Architecture Freeze
 
-## Phase C — Job Benchmark Offline
-实现：
-- Resume / Candidate Profile
-- 固定 JD Dataset
-- Hard Rule Validator
-- Semantic Matcher
-- Ranker
-- Ground Truth Eval
+Freeze runtime ownership, five-layer architecture, planning ownership, open-source reuse, verified workflow semantics, adaptive reliability levels, metrics, non-goals, and development order.
 
-Gate：
-- 30 JD 可完整跑完
-- 自动生成第一份 Evaluation Report
+Deliverable: documentation only.
 
-## Phase D — Real Search
-实现：
-- SearchProvider
-- Job Source Adapter
-- JD Parser
-- Duplicate / Expiration Detection
+## Phase 1 — Basic Native Vertical Slice
 
-Gate：
-- 能搜索真实公开岗位
-- 结果可追溯到 Source
-- 失效 / 重复可判断
+Current highest priority:
 
-## Phase E — Long-Horizon Golden Task
-实现：
+```text
+Model
+→ Tool
+→ Observation
+→ Multiple Turns
+→ Completion Claim
+→ CompletionAuthority
+→ Validator
+→ VERIFIED
+```
 
-`Search → Parse → Filter → Match → Rank → Top N → Application Draft`
+The real Native path must demonstrate provider/model target truth, tool execution, model-visible observations, multiple turns, non-authoritative completion claim, independent validation, and verified acceptance. Test/live runtime identity and failure provenance must be explicit.
 
-Gate：
-- 全流程有 Task / Run / Attempt
-- 失败可恢复
-- 每一步有 Validation
-- 自动生成实验报告
+Do not add a major capability system or build a full Hermes-style Capability Layer before this passes live.
 
-## Phase F — Application Dry Run
-实现：
-- ApplicationProvider
-- 表单映射
-- 字段验证
-- READY_TO_SUBMIT
+## Phase 2 — Minimum Capability Parity
 
-Gate：
-- 自动执行到 Submit 前
-- Human Approval Gate 生效
-- 不允许自动越权提交
+Implement only capabilities required for controlled comparison:
 
-## Phase G — Public V0
-完成：
-- README
-- Architecture Diagram
-- Quick Start
-- Demo
-- Benchmark Results
-- Failure Analysis
-- ADR
+```text
+P0  read / write / edit / shell
+P1  official MCP adapter
+P2  Skill loading and progressive disclosure
+P3  context compaction and selective context
+P4  token and cost accounting
+```
 
-Gate：
-- 别人 clone 后可以复现实验
+Memory, browser, web/search, and delegation wait for selected benchmark demand. Do not build Telegram, Discord, Desktop assistant, or gateway surfaces.
 
-## Phase H — SWE Benchmark
-增加：
-- CodexExecutor
-- Git Workspace
-- deterministic test validator
-- coding recovery experiments
+## Phase 3 — Verified Workflow V1
 
-## V1+
-按证据决定是否加入：
-- MCP
-- Planner
-- TaskGraph
-- Project Memory
-- Multi-Executor
-- React Control Plane
-- Durable Execution
-- Temporal
-- Multi-Agent
+Implement the canonical typed TaskGraph with:
 
-原则：
-只有当实验数据证明当前瓶颈需要它时，才引入新模块。
-## Phase D Foundation Hardening
+- dependencies;
+- preconditions;
+- expected effects;
+- acceptance criteria;
+- evidence;
+- verified transitions;
+- local repair;
+- affected-descendant invalidation;
+- macro replan only when necessary.
 
-Only LINEAR plans are executable. SIMPLE_DEPENDENCY is explicitly unsupported until a later phase. Recovery reuses RecoveringOrchestrator, and human approval resumes the persisted plan without re-running completed steps.
-## Phase E1 — deterministic TaskGraph runtime
+Remain HTN-compatible, but do not build a full HTN solver.
 
-`SIMPLE_DEPENDENCY` plans now execute serially through a pure scheduler with READY/BLOCKED semantics, dependency-closure context, independent-branch continuation, and same-Plan approval resume. Parallel execution and dynamic replanning remain out of scope. Harness version: HV-0.6.
-## Phase E2 — Inner Agent Runtime
+## Phase 4 — Controlled Ablation
 
-E1 is complete. E2 adds the provider-neutral inner-agent backend boundary and the first optional OpenAI Agents SDK backend without rewiring the macro TaskGraph.
+Stop adding framework features and compare:
 
-E2 PASS. E3 is current: read-only Workspace inspection and policy-constrained Safe CLI execution.
+```text
+FAST
+vs GUARDED
+vs STATEFUL / WORKFLOW
+vs DURABLE
+```
 
-E3 PASS. E4 is current: staged mutable Workspace with controlled edit, diff, restore, and test-fix-test loop.
+Hold model, task, tools, environment, validator, and budget policy constant. Measure mechanism contribution, control overhead, Verified Completion Rate, Cost per Verified Completion, and Repeated Reliability.
 
-E4 PASS. E5 is current: durable checkpoints, incremental event projection, and bounded CP-3 context reconstruction.
+## Phase 5 — Adaptive Reliability
+
+Only after Phase 4 provides data. Begin with explicit deterministic routing features:
+
+- estimated horizon;
+- dependency depth;
+- statefulness;
+- verification availability;
+- side-effect risk;
+- parallelism/delegation need.
+
+Select FAST, GUARDED, DURABLE, or MULTI_AGENT. Do not use ML/RL initially.
+
+## Phase 6 — Capability Expansion
+
+Add only from benchmark/product demand:
+
+- memory;
+- browser and web/search;
+- durable delegation;
+- richer Skills;
+- sandbox backends.
+
+## Phase 7 — Productionization
+
+Only after research semantics are stable, reconsider:
+
+- Temporal as an optional execution backend;
+- distributed workers;
+- PostgreSQL and queues;
+- multi-tenant services;
+- Web/Desktop;
+- gateway integrations.
+
+These are deployment questions and must not redefine core execution semantics.
+
+## Architecture-change gate
+
+```text
+reproducible limitation/failure
+→ evidence current architecture cannot reasonably support it
+→ benchmark or production evidence
+→ alternatives considered
+→ migration cost
+→ ADR
+→ explicit claim impact
+```
+
+> EXTEND, DO NOT REWRITE.
+
+## Historical milestone map
+
+Earlier LHAS Phase A–H and Odys E1–E7 labels remain preserved in `tasks/`, `experiments/`, and `docs/evidence/`. They are historical implementation records and do not override this frozen roadmap.

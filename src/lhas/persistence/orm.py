@@ -62,6 +62,8 @@ class PlanRow(Base):
     mode: Mapped[str] = mapped_column(String(32), nullable=False)
     status: Mapped[str] = mapped_column(String(48), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    metadata_json: Mapped[str | None] = _json_col()
+    invalidated_step_ids: Mapped[str | None] = _json_col()
 
 class PlanStepRow(Base):
     __tablename__ = "plan_steps"
@@ -79,6 +81,7 @@ class PlanStepRow(Base):
     task_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
     output: Mapped[str | None] = _json_col()
     execution_context: Mapped[str | None] = _json_col()
+    semantic_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
 
 class RunRow(Base):
@@ -226,3 +229,179 @@ class RecoveryActionRow(Base):
     attempt_to: Mapped[int | None] = mapped_column(Integer, nullable=True)
     added_context: Mapped[str | None] = _json_col()
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    metadata_json: Mapped[str | None] = _json_col()
+    invalidated_step_ids: Mapped[str | None] = _json_col()
+
+
+class ConversationSessionRow(Base):
+    __tablename__ = "conversation_sessions"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    title: Mapped[str] = mapped_column(String(256), nullable=False)
+    parent_session_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    metadata_json: Mapped[str | None] = _json_col()
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class SessionMessageRow(Base):
+    __tablename__ = "session_messages"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    session_id: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    role: Mapped[str] = mapped_column(String(16), nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    safe_tool_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    metadata_json: Mapped[str | None] = _json_col()
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class DelegationRow(Base):
+    __tablename__ = "delegations"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    parent_agent_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    parent_task_id: Mapped[str] = mapped_column(String(32), nullable=False)
+    parent_run_id: Mapped[str] = mapped_column(String(32), nullable=False)
+    child_agent_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    child_task_id: Mapped[str] = mapped_column(String(32), nullable=False)
+    child_run_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    spawn_depth: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    context_json: Mapped[str | None] = _json_col()
+    result_json: Mapped[str | None] = _json_col()
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class NativeExecutionSnapshotRow(Base):
+    __tablename__ = "native_execution_snapshots"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    task_id: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    run_id: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    attempt_id: Mapped[str] = mapped_column(String(32), unique=True, nullable=False, index=True)
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    phase: Mapped[str] = mapped_column(String(48), nullable=False)
+    payload_json: Mapped[str | None] = _json_col()
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class NativeToolInvocationRow(Base):
+    __tablename__ = "native_tool_invocations"
+
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    task_id: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    run_id: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    attempt_id: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    ordinal: Mapped[int] = mapped_column(Integer, nullable=False)
+    capability: Mapped[str] = mapped_column(String(128), nullable=False)
+    args_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    side_effect_class: Mapped[str] = mapped_column(String(32), nullable=False)
+    state: Mapped[str] = mapped_column(String(32), nullable=False)
+    observed_mutation: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    result_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    error_type: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    result_summary_json: Mapped[str | None] = _json_col()
+    reconciliation: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class CompletionCandidateRow(Base):
+    __tablename__ = "completion_candidates"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    task_id: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    run_id: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    attempt_id: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    source: Mapped[str] = mapped_column(String(48), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    claim_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    validation_json: Mapped[str | None] = _json_col()
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class NativeValidationFailureRow(Base):
+    __tablename__ = "native_validation_failures"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    candidate_id: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    attempt_id: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    category: Mapped[str] = mapped_column(String(128), nullable=False)
+    failed_criterion: Mapped[str | None] = mapped_column(Text, nullable=True)
+    safe_evidence: Mapped[str | None] = mapped_column(Text, nullable=True)
+    recommended_recovery: Mapped[str] = mapped_column(String(128), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class ReplanSignalRow(Base):
+    __tablename__ = "replan_signals"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    task_id: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    run_id: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    attempt_id: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    reason: Mapped[str] = mapped_column(String(128), nullable=False)
+    scope: Mapped[str] = mapped_column(String(32), nullable=False)
+    failed_node_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    evidence_json: Mapped[str | None] = _json_col()
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class NativeRuntimeTargetRow(Base):
+    __tablename__ = "native_runtime_targets"
+
+    execution_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    owner_run_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    owner_session_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    state: Mapped[str] = mapped_column(String(32), nullable=False)
+    configured_json: Mapped[str] = _json_col()
+    effective_json: Mapped[str] = _json_col()
+    pending_json: Mapped[str | None] = _json_col()
+    fallback_reason: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    switch_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class ProviderHealthRow(Base):
+    __tablename__ = "provider_route_health"
+
+    target_id: Mapped[str] = mapped_column(String(512), primary_key=True)
+    target_json: Mapped[str] = _json_col()
+    state: Mapped[str] = mapped_column(String(32), nullable=False)
+    failure_category: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    reason: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    blocked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class DelegationLifecycleRow(Base):
+    __tablename__ = "delegation_lifecycle"
+
+    delegation_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    parent_attempt_id: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    execution_owner: Mapped[str] = mapped_column(String(128), nullable=False)
+    conversation_owner: Mapped[str] = mapped_column(String(128), nullable=False)
+    delivery_owner: Mapped[str] = mapped_column(String(128), nullable=False)
+    dispatch_state: Mapped[str] = mapped_column(String(32), nullable=False)
+    execution_state: Mapped[str] = mapped_column(String(32), nullable=False)
+    delivery_state: Mapped[str] = mapped_column(String(32), nullable=False)
+    delivery_token: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    outcome_json: Mapped[str | None] = _json_col()
+    artifact_ref: Mapped[str | None] = mapped_column(Text, nullable=True)
+    validator_result: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    retry_of_delegation_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

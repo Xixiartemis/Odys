@@ -125,3 +125,90 @@ single-run paired observation and provides no stochastic success-rate estimate.
 
 E7-B — Dynamic Macro Replan remains deferred until lower-level tool robustness
 is measured.
+
+## DD-HV14-CLI-ALPHA-VERTICAL-SLICE
+
+**Design decision.** Make `odys` the primary Typer entry point while retaining
+`lhas` as a compatibility alias. The CLI is an application adapter over
+`RecoveringOrchestrator`, durable workspace binding, InnerAgentExecutor,
+ToolRegistry, explicit Outer Validation, EventStore, and CP-3. Product commands
+do not duplicate lifecycle or recovery state machines.
+
+**Design decision.** The user-supplied verification command is parsed to an
+explicit argv, executed without a shell in the staged workspace, and installed
+as an exact Inner Agent command policy. Validator exit code, rather than a
+model completion claim, is authoritative for Alpha functional acceptance.
+
+**Design decision.** Keep exact-target `workspace.edit` compatible and add
+version-checked `workspace.edit_lines` plus structured recovery metadata.
+Repeated failure adaptation uses only a SHA-256 argument signature and safe
+error identity. CP-3 receives bounded aggregate failure memory, never raw tool
+arguments.
+
+**Tradeoffs.** Exact command policy limits exploratory CLI flexibility and may
+require the user to choose a verification command that covers the full goal.
+Line editing requires a fresh file SHA and an extra read, but removes ambiguous
+substring targeting and makes stale edits explicit. Polling persisted state at
+four Hz is less immediate than in-process callbacks but keeps UI failure
+outside correctness.
+
+**Failed approaches.** The first offline vertical slice resolved `pytest` from
+an unrelated system Python because PATH did not explicitly prioritize the
+active Odys virtual environment. SafeCli now prepends the allowed
+`VIRTUAL_ENV/Scripts` or `bin` directory without changing argv or command
+policy. The first deterministic fixture repair corrected tenant-key isolation
+but left delayed-message recreation in the router; the final offline scenario
+repairs and validates both independent defects.
+
+**Known limitations.** Alpha supports one repository, one durable workspace,
+one sequential agent, and one explicit verification argv per Run. The
+deterministic offline profile is fixture-oriented product evidence, not a
+general autonomous coding benchmark. Terminal UI is polling-based; validation
+stdout/stderr is bounded; ordinary demos are rerunnable and are not canonical
+evidence.
+
+**Next hypothesis.** Measure E7-A tool ergonomics and verification discipline
+on additional non-canonical product demos before any new canonical real-model
+run. E7-B Dynamic Macro Replan remains deferred and is not implemented here.
+
+## DD-HV15-AGENT-PLATFORM-FOUNDATION
+
+**Design decision.** Adopt a shared provider-neutral AgentKernel contract and
+role Profiles, while retaining Task/Run/Attempt, RecoveringOrchestrator,
+Validator, CP-3 and EventStore as the authoritative long-horizon control plane.
+The existing InnerAgent path remains available through an adapter.
+
+**Design decision.** Make delegation durable. A delegated agent is represented
+by a lineage row plus an ordinary Child Task, Child Run and Child Attempt. Its
+context is a bounded explicit handoff, not the parent transcript. A child
+result is a bounded summary/evidence envelope and never becomes an acceptance
+verdict without Validator evidence.
+
+**Design decision.** Keep ToolRegistry as the platform narrow waist. Toolsets
+expand to its capabilities, and stdio MCP discovery creates normal Tool
+adapters with origin/risk metadata. Skills, Memory, Session and Knowledge are
+separate systems joined only through ContextAssembler-selected sections.
+
+**Upstream decision.** Hermes Agent at fixed MIT commit `3f315e46` was used as
+architecture research. Nine subsystem concepts were reimplemented natively;
+zero Hermes source files were copied or modified. Hermes CLI, gateway,
+dashboard, messaging and branding were intentionally excluded.
+
+**Tradeoffs.** The stdio MCP transport implements the core initialize/list/call
+path but not HTTP, OAuth or catalog management. Lexical Knowledge and FTS5
+Session search are predictable and light but not semantic retrieval. The
+Scripted Planner and kernels prove platform wiring, not model intelligence.
+
+**Failed approach.** The first CLI smoke closed its MCP subprocess in a second
+`asyncio.run`, which caused a Windows cross-event-loop Future error after all
+work had completed. Platform creation, execution and close now share one event
+loop; the corrected smoke exits zero.
+
+**Known limitations.** Dynamic Replan is a typed event/routing boundary only.
+Workers are sequential; Memory write approval has no interactive UI; persistent
+MCP configuration and provider-backed Root/Planner kernels are future work.
+
+**Next hypothesis.** Add a provider-backed ModelPlanner and RootAgent adapter
+behind the same contracts, then measure whether durable child specialization
+improves multi-step validated completion without weakening permission or
+context isolation.

@@ -2,7 +2,7 @@ import difflib, hashlib, os, shutil, tempfile
 from pathlib import Path
 from .local import LocalReadOnlyWorkspace
 from .models import WorkspaceLimits
-from .errors import BinaryFileError, WorkspacePathEscape
+from .errors import BinaryFileError, WorkspaceEditError, WorkspacePathEscape
 
 class StagingLimitExceeded(Exception): pass
 class StagingRootConflict(Exception): pass
@@ -61,7 +61,56 @@ class StagedWorkspace(LocalReadOnlyWorkspace):
             if p.is_file() and not p.is_symlink(): yield p
     @staticmethod
     def _sha(data): return hashlib.sha256(data).hexdigest()
-    async def edit_file(self, path, old_text, new_text, expected_sha256=None):
+    @staticmethod
+    def _line_spans(text):
+        """Return line bodies and offsets without normalizing the source text."""
+        spans=[]; offset=0
+        for raw in text.splitlines(keepends=True):
+            body=raw[:-2] if raw.endswith("\r\n") else (raw[:-1] if raw.endswith(("\n","\r")) else raw)
+            spans.append((body,offset,offset+len(body),offset+len(raw)))
+            offset += len(raw)
+        if text and not spans:
+            spans.append((text,0,len(text),len(text)))
+        return spans
+    @classmethod
+    def _normalized_candidates(cls, text, target):
+        """Resolve only whole-line targets with newline/trailing-space normalization.
+
+        This is intentionally not fuzzy matching: leading and internal whitespace,
+        line order, and all non-whitespace characters must remain identical.
+        """
+        normalized=target.replace("\r\n","\n").replace("\r","\n")
+        includes_final_newline=normalized.endswith("\n")
+        parts=normalized.split("\n")
+        if includes_final_newline: parts.pop()
+        if not parts: return []
+        expected=[line.rstrip(" \t") for line in parts]
+        spans=cls._line_spans(text); width=len(expected); candidates=[]
+        for index in range(0,len(spans)-width+1):
+            actual=[spans[index+offset][0].rstrip(" \t") for offset in range(width)]
+            if actual != expected: continue
+            start=spans[index][1]
+            last=spans[index+width-1]
+            if includes_final_newline and last[3] == last[2]:
+                continue
+            end=last[3] if includes_final_newline else last[2]
+            candidates.append((start,end,index+1,index+width))
+        return candidates
+    @staticmethod
+    def _replacement_for_source(new_text, source_text):
+        newline="\r\n" if "\r\n" in source_text else ("\r" if "\r" in source_text and "\n" not in source_text else "\n")
+        return new_text.replace("\r\n","\n").replace("\r","\n").replace("\n",newline)
+    @staticmethod
+    def _atomic_write(file, data):
+        tmp=None
+        try:
+            fd,tmp=tempfile.mkstemp(prefix=f".{file.name}.", dir=str(file.parent))
+            with os.fdopen(fd,"wb") as handle:
+                handle.write(data); handle.flush(); os.fsync(handle.fileno())
+            os.replace(tmp,file); tmp=None
+        finally:
+            if tmp: Path(tmp).unlink(missing_ok=True)
+    async def edit_file(self, path, old_text, new_text, expected_sha256=None, *, allow_safe_normalization=True):
         file=self.resolve_path(path)
         if not file.exists(): raise FileNotFoundError(path)
         if not file.is_file(): raise IsADirectoryError(path)
@@ -71,29 +120,61 @@ class StagedWorkspace(LocalReadOnlyWorkspace):
         before=self._sha(data)
         if expected_sha256 is not None and expected_sha256 != before: raise ValueError("STALE_FILE_VERSION")
         text=data.decode("utf-8")
-        if not old_text: raise ValueError("INVALID_ARGUMENTS")
+        if not old_text: raise WorkspaceEditError("INVALID_ARGUMENTS")
         occurrences=text.count(old_text)
-        if occurrences == 0: raise ValueError("EDIT_TARGET_NOT_FOUND")
-        if occurrences > 1: raise ValueError("EDIT_TARGET_AMBIGUOUS")
-        updated=text.replace(old_text, new_text, 1).encode("utf-8"); tmp=None
-        try:
-            fd,tmp=tempfile.mkstemp(prefix=f".{file.name}.", dir=str(file.parent))
-            with os.fdopen(fd, "wb") as handle: handle.write(updated); handle.flush(); os.fsync(handle.fileno())
-            os.replace(tmp, file); tmp=None
-        finally:
-            if tmp: Path(tmp).unlink(missing_ok=True)
+        match_mode="EXACT"; candidate_count=occurrences; start_line=end_line=None
+        if occurrences > 1:
+            raise WorkspaceEditError("EDIT_TARGET_AMBIGUOUS", candidate_count=min(occurrences,100), candidates_truncated=occurrences>100, match_mode="EXACT")
+        if occurrences == 1:
+            start=text.index(old_text); end=start+len(old_text)
+            start_line=text.count("\n",0,start)+1
+            end_line=start_line+max(0,len(old_text.splitlines())-1)
+            replacement=new_text
+        else:
+            candidates=self._normalized_candidates(text,old_text) if allow_safe_normalization else []
+            candidate_count=len(candidates); match_mode="NORMALIZED_UNIQUE"
+            if candidate_count == 0:
+                raise WorkspaceEditError("EDIT_TARGET_NOT_FOUND", candidate_count=0, normalization_attempted=allow_safe_normalization)
+            if candidate_count > 1:
+                raise WorkspaceEditError("EDIT_TARGET_AMBIGUOUS", candidate_count=min(candidate_count,100), candidates_truncated=candidate_count>100, match_mode="NORMALIZED")
+            start,end,start_line,end_line=candidates[0]
+            replacement=self._replacement_for_source(new_text,text)
+        updated_text=text[:start]+replacement+text[end:]
+        if updated_text == text:
+            raise WorkspaceEditError("NO_CHANGE", candidate_count=1, match_mode=match_mode)
+        updated=updated_text.encode("utf-8")
+        self._atomic_write(file, updated)
         after=self._sha(updated)
-        return {"path":Path(path).as_posix(),"replacements":1,"before_sha256":before,"after_sha256":after,"bytes_before":len(data),"bytes_after":len(updated)}
+        return {"path":Path(path).as_posix(),"replacements":1,"before_sha256":before,"after_sha256":after,"bytes_before":len(data),"bytes_after":len(updated),"match_mode":match_mode,"candidate_count":candidate_count,"matched_start_line":start_line,"matched_end_line":end_line}
+    async def edit_lines(self, path, start_line, end_line, new_lines, expected_sha256):
+        file=self.resolve_path(path)
+        if not file.exists(): raise FileNotFoundError(path)
+        if not file.is_file(): raise IsADirectoryError(path)
+        if file.is_symlink(): raise WorkspacePathEscape("WORKSPACE_PATH_ESCAPE")
+        data=file.read_bytes()
+        if b"\x00" in data: raise BinaryFileError("BINARY_FILE")
+        before=self._sha(data)
+        if not isinstance(expected_sha256,str) or not expected_sha256: raise ValueError("INVALID_ARGUMENTS")
+        if expected_sha256 != before: raise ValueError("STALE_FILE_VERSION")
+        if not isinstance(start_line,int) or isinstance(start_line,bool) or not isinstance(end_line,int) or isinstance(end_line,bool): raise WorkspaceEditError("INVALID_EDIT_RANGE")
+        if not isinstance(new_lines,list) or not all(isinstance(line,str) and "\n" not in line and "\r" not in line for line in new_lines): raise ValueError("INVALID_ARGUMENTS")
+        text=data.decode("utf-8"); lines=text.splitlines(keepends=True)
+        if start_line < 1 or end_line < start_line or end_line > len(lines): raise WorkspaceEditError("INVALID_EDIT_RANGE", start_line=start_line, end_line=end_line, total_lines=len(lines))
+        newline="\r\n" if any(line.endswith("\r\n") for line in lines) else "\n"
+        selected_reaches_eof=end_line == len(lines); had_final_newline=text.endswith(("\n","\r")); replacement=[]
+        for index,line in enumerate(new_lines):
+            needs_newline=(not selected_reaches_eof) or index < len(new_lines)-1 or had_final_newline
+            replacement.append(line + (newline if needs_newline else ""))
+        updated=("".join(lines[:start_line-1]) + "".join(replacement) + "".join(lines[end_line:])).encode("utf-8")
+        if updated == data: raise WorkspaceEditError("NO_CHANGE", start_line=start_line, end_line=end_line)
+        self._atomic_write(file, updated)
+        after=self._sha(updated)
+        return {"path":Path(path).as_posix(),"start_line":start_line,"end_line":end_line,"lines_written":len(new_lines),"before_sha256":before,"after_sha256":after,"bytes_before":len(data),"bytes_after":len(updated)}
     async def restore_file(self, path):
         rel=self.resolve_path(path).relative_to(self.root).as_posix()
         if rel not in self._baseline: raise FileNotFoundError(path)
-        file=self.resolve_path(path); data=self._baseline[rel]; tmp=None
-        try:
-            fd,tmp=tempfile.mkstemp(prefix=f".{file.name}.", dir=str(file.parent))
-            with os.fdopen(fd,"wb") as handle: handle.write(data); handle.flush(); os.fsync(handle.fileno())
-            os.replace(tmp,file); tmp=None
-        finally:
-            if tmp: Path(tmp).unlink(missing_ok=True)
+        file=self.resolve_path(path); data=self._baseline[rel]
+        self._atomic_write(file,data)
         return {"path":Path(path).as_posix(),"restored":True,"sha256":self._sha(data)}
     async def diff(self, path=None, max_diff_bytes=None):
         requested=self.limits.max_diff_bytes if max_diff_bytes is None else int(max_diff_bytes)
