@@ -18,7 +18,8 @@ from lhas import HARNESS_VERSION
 from lhas.checkpoint import CheckpointRepository, safe_event_projection
 from lhas.command_validation import ExplicitCommandValidator, explicit_command_policy
 from lhas.context_builder import ContextBuilder
-from lhas.domain.enums import RunStatus
+from lhas.domain.enums import EventType, RunStatus
+from lhas.liveness import project_liveness
 from lhas.domain.models import Project
 from lhas.inner_agent import AgentsSdkModelConfig, InnerAgentExecutor, InnerAgentResult, InnerAgentStatus, OpenAIAgentsBackend
 from lhas.inner_agent.tool_adapter import ToolAwareObserver, _args_signature, safe_tool_summary
@@ -45,6 +46,7 @@ from lhas.workspace.session import DurableWorkspaceSession
 
 CLI_CONFIG_PREFIX = "ODYS_CLI_CONFIG:"
 DEFAULT_PROVIDER = "mimo"
+DEFAULT_STALL_THRESHOLD_SECONDS = 600.0
 ALLOWED_CAPABILITIES = [
     "workspace.list",
     "workspace.read",
@@ -622,7 +624,15 @@ def _duration_ms(run) -> int | None:
     return max(0, int((finish - start).total_seconds() * 1000))
 
 
-def inspect_run(db: Database, run_id: str, *, include_events: bool = False, recent_event_limit: int = 100) -> dict[str, Any]:
+def inspect_run(
+    db: Database,
+    run_id: str,
+    *,
+    include_events: bool = False,
+    recent_event_limit: int = 100,
+    now: datetime | None = None,
+    stall_threshold_seconds: float | None = None,
+) -> dict[str, Any]:
     runs = RunRepository(db)
     run = runs.get(run_id)
     if run is None:
@@ -649,18 +659,59 @@ def inspect_run(db: Database, run_id: str, *, include_events: bool = False, rece
     recovery_rows = []
     for attempt in attempts:
         attempt_events = [event for event in events if event.attempt_id == attempt.id]
+        native_activity = any(
+            event.event_type
+            in {
+                EventType.NATIVE_MODEL_TURN_STARTED,
+                EventType.NATIVE_TOOL_STARTED,
+                EventType.NATIVE_TOOL_OBSERVED,
+                EventType.NATIVE_EXECUTION_SNAPSHOT,
+            }
+            for event in attempt_events
+        )
         observations = [event.payload for event in attempt_events if event.event_type.value == "INNER_AGENT_TOOL_OBSERVATION"]
         terminal = next((event.payload for event in reversed(attempt_events) if event.event_type.value in {"INNER_AGENT_COMPLETED", "INNER_AGENT_FAILED"}), {})
-        turns = int(terminal.get("turn_count", 0) or 0)
-        calls = len(observations)
-        failures = sum(1 for payload in observations if payload.get("status") == "FAILURE")
+        if native_activity:
+            native_tool_started = [
+                event for event in attempt_events if event.event_type is EventType.NATIVE_TOOL_STARTED
+            ]
+            native_tool_observed = [
+                event for event in attempt_events if event.event_type is EventType.NATIVE_TOOL_OBSERVED
+            ]
+            turns = sum(
+                1 for event in attempt_events
+                if event.event_type is EventType.NATIVE_MODEL_TURN_STARTED
+            )
+            calls = len(native_tool_started)
+            failures = sum(
+                1 for event in native_tool_observed
+                if (event.payload or {}).get("status") == "FAILURE"
+            )
+        else:
+            native_tool_started = []
+            native_tool_observed = []
+            turns = int(terminal.get("turn_count", 0) or 0)
+            calls = len(observations)
+            failures = sum(1 for payload in observations if payload.get("status") == "FAILURE")
         total_turns += turns
         total_calls += calls
         total_failures += failures
-        for payload in observations:
+        tool_payloads = (
+            [event.payload or {} for event in native_tool_started]
+            if native_activity
+            else observations
+        )
+        for payload in tool_payloads:
             capability = str(payload.get("capability") or "UNKNOWN")
             calls_by_capability[capability] += 1
+        failure_payloads = (
+            [event.payload or {} for event in native_tool_observed]
+            if native_activity
+            else observations
+        )
+        for payload in failure_payloads:
             if payload.get("status") == "FAILURE":
+                capability = str(payload.get("capability") or "UNKNOWN")
                 failures_by_capability[capability] += 1
                 failures_by_type[str(payload.get("error_type") or "UNKNOWN")] += 1
         validation = validation_repo.get_for_attempt(attempt.id)
@@ -682,6 +733,8 @@ def inspect_run(db: Database, run_id: str, *, include_events: bool = False, rece
             "turn_count": turns,
             "tool_calls": calls,
             "tool_failures": failures,
+            "last_event_cursor": max((int(event.id or 0) for event in attempt_events), default=0),
+            "last_event_type": attempt_events[-1].event_type.value if attempt_events else None,
             "validation": None if validation is None else ("PASS" if validation.passed else "FAIL"),
             "duration_ms": attempt.duration_ms,
         })
@@ -759,6 +812,19 @@ def inspect_run(db: Database, run_id: str, *, include_events: bool = False, rece
         "transport": latest_native_snapshot.actual_transport_endpoint_identity if latest_native_snapshot else None,
         "fingerprint": latest_native_snapshot.actual_transport_endpoint_fingerprint if latest_native_snapshot else None,
     }
+    if stall_threshold_seconds is None:
+        try:
+            stall_threshold_seconds = float(
+                os.getenv("ODYS_STALL_THRESHOLD_SECONDS", DEFAULT_STALL_THRESHOLD_SECONDS)
+            )
+        except (TypeError, ValueError):
+            stall_threshold_seconds = DEFAULT_STALL_THRESHOLD_SECONDS
+    liveness = project_liveness(
+        events,
+        run_status=run.status,
+        now=now,
+        stall_threshold_seconds=stall_threshold_seconds,
+    )
     config = decode_cli_config(task)
     result = {
         "run": {
@@ -775,6 +841,7 @@ def inspect_run(db: Database, run_id: str, *, include_events: bool = False, rece
             "configured_target": configured_target,
             "effective_target": effective_target,
             "runtime_truth": runtime_truth,
+            "liveness": liveness,
             "runtime_target_state": "FALLBACK" if latest_native_snapshot and latest_native_snapshot.fallback_reason else (latest_native_snapshot.phase.value if latest_native_snapshot else None),
             "fallback_reason": latest_native_snapshot.fallback_reason if latest_native_snapshot else None,
             "duration_ms": _duration_ms(run),
@@ -810,10 +877,26 @@ def _in_running_loop() -> bool:
         return False
 
 
-async def inspect_run_async(db: Database, run_id: str, *, include_events: bool = False, recent_event_limit: int = 100) -> dict[str, Any]:
+async def inspect_run_async(
+    db: Database,
+    run_id: str,
+    *,
+    include_events: bool = False,
+    recent_event_limit: int = 100,
+    now: datetime | None = None,
+    stall_threshold_seconds: float | None = None,
+) -> dict[str, Any]:
     # Workspace.diff is async. Run the synchronous repository projection in a
     # worker thread where inspect_run can safely own a small event loop.
-    return await asyncio.to_thread(inspect_run, db, run_id, include_events=include_events, recent_event_limit=recent_event_limit)
+    return await asyncio.to_thread(
+        inspect_run,
+        db,
+        run_id,
+        include_events=include_events,
+        recent_event_limit=recent_event_limit,
+        now=now,
+        stall_threshold_seconds=stall_threshold_seconds,
+    )
 
 
 def list_recent_runs(db: Database, *, limit: int = 20, status: str | None = None) -> list[dict[str, Any]]:

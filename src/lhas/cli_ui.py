@@ -98,6 +98,7 @@ def project_view_state(
             "run": {"id": None, "run_status": "STARTING", "task_status": "RUNNING", "duration_ms": 0, "attempt": f"0 / {max_attempts}"},
             "agent": {"current_attempt": 0, "turns": f"0 / {max_turns}", "tool_calls": 0, "tool_failures": 0},
             "workspace": {"session_id": None, "changed_files": 0, "source_unchanged": None},
+            "liveness": {"execution_health": "UNKNOWN", "current_operation": "IDLE", "no_progress_duration_ms": None, "last_event_cursor": 0},
             "validation": "UNKNOWN",
             "recovery": {"failure": None, "action": None, "checkpoint": None, "cp3": False},
             "recent_activity": [],
@@ -129,6 +130,12 @@ def project_view_state(
             "changed_files": inspection["workspace"]["changed_file_count"],
             "source_unchanged": inspection["workspace"]["source_unchanged"],
         },
+        "liveness": run.get("liveness") or {
+            "execution_health": "UNKNOWN",
+            "current_operation": "IDLE",
+            "no_progress_duration_ms": None,
+            "last_event_cursor": 0,
+        },
         "validation": validation["status"] if validation else "UNKNOWN",
         "recovery": {
             "failure": (recovery.get("failure_report") or {}).get("failure_type"),
@@ -159,6 +166,9 @@ def render_dashboard(state: dict[str, Any]):
     recovery_table = Table(show_header=False, box=None, expand=True)
     for key, value in state["recovery"].items():
         recovery_table.add_row(key.replace("_", " ").title(), str(value or "-"))
+    liveness_table = Table(show_header=False, box=None, expand=True)
+    for key, value in state["liveness"].items():
+        liveness_table.add_row(key.replace("_", " ").title(), str(value if value is not None else "UNKNOWN"))
     activity = "\n".join(
         f"#{event.get('event_id', '-')} {event.get('event_type', 'UNKNOWN')}"
         + (f" [{event.get('capability')}]" if event.get("capability") else "")
@@ -176,6 +186,7 @@ def render_dashboard(state: dict[str, Any]):
         Panel(workspace_table, title="WORKSPACE"),
         Panel(state["validation"], title="VALIDATION"),
         Panel(recovery_table, title="RECOVERY"),
+        Panel(liveness_table, title="LIVENESS"),
         Panel(tree, title="AGENT TREE"),
         Panel(activity, title="RECENT ACTIVITY"),
     )

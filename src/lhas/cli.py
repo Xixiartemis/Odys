@@ -311,6 +311,7 @@ def _print_product_summary(data: dict) -> None:
     console.print(f"Validation exit code: {exit_code if exit_code is not None else 'N/A'}")
     console.print(f"Duration: {run['duration_ms']} ms")
     _print_runtime_truth(run)
+    _print_liveness(run)
     attempt_failures = [item for item in data["attempts"] if item.get("error_type")]
     if attempt_failures:
         console.print("Attempt failure types: " + ", ".join(item["error_type"] for item in attempt_failures[-5:]))
@@ -336,6 +337,27 @@ def _print_runtime_truth(run: dict) -> None:
     console.print(f"effective: {json.dumps(truth.get('effective'), ensure_ascii=False, sort_keys=True)}")
     console.print(f"transport: {truth.get('transport') or 'NOT_RECORDED'}")
     console.print(f"fingerprint: {truth.get('fingerprint') or 'NOT_RECORDED'}")
+
+
+def _print_liveness(run: dict) -> None:
+    liveness = run.get("liveness") or {}
+    health = liveness.get("execution_health") or "UNKNOWN"
+    no_progress_ms = liveness.get("no_progress_duration_ms")
+    console.print("LIVENESS")
+    console.print(f"Health: {health}")
+    console.print(f"RUN_HEALTH={health}")
+    console.print(f"Current Operation: {liveness.get('current_operation') or 'UNKNOWN'}")
+    console.print(f"CURRENT_OPERATION={liveness.get('current_operation') or 'UNKNOWN'}")
+    console.print(f"Operation Age: {liveness.get('operation_age_ms') if liveness.get('operation_age_ms') is not None else 'N/A'} ms")
+    console.print(f"No Progress: {no_progress_ms if no_progress_ms is not None else 'N/A'} ms")
+    console.print(f"NO_PROGRESS_MS={no_progress_ms if no_progress_ms is not None else 'UNKNOWN'}")
+    console.print(f"Last Event: #{liveness.get('last_event_cursor', 0)} {liveness.get('last_event_type') or 'UNKNOWN'}")
+    console.print(f"LAST_EVENT_CURSOR={liveness.get('last_event_cursor', 0)}")
+    if health == "STALLED":
+        console.print("WARNING: POSSIBLE STALL")
+        console.print(
+            f"No durable progress for {no_progress_ms if no_progress_ms is not None else 'unknown'} ms."
+        )
 
 
 @app.command("run")
@@ -441,6 +463,7 @@ def _human_inspect(data: dict, *, show_events: bool) -> None:
         title="Odys Inspect",
     ))
     _print_runtime_truth(run)
+    _print_liveness(run)
     attempts = Table(title="Attempts")
     for column in ("#", "Status", "Error", "Context", "Turns", "Calls", "Failures", "Validation"):
         attempts.add_column(column)

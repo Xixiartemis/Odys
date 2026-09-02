@@ -32,6 +32,15 @@ class RunStatus(str, Enum):
     BLOCKED_PROVIDER = "BLOCKED_PROVIDER"
 
 
+class ExecutionHealth(str, Enum):
+    """Runtime health projection kept separate from durable RunStatus."""
+
+    ACTIVE = "ACTIVE"
+    IDLE = "IDLE"
+    STALLED = "STALLED"
+    UNKNOWN = "UNKNOWN"
+
+
 class AttemptStatus(str, Enum):
     """Lifecycle of a single Attempt inside a Run."""
 
