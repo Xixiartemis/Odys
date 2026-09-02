@@ -5,6 +5,7 @@ import re
 from pathlib import Path
 
 import pytest
+from click import unstyle
 from rich.console import Console
 from typer.testing import CliRunner
 
@@ -85,9 +86,10 @@ def test_run_requires_verification_command():
     result = runner.invoke(app, [
         "run", "goal", "--repo", str(DEMO_REPO),
         "--provider", "offline", "--yes",
-    ], terminal_width=240)
+    ])
+    semantic_output = " ".join(unstyle(result.output).split())
     assert result.exit_code != 0
-    assert "--verify" in result.output
+    assert "--verify" in semantic_output
 
 
 def test_run_validates_provider_before_execution(monkeypatch, tmp_path):

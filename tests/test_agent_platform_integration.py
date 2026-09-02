@@ -3,6 +3,7 @@ import json
 import sys
 from pathlib import Path
 
+from click import unstyle
 from typer.testing import CliRunner
 
 from lhas.agent.platform import OfflineAgentPlatform
@@ -121,12 +122,9 @@ def test_cli_mcp_list():
 
 
 def test_cli_chat_requires_explicit_offline(tmp_path):
-    result=runner.invoke(
-        app,
-        ["chat","hello","--repo",str(tmp_path),"--db",str(tmp_path/"db.sqlite")],
-        terminal_width=240,
-    )
-    assert result.exit_code!=0 and "requires --offline" in result.output
+    result=runner.invoke(app,["chat","hello","--repo",str(tmp_path),"--db",str(tmp_path/"db.sqlite")])
+    semantic_output=" ".join(unstyle(result.output).split())
+    assert result.exit_code!=0 and "requires --offline" in semantic_output
 
 
 def test_cli_offline_simple_chat(tmp_path):
