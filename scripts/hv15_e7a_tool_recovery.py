@@ -27,6 +27,7 @@ from lhas.task_service import create_task
 from lhas.tools.protocol import ToolRequest
 from lhas.workspace import CommandPolicy, CommandRule, RunWorkspaceManager, StagedWorkspace
 from lhas.workspace.tools import SafeCliTool, WorkspaceDiffTool, WorkspaceEditLinesTool, WorkspaceEditTool, WorkspaceReadTool
+from scripts.evidence_integrity import historical_canonical_sha256
 from scripts.hv12_longtask_recovery import FixturePytestValidator, _pytest
 from scripts.hv13_longtask_recovery import _task_objective
 
@@ -217,7 +218,10 @@ def run_evaluation(output_path: Path | None = None) -> dict[str,Any]:
         e7a=asyncio.run(_scenario(base / "e7a",safe_normalization=True))
     fixture_after=_tree_hash(FIXTURE_ROOT)
     baseline_metrics=baseline["metrics"]; e7a_metrics=e7a["metrics"]
-    canonical={name:hashlib.sha256((REPO_ROOT / "evals" / "runs" / name).read_bytes()).hexdigest() for name in CANONICAL_HASHES}
+    canonical={
+        name:historical_canonical_sha256(REPO_ROOT / "evals" / "runs" / name)
+        for name in CANONICAL_HASHES
+    }
     canonical_unchanged=canonical == CANONICAL_HASHES
     checks={
         "initial_fixture_tests_fail":initial["status"] == "FAIL",

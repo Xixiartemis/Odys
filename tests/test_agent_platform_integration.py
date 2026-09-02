@@ -121,7 +121,11 @@ def test_cli_mcp_list():
 
 
 def test_cli_chat_requires_explicit_offline(tmp_path):
-    result=runner.invoke(app,["chat","hello","--repo",str(tmp_path),"--db",str(tmp_path/"db.sqlite")])
+    result=runner.invoke(
+        app,
+        ["chat","hello","--repo",str(tmp_path),"--db",str(tmp_path/"db.sqlite")],
+        terminal_width=240,
+    )
     assert result.exit_code!=0 and "requires --offline" in result.output
 
 

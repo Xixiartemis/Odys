@@ -1,9 +1,9 @@
-import hashlib
 from pathlib import Path
 
 import pytest
 
 from scripts import hv15_e7a_tool_recovery as e7a
+from scripts.evidence_integrity import historical_canonical_sha256
 
 
 @pytest.fixture(scope="module")
@@ -54,4 +54,4 @@ def test_e7a_dry_preserves_fixture_and_canonical_artifacts(dry_result):
     assert dry_result["checks"]["canonical_artifacts_unchanged"] is True
     for name,expected in e7a.CANONICAL_HASHES.items():
         path=e7a.REPO_ROOT / "evals" / "runs" / name
-        assert hashlib.sha256(path.read_bytes()).hexdigest() == expected
+        assert historical_canonical_sha256(path) == expected

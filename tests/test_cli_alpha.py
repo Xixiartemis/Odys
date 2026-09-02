@@ -14,6 +14,7 @@ from lhas.cli_runtime import ProductRuntime, inspect_run
 from lhas.cli_ui import project_view_state, render_dashboard, should_use_rich
 from lhas.persistence.repositories import AttemptRepository, WorkspaceSessionBindingRepository
 from lhas.resume import CrashPoint
+from scripts.evidence_integrity import historical_canonical_sha256
 
 
 runner = CliRunner()
@@ -84,7 +85,7 @@ def test_run_requires_verification_command():
     result = runner.invoke(app, [
         "run", "goal", "--repo", str(DEMO_REPO),
         "--provider", "offline", "--yes",
-    ])
+    ], terminal_width=240)
     assert result.exit_code != 0
     assert "--verify" in result.output
 
@@ -231,11 +232,22 @@ def test_resume_running_attempt_reuses_durable_workspace(tmp_path):
     assert _tree_hash(DEMO_REPO) == source_before
 
 
-def test_historical_canonical_artifacts_are_byte_identical():
+def test_historical_canonical_artifacts_match_frozen_authority_digests():
     expected = {
         "evals/runs/HV12-LIVE-001.json": "144985bc68dbc2d3e8ecbde669c7f14d28adb4d8c3a693668b4b5acaa1603af9",
         "evals/runs/HV13-LIVE-001.json": "3e6ecf1b718d2e8f0a292fa4cf8f1d2d71c455128f3d0a23fabad81079840bb5",
         "evals/runs/HV13-LIVE-001.claim.json": "67b8977da846e78cc933c3893ecbc4851b870c8620de00ac222205b26a21cc03",
     }
     for relative, digest in expected.items():
-        assert hashlib.sha256((REPO_ROOT / relative).read_bytes()).hexdigest() == digest
+        assert historical_canonical_sha256(REPO_ROOT / relative) == digest
+
+
+def test_historical_canonical_hash_is_checkout_eol_independent(tmp_path):
+    lf_path = tmp_path / "lf.json"
+    crlf_path = tmp_path / "crlf.json"
+    lf_path.write_bytes(b'{\n  "status": "FAIL"\n}\n')
+    crlf_bytes = b'{\r\n  "status": "FAIL"\r\n}\r\n'
+    crlf_path.write_bytes(crlf_bytes)
+    expected = hashlib.sha256(crlf_bytes).hexdigest()
+    assert historical_canonical_sha256(lf_path) == expected
+    assert historical_canonical_sha256(crlf_path) == expected
