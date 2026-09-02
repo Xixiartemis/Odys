@@ -1,5 +1,13 @@
 # Planner and Tool Foundation (Phase D)
 
+Status: **Historical / Superseded as product direction**
+
+Canonical architecture: `docs/ARCHITECTURE_FREEZE.md`
+
+Superseded by: `docs/01_ARCHITECTURE.md` and `docs/PRODUCT_DIRECTION.md`
+
+This file remains the implementation record for its milestone. Current ownership distinguishes Odys-owned macro planning from agent-owned micro-planning.
+
 Phase D adds provider-neutral `Goal -> Plan -> PlanStep -> Capability -> Tool` contracts. `DeterministicPlanner` only constructs an allow-listed linear plan; it never executes tools or decides completion. `ToolRegistry` resolves explicit capabilities and rejects unknown names. `PlanExecutionService` persists Goal/Plan/PlanStep, bridges each step to the existing Task/Run/Attempt runtime, and records replayable tool request/result/error/usage payloads in events.
 
 Each completed step persists its output and passes it forward as `Step Output -> Execution Context -> Next Step`; declared `PlanStep.inputs` remain unchanged. Canonical runtime context is `steps[step_id]` with capability, output, artifacts, and usage. Runtime metadata reads `lhas.HARNESS_VERSION` (currently HV-0.4). A gated step can resume only after an explicit step-scoped approval and keeps the same Plan id.

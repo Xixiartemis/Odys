@@ -1,5 +1,9 @@
 # Odys / Hermes boundary
 
+Status: **Compatibility and provenance reference**
+
+Canonical product ownership is defined in `docs/01_ARCHITECTURE.md`. Hermes is architectural inspiration, not a runtime dependency or a product Odys intends to clone.
+
 ## Authoritative Odys control plane
 
 The following remain Odys-native and authoritative: Goal, Plan/TaskGraph,

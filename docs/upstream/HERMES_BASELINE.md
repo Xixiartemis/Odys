@@ -1,5 +1,7 @@
 # Hermes research baseline
 
+Status: **Historical upstream research reference.** Preserve this evidence without reading it as a superiority claim or current product roadmap.
+
 Odys Agent Platform Foundation was informed by a local, repository-external
 checkout of:
 

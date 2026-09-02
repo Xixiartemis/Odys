@@ -1,5 +1,7 @@
 # Task: LHAS-PHASE-A-CORE-01
 
+Status note: **Historical completed task.** Current product direction is `docs/PRODUCT_DIRECTION.md`; terminology below is preserved as implementation history.
+
 - **Task ID:** LHAS-PHASE-A-CORE-01
 - **Phase:** A — Core Runtime
 - **Status:** Done (2026-08-18, Stage 0 PASS, EXP-20260818-RUNTIME-001)

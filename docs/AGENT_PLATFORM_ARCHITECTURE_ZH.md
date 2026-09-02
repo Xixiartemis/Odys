@@ -1,5 +1,9 @@
 # Odys Agent Platform / Agent OS Foundation 架构
 
+Status: **SUPERSEDED as architecture authority / Historical implementation snapshot (HV-1.5)**
+
+Canonical architecture: `docs/ARCHITECTURE_FREEZE.md`. Current layer model: `docs/01_ARCHITECTURE.md`. Current product direction: `docs/PRODUCT_DIRECTION.md`. 本文保留 HV-1.5 已实现事实；其中 Planner 表示 Odys 所有的宏观规划，执行 Agent 仍拥有微观工具规划。
+
 本文描述 HV-1.5 已实现的平台骨架。核心原则是：Hermes 提供成熟设计启发，Odys 保留可恢复、可验证、可审计的长期任务控制平面。
 
 ## 1. 总体架构

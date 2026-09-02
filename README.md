@@ -1,40 +1,104 @@
-# LHAS — Long-Horizon Agent System
+# Odys — Reliable & Efficient Long-Horizon Agent Runtime
 
-LHAS 是一个面向长任务的可验证 Agent Runtime / Harness。通过外部状态管理、
-Context 构建、验证、失败分类、Recovery 和 Eval,让现有 Agent 在长任务中更可靠地
-完成目标。
+Odys is an adaptive agent runtime for reliably completing long, complex tasks with verifiable outcomes and controlled execution cost.
 
-完整规范见 `docs/`(00–14,共 15 份文档)。
+> Odys is a reliable and efficient runtime for long-horizon AI agents. It combines a minimal model–tool loop with extensible capabilities and progressively activates validation, checkpointing, recovery, replanning, and durable workflow execution only when a task requires them. Its optimization target is not minimum raw token usage, but low cost per verified completion.
 
-## 快速开始
+Odys combines five logical architectural layers:
+
+```text
+Product / Interface
+        ↓
+Capability Layer
+        ↓
+Minimal Agent Runtime
+        ↓
+Verified Workflow Runtime
+        ↓
+Adaptive Reliability Control Plane
+```
+
+- **Product / Interface** — CLI, API, TUI, and future integrations. Product surfaces are not the current differentiation.
+- **Capability Layer** — tools, MCP, Skills, memory, browser/search, code and shell execution, providers, sandboxing, and delegation capabilities. Capabilities are progressively loaded rather than injected into every model context.
+- **Minimal Agent Runtime** — `Context → Model → Tool → Observation → State → Next turn`. It owns model invocation, tool calling, context assembly, session state, compaction, and micro-planning.
+- **Verified Workflow Runtime** — typed workflow state, dependencies, preconditions, acceptance, evidence, verified transitions, selective repair, and macro replan.
+- **Adaptive Reliability Control Plane** — Task/Run/Attempt, CompletionAuthority, validation, failure provenance, recovery, checkpoint/resume, Runtime Truth, liveness, durable delegation, budgets, and cost accounting.
+
+## Ownership
+
+> Odys decides what outcome must be achieved next; the agent decides how to achieve it.
+
+Odys owns execution lifecycle, macro workflow decomposition, acceptance criteria, and completion authority. The executing agent owns micro-planning such as reading files, searching symbols, running commands, editing code, and rerunning tests. Odys does not centrally plan every tool call.
+
+The historical Outer Runtime / Inner Agent architecture remains a compatibility boundary during migration, but it is not the desired final ownership model. Capabilities do not own a competing long-horizon runtime.
+
+## Adaptive Harness
+
+Every task should use the cheapest sufficient reliability level:
+
+| Level | Mode | Runtime contract |
+| --- | --- | --- |
+| 0 | **FAST** | Minimal loop + Runtime Truth + lightweight events/budget |
+| 1 | **GUARDED** | FAST + completion claim + Validator / CompletionAuthority |
+| 2 | **DURABLE** | Macro plan + workflow + checkpoint + recovery + replan + liveness + durable state |
+| 3 | **MULTI_AGENT** | DURABLE + durable child lifecycle + dependency scheduling + failure propagation |
+
+The full reliability control plane is not activated by default. A validator-accepted GUARDED task finishes immediately; stronger recovery activates only when evidence requires it.
+
+## Capability strategy
+
+Capabilities are added according to benchmark and user requirements, not to clone another assistant product:
+
+1. P0 — read, write, edit, shell/bash
+2. P1 — generic provider abstraction and MCP
+3. P2 — Skills with progressive disclosure
+4. P3 — context compaction and retrieval
+5. P4 — durable memory
+6. P5 — delegation
+7. P6 — browser, web, and search
+
+Telegram, Discord, WhatsApp, avatars, consumer-chat UX, desktop-assistant UX, and a large gateway ecosystem are deferred unless a measured task requires them.
+
+## Context and efficiency
+
+> Durable State != Prompt State
+
+Odys persists rich workflow, event, memory, and recovery state, then selects only relevant working context for the model. Entire conversations, event histories, workflows, Skills, tools, memories, and failure histories must not be injected on every turn.
+
+The primary success metric is **Verified Completion Rate**. The primary efficiency metric is **Cost per Verified Completion**:
+
+```text
+total execution cost / validator-accepted tasks
+```
+
+Token counts, model/tool calls, dead-end and recovery turns, human intervention, wall time, and provider cost are tracked when available. Missing measurements remain `NOT_MEASURED`.
+
+## Benchmark philosophy
+
+Future paired comparisons target Pi, Hermes, and Odys using—where technically possible—the same model, task, repository, capabilities, validator, and similar budget. The research question is whether adaptive reliability improves verified long-horizon completion while keeping cost per verified completion close to lightweight runtimes. Odys does not claim superiority without paired live evidence.
+
+Pi informs minimal loops, clean layering, low context overhead, progressive capabilities, and model autonomy. Hermes informs Skills, Memory, MCP, tools, browser/web, providers, delegation, and assistant capability ecosystems. They are architectural inspiration, not runtime dependencies. Odys explicitly makes CompletionAuthority, execution-state recovery, Runtime Truth, liveness, durable delegation, macro workflow replan, and adaptive reliability first-class runtime concerns.
+
+## Current status and claim boundary
+
+Odys currently has a Native Agent Kernel; durable Task/Run/Attempt state; CompletionAuthority and validation; failure classification and recovery; and Runtime Truth and liveness mechanisms. It is building toward adaptive reliable long-horizon execution.
+
+It is not yet claimed to outperform Pi or Hermes, solve arbitrary long-horizon workflows, be production-ready, or be token-optimal.
+
+The immediate gate is the Basic Native Vertical Slice:
+
+```text
+Model → Tool → Observation → More Turns → Completion Claim → Validator → ACCEPTED
+```
+
+> Benchmark-driven development begins after the basic Native vertical slice. New mechanisms should normally start from a reproducible task or failure, establish baseline evidence, state a mechanism hypothesis, add deterministic regression coverage, and then run a paired live experiment.
+
+## Quick start
 
 ```bash
 uv sync --extra dev
 uv run lhas init-db
-uv run lhas stage0          # Phase A Stage 0 实验套件(全部 Mock)
-uv run pytest               # 全部测试
+uv run pytest
 ```
 
-## 目录结构
-
-```
-docs/            项目规范(00–14)+ ADR(docs/adr/)
-src/lhas/        LHAS 核心实现
-tests/           pytest 测试
-tasks/           开发任务 Spec(LHAS-PHASE-A-CORE-01 等)
-experiments/     实验记录(EXP-*,只新增不覆盖)
-benchmarks/      固定 Benchmark Dataset(如 job-v0.1)
-data/            运行数据(SQLite + 日志,gitignored)
-```
-
-## 阶段状态
-
-- Phase A — Core Runtime(Task/Run/Attempt/Event + SQLite + MockExecutor + Orchestrator):✅ 完成,EXP-20260818-RUNTIME-001
-- Phase B — Validation / Recovery:✅ 完成,EXP-20260818-RUNTIME-002
-- Phase C — Job Benchmark:C0(数据集)/ C1(Ground Truth)/ C2(Evaluator)/ C3(AgentExecutor)进行中
-- 后续阶段见 `docs/14_ROADMAP.md`
-
-## 实验纪律
-
-- 正式 Eval 只在已 commit 的基线上运行。
-- 每个实验记录绑定 `git_commit`;历史实验只新增、不覆盖。
+Canonical direction and architecture are documented in [`docs/ARCHITECTURE_FREEZE.md`](docs/ARCHITECTURE_FREEZE.md), [`docs/PRODUCT_DIRECTION.md`](docs/PRODUCT_DIRECTION.md), [`docs/01_ARCHITECTURE.md`](docs/01_ARCHITECTURE.md), and [`docs/14_ROADMAP.md`](docs/14_ROADMAP.md). Historical experiments and task records remain preserved under `docs/evidence/`, `experiments/`, and `tasks/`.

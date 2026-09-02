@@ -1,5 +1,7 @@
 # Task: LHAS-PHASE-B-VALIDATION-01
 
+Status note: **Historical implementation task.** Current product direction is `docs/PRODUCT_DIRECTION.md`; terminology below is preserved as implementation history.
+
 - **Task ID:** LHAS-PHASE-B-VALIDATION-01
 - **Phase:** B — Validation / Failure / Recovery
 - **Status:** In progress

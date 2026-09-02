@@ -1,5 +1,13 @@
 # LHAS 项目总纲（Project Charter）
 
+Status: **Historical / Superseded**
+
+Canonical architecture: `docs/ARCHITECTURE_FREEZE.md`
+
+Superseded by: `docs/PRODUCT_DIRECTION.md` and `docs/01_ARCHITECTURE.md`
+
+This file preserves the original V0 hypothesis and must not be read as the current Odys product definition.
+
 ## 项目定位
 LHAS（Long-Horizon Agent System）是一个面向长任务的可验证 Agent Runtime / Harness。
 

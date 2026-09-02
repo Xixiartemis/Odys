@@ -1,5 +1,7 @@
 # Hermes → Odys architecture map
 
+Status: **Historical upstream research reference.** Hermes is architectural inspiration, not an Odys runtime dependency; canonical ownership is defined in `docs/01_ARCHITECTURE.md`.
+
 Baseline: NousResearch/hermes-agent at
 `3f315e46fede84ed4e6c8cfdbd00a13618e68986` (MIT).
 

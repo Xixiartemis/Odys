@@ -1,5 +1,7 @@
 # LHAS 领域模型
 
+Status: **Compatibility reference.** Canonical product ownership and layer boundaries are defined in `docs/01_ARCHITECTURE.md`; the durable Task/Run/Attempt model below remains authoritative.
+
 ## 三层执行模型
 ```text
 Project
