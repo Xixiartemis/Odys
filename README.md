@@ -1,104 +1,353 @@
-# Odys — Reliable & Efficient Long-Horizon Agent Runtime
+<p align="center">
+  <img src="./docs/assets/odys-logo.png" width="170" alt="Odys logo">
+</p>
 
-Odys is an adaptive agent runtime for reliably completing long, complex tasks with verifiable outcomes and controlled execution cost.
+<h1 align="center">Odys</h1>
 
-> Odys is a reliable and efficient runtime for long-horizon AI agents. It combines a minimal model–tool loop with extensible capabilities and progressively activates validation, checkpointing, recovery, replanning, and durable workflow execution only when a task requires them. Its optimization target is not minimum raw token usage, but low cost per verified completion.
+<p align="center">
+  <strong>面向长时任务 AI Agent 的可靠执行运行时</strong>
+</p>
 
-Odys combines five logical architectural layers:
+<p align="center">
+  <em>Reliable execution for long-running AI agents.</em>
+</p>
+
+<p align="center">
+  不只让 Agent “做事”，更让它能够证明任务真的完成了。
+</p>
+
+<p align="center">
+  <a href="https://github.com/Xixiartemis/Odys/actions">
+    <img src="https://img.shields.io/github/actions/workflow/status/Xixiartemis/Odys/test.yml?branch=main&style=flat-square" alt="CI">
+  </a>
+  <img src="https://img.shields.io/badge/python-%3E%3D3.11-blue?style=flat-square" alt="Python >= 3.11">
+  <img src="https://img.shields.io/badge/status-experimental-orange?style=flat-square" alt="Experimental status">
+</p>
+
+<p align="center">
+  <a href="#快速开始">快速开始</a> ·
+  <a href="#为什么是-odys">为什么是 Odys</a> ·
+  <a href="#-工作原理">工作原理</a> ·
+  <a href="#-架构与归属">架构</a> ·
+  <a href="#-路线图">路线图</a>
+</p>
+
+---
+
+## Odys 是什么？
+
+很多 Agent Runtime 关注模型下一步应该做什么。Odys 关注的是另一件事：
+
+> 一个长时间运行的 Agent，如何证明自己真的完成了任务？失败之后，如何保留根因并可靠恢复？
+
+Odys 是一个面向 **long-horizon tasks** 的实验性 Agent Runtime，研究重点包括：
+
+- Verified Completion
+- Durable Task / Run / Attempt 状态
+- Failure Provenance & Recovery
+- Checkpoint / Resume
+- Runtime Truth
+- Adaptive Reliability
+
+核心原则很简单：
 
 ```text
-Product / Interface
+Agent 说 “done”
+        ≠
+任务已经被验证
+```
+
+Odys 将执行和完成判定分开：
+
+```text
+Agent 执行 → Completion Claim → 独立 Validator → Verified Outcome
+```
+
+North Star：用尽可能少的可靠性机制，换取一个真正被验证过的结果。
+
+## 为什么是 Odys？
+
+长时 Agent 的可靠性问题不只是 Prompt 问题。进程中断、重复副作用、过期计划、失败根因丢失、Runtime Truth 漂移，以及“进程还活着但没有进展”，都属于 Runtime Semantics。
+
+| 问题 | Odys 机制 |
+| --- | --- |
+| Agent 过早声称完成 | CompletionAuthority + Validator |
+| 长任务中断后丢失状态 | Durable Task / Run / Attempt + Checkpoint / Resume |
+| 失败后继续执行却丢失根因 | Failure Classification + Failure Provenance + Recovery |
+| 计划与现实不一致 | Selective Repair + Macro Replan |
+| Provider / Model 身份漂移 | Runtime Truth |
+| 进程存在但没有有效进展 | Execution Liveness |
+| 简单任务被重型 Harness 拖慢 | Adaptive Reliability |
+
+Odys 决定下一步必须达成什么“可验证结果”；Agent 自己决定怎么做到。
+
+## 快速开始
+
+### 环境要求
+
+- Python 3.11+
+- Git
+- [`uv`](https://docs.astral.sh/uv/)
+
+安装完整开发依赖：
+
+```bash
+uv sync --extra dev --extra live --extra agent
+```
+
+运行确定性测试：
+
+```bash
+uv run pytest
+```
+
+初始化数据库：
+
+```bash
+uv run odys init-db
+```
+
+### 运行 Native Agent 任务
+
+```bash
+uv run odys run \
+  --repo /path/to/project \
+  --kernel native \
+  --verify "pytest -q" \
+  "Fix the failing tests and verify the implementation."
+```
+
+Windows PowerShell：
+
+```powershell
+uv run odys run `
+  --repo D:\path\to\project `
+  --kernel native `
+  --verify "pytest -q" `
+  "Fix the failing tests and verify the implementation."
+```
+
+检查或恢复持久化 Run：
+
+```bash
+uv run odys inspect <RUN_ID>
+uv run odys resume <RUN_ID>
+```
+
+`--verify` 指定的是权威验证命令。Agent 自己执行测试产生的是 execution evidence，不等同于 Validator 接受的 acceptance evidence。
+
+## 工作原理
+
+最小执行闭环如下：
+
+```text
+Goal
+ │
+ ▼
+Native Agent Runtime
+   Model → Tool → Observation → State → Next Turn
+ │
+ └── Completion Claim
+          │
+          ▼
+   CompletionAuthority
+          │
+          ▼
+   Authoritative Validator
+      ├── PASS → VERIFIED
+      └── FAIL → CLASSIFY → RECOVER
+```
+
+Agent 负责微观执行：读文件、搜索符号、编辑代码、执行命令、阅读结果、决定下一步 Tool Call。Odys 负责 Task、Run、Attempt、Validation、Failure、Recovery、Checkpoint 和 Runtime Truth 等运行时语义。
+
+## 架构与归属
+
+Odys 遵循冻结的五层架构：
+
+```text
+Product Surfaces
         ↓
-Capability Layer
+Capability Runtime
         ↓
-Minimal Agent Runtime
+Native Minimal Agent Runtime
         ↓
 Verified Workflow Runtime
         ↓
 Adaptive Reliability Control Plane
 ```
 
-- **Product / Interface** — CLI, API, TUI, and future integrations. Product surfaces are not the current differentiation.
-- **Capability Layer** — tools, MCP, Skills, memory, browser/search, code and shell execution, providers, sandboxing, and delegation capabilities. Capabilities are progressively loaded rather than injected into every model context.
-- **Minimal Agent Runtime** — `Context → Model → Tool → Observation → State → Next turn`. It owns model invocation, tool calling, context assembly, session state, compaction, and micro-planning.
-- **Verified Workflow Runtime** — typed workflow state, dependencies, preconditions, acceptance, evidence, verified transitions, selective repair, and macro replan.
-- **Adaptive Reliability Control Plane** — Task/Run/Attempt, CompletionAuthority, validation, failure provenance, recovery, checkpoint/resume, Runtime Truth, liveness, durable delegation, budgets, and cost accounting.
+架构归属边界：
 
-## Ownership
+- **Product Surfaces**：CLI、API、TUI 及未来产品入口。
+- **Capability Runtime**：Tools、MCP、Skills、Retrieval、Memory、Browser、Shell、Sandbox 等能力接入。
+- **Native Minimal Agent Runtime**：`Context → Model → Tool → Observation → State`。
+- **Verified Workflow Runtime**：TaskGraph、依赖、前置条件、验收、证据、Repair 和 Replan。
+- **Adaptive Reliability Control Plane**：Task / Run / Attempt、CompletionAuthority、Validation、Failure、Recovery、Checkpoint、Runtime Truth 和 Liveness。
 
-> Odys decides what outcome must be achieved next; the agent decides how to achieve it.
+Odys owns execution semantics。成熟开源项目提供 primitives、protocols、infrastructure 和 capability implementations，不拥有竞争性的 Odys lifecycle。
 
-Odys owns execution lifecycle, macro workflow decomposition, acceptance criteria, and completion authority. The executing agent owns micro-planning such as reading files, searching symbols, running commands, editing code, and rerunning tests. Odys does not centrally plan every tool call.
+更多冻结决策见 [`docs/ARCHITECTURE_FREEZE.md`](docs/ARCHITECTURE_FREEZE.md) 和 [`docs/01_ARCHITECTURE.md`](docs/01_ARCHITECTURE.md)。
 
-The historical Outer Runtime / Inner Agent architecture remains a compatibility boundary during migration, but it is not the desired final ownership model. Capabilities do not own a competing long-horizon runtime.
+## Adaptive Reliability
 
-## Adaptive Harness
+可靠性机制按任务需要逐步启用：
 
-Every task should use the cheapest sufficient reliability level:
-
-| Level | Mode | Runtime contract |
+| Level | 模式 | Runtime Contract |
 | --- | --- | --- |
-| 0 | **FAST** | Minimal loop + Runtime Truth + lightweight events/budget |
-| 1 | **GUARDED** | FAST + completion claim + Validator / CompletionAuthority |
-| 2 | **DURABLE** | Macro plan + workflow + checkpoint + recovery + replan + liveness + durable state |
-| 3 | **MULTI_AGENT** | DURABLE + durable child lifecycle + dependency scheduling + failure propagation |
+| 0 | **FAST** | Native Model/Tool Loop + Runtime Truth |
+| 1 | **GUARDED** | FAST + CompletionAuthority + Validator |
+| 2 | **DURABLE** | GUARDED + Workflow + Checkpoint + Recovery + Replan |
+| 3 | **MULTI_AGENT** | DURABLE + Durable Delegation + Dependency Scheduling |
 
-The full reliability control plane is not activated by default. A validator-accepted GUARDED task finishes immediately; stronger recovery activates only when evidence requires it.
+目标不是机制越多越可靠，而是 **Minimum Sufficient Reliability**。
 
-## Capability strategy
+## 当前状态与能力边界
 
-Capabilities are added according to benchmark and user requirements, not to clone another assistant product:
+当前代码库已经具备这些基础能力：
 
-1. P0 — read, write, edit, shell/bash
-2. P1 — generic provider abstraction and MCP
-3. P2 — Skills with progressive disclosure
-4. P3 — context compaction and retrieval
-5. P4 — durable memory
-6. P5 — delegation
-7. P6 — browser, web, and search
+- Native Agent Kernel 与 real model/tool loop foundation
+- Durable Task / Run / Attempt
+- Tool execution 与 durable observations
+- CompletionAuthority 与 deterministic validation
+- Failure Classification / Recovery
+- Checkpoint / Resume foundations
+- Runtime Truth
+- Execution Health / Liveness
 
-Telegram, Discord, WhatsApp, avatars, consumer-chat UX, desktop-assistant UX, and a large gateway ecosystem are deferred unless a measured task requires them.
+Odys 仍处于实验性开发阶段，正在研究 long-horizon reliable execution。当前不宣称：
 
-## Context and efficiency
+- Production Ready
+- 能可靠完成任意 long-horizon task
+- 优于 Pi、Hermes 或 LangGraph
+- Token Optimal
+- MCP、Memory、RAG、Browser 或 Multi-Agent workflow 已全部完成
 
-> Durable State != Prompt State
+当前重点是：**先证明 Runtime Invariants，再扩展 Capability Surface。**
 
-Odys persists rich workflow, event, memory, and recovery state, then selects only relevant working context for the model. Entire conversations, event histories, workflows, Skills, tools, memories, and failure histories must not be injected on every turn.
+## Failure & Recovery
 
-The primary success metric is **Verified Completion Rate**. The primary efficiency metric is **Cost per Verified Completion**:
-
-```text
-total execution cost / validator-accepted tasks
-```
-
-Token counts, model/tool calls, dead-end and recovery turns, human intervention, wall time, and provider cost are tracked when available. Missing measurements remain `NOT_MEASURED`.
-
-## Benchmark philosophy
-
-Future paired comparisons target Pi, Hermes, and Odys using—where technically possible—the same model, task, repository, capabilities, validator, and similar budget. The research question is whether adaptive reliability improves verified long-horizon completion while keeping cost per verified completion close to lightweight runtimes. Odys does not claim superiority without paired live evidence.
-
-Pi informs minimal loops, clean layering, low context overhead, progressive capabilities, and model autonomy. Hermes informs Skills, Memory, MCP, tools, browser/web, providers, delegation, and assistant capability ecosystems. They are architectural inspiration, not runtime dependencies. Odys explicitly makes CompletionAuthority, execution-state recovery, Runtime Truth, liveness, durable delegation, macro workflow replan, and adaptive reliability first-class runtime concerns.
-
-## Current status and claim boundary
-
-Odys currently has a Native Agent Kernel; durable Task/Run/Attempt state; CompletionAuthority and validation; failure classification and recovery; and Runtime Truth and liveness mechanisms. It is building toward adaptive reliable long-horizon execution.
-
-It is not yet claimed to outperform Pi or Hermes, solve arbitrary long-horizon workflows, be production-ready, or be token-optimal.
-
-The immediate gate is the Basic Native Vertical Slice:
+Failure 是一等 Runtime State。理想的因果链是：
 
 ```text
-Model → Tool → Observation → More Turns → Completion Claim → Validator → ACCEPTED
+Executor Terminal Reason
+        ↓
+Attempt.error_type
+        ↓
+FailureReport
+        ↓
+RecoveryPolicy
+        ↓
+Recovery Action
 ```
 
-> Benchmark-driven development begins after the basic Native vertical slice. New mechanisms should normally start from a reproducible task or failure, establish baseline evidence, state a mechanism hypothesis, add deterministic regression coverage, and then run a paired live experiment.
+具体根因不能在没有明确映射的情况下静默折叠成无关的通用类型。例如 `BUDGET_EXHAUSTED` 不应被误报为 `EMPTY_RESULT`。否则恢复决策、统计和 benchmark 结论都会失真。
 
-## Quick start
+## Capability Strategy
+
+Odys 采用 **Reuse First**：底层协议、基础设施和能力实现优先复用成熟生态，Odys 自己聚焦 Execution Lifecycle、Verification、Recovery 和 Runtime Truth。
+
+以下是规划方向，不代表当前全部已实现：
+
+- Official MCP SDK
+- SKILL.md-style progressive Skills
+- mature Retrieval / RAG infrastructure
+- pluggable Memory Provider
+- existing Browser automation runtime
+- external Sandbox backend
+- OpenTelemetry-compatible telemetry
+
+## Engineering Philosophy
+
+Odys 的工程闭环是：
+
+```text
+Reproducible Failure
+        ↓
+Baseline Evidence
+        ↓
+Mechanism Hypothesis
+        ↓
+Minimal Implementation
+        ↓
+Deterministic Regression
+        ↓
+Live Experiment
+        ↓
+Measured Result
+```
+
+两条重要边界：
+
+> Green tests != invariant proven.
+
+> Live task finished != verified success.
+
+没有真实数据的指标保持 `NOT_MEASURED`，而不是估算。
+
+## 路线图
+
+```text
+Phase 0  Architecture Freeze
+   ↓
+Phase 1  Basic Native Vertical Slice
+   ↓
+Phase 2  Minimum Capability Parity
+   ↓
+Phase 3  Verified Workflow V1
+   ↓
+Phase 4  Controlled Ablation
+   ↓
+Phase 5  Adaptive Reliability
+   ↓
+Phase 6  Capability Expansion
+   ↓
+Phase 7  Productionization
+```
+
+详细路线见 [`docs/14_ROADMAP.md`](docs/14_ROADMAP.md)。产品与研究方向见 [`docs/PRODUCT_DIRECTION.md`](docs/PRODUCT_DIRECTION.md)。
+
+## 开发与文档
 
 ```bash
-uv sync --extra dev
-uv run lhas init-db
+uv sync --extra dev --extra live --extra agent
 uv run pytest
+uv run python -m pip check
 ```
 
-Canonical direction and architecture are documented in [`docs/ARCHITECTURE_FREEZE.md`](docs/ARCHITECTURE_FREEZE.md), [`docs/PRODUCT_DIRECTION.md`](docs/PRODUCT_DIRECTION.md), [`docs/01_ARCHITECTURE.md`](docs/01_ARCHITECTURE.md), and [`docs/14_ROADMAP.md`](docs/14_ROADMAP.md). Historical experiments and task records remain preserved under `docs/evidence/`, `experiments/`, and `tasks/`.
+核心文档：
+
+- [`docs/ARCHITECTURE_FREEZE.md`](docs/ARCHITECTURE_FREEZE.md) — 冻结架构决策
+- [`docs/01_ARCHITECTURE.md`](docs/01_ARCHITECTURE.md) — Runtime 架构
+- [`docs/09_EVAL_PROTOCOL.md`](docs/09_EVAL_PROTOCOL.md) — 实验与验证协议
+- [`docs/14_ROADMAP.md`](docs/14_ROADMAP.md) — Roadmap
+- [`AGENTS.md`](AGENTS.md) — Coding Agent 开发约束
+
+项目结构：
+
+```text
+Odys/
+├── src/lhas/              # Runtime implementation
+├── tests/                 # Deterministic regression suite
+├── docs/                  # Architecture / specifications / evidence
+├── experiments/           # Experimental records
+├── evals/                 # Evaluation records and fixtures
+├── tasks/                 # Task specifications
+├── scripts/               # Validation / experiment tooling
+└── AGENTS.md              # Coding-agent engineering policy
+```
+
+历史 evidence 尽量保留原始事实，不为了适配新术语而重写。
+
+---
+
+<p align="center">
+  <img src="./docs/assets/odys-logo.png" width="72" alt="Odys">
+</p>
+
+<p align="center">
+  <strong>让 Agent 不只是完成任务，而是能够证明它完成了。</strong>
+</p>
+
+<p align="center">
+  <em>Build agents that can prove they finished.</em>
+</p>
