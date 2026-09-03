@@ -99,7 +99,10 @@ class RuleFailureClassifier:
             return self._report(attempt, FailureType.UNKNOWN_PROVIDER_FAILURE, FailureClass.EXECUTION, evidence,
                                 "provider failed without a recognizable provider-specific signature", 0.4,
                                 "retry within budget; inspect provider evidence before changing route")
-        if "BUDGET_EXHAUSTED" in error_text:
+        structured_error_types = {
+            value for value in (attempt.error_type, result.error_type if result else None) if value
+        }
+        if FailureType.BUDGET_EXHAUSTED.value in structured_error_types:
             return self._report(
                 attempt, FailureType.BUDGET_EXHAUSTED, FailureClass.EXECUTION, evidence,
                 "native executor exhausted its bounded turn or tool-call budget", 1.0,

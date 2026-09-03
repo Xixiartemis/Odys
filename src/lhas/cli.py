@@ -307,7 +307,7 @@ def _print_product_summary(data: dict) -> None:
     console.print(f"Changed files: {workspace['changed_file_count']}")
     console.print(f"Validation status: {validation['status'] if validation else 'UNKNOWN'}")
     console.print(f"Validation command: {json.dumps(data['verification_command'], ensure_ascii=False)}")
-    exit_code = (validation or {}).get("exit_code")
+    exit_code = (validation or {}).get("evidence", {}).get("exit_code")
     console.print(f"Validation exit code: {exit_code if exit_code is not None else 'N/A'}")
     console.print(f"Duration: {run['duration_ms']} ms")
     _print_runtime_truth(run)

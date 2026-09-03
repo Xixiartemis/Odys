@@ -110,17 +110,6 @@ class DefaultRecoveryPolicy:
                 attempt_number, attempt_number + 1,
                 added_context={"failure_evidence": failure_report.evidence},
             )
-        if ft == FailureType.BUDGET_EXHAUSTED:
-            return self._action(
-                attempt, RecoveryActionType.RETRY_WITH_FAILURE_CONTEXT,
-                "native execution budget exhausted; preserve the causal failure evidence",
-                attempt_number, attempt_number + 1,
-                added_context={
-                    "failure_evidence": failure_report.evidence,
-                    "failure_type": failure_report.failure_type.value,
-                    "suggested_recovery": failure_report.suggested_recovery,
-                },
-            )
 
         if attempt_number == 1:
             return self._action(
