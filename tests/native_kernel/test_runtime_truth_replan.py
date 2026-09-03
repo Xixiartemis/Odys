@@ -23,6 +23,7 @@ from lhas.native import (
 )
 from lhas.persistence.repositories import AttemptRepository, RunRepository
 from lhas.tools.registry import ToolRegistry
+from tests.helpers import PassingCommandValidator
 from lhas.tools.protocol import ToolResult, ToolResultStatus
 from lhas.validation import AlwaysPassValidator
 
@@ -86,7 +87,7 @@ def _kernel_with_runtime(db, provider, controller, factory):
         db=db,
         provider=provider,
         dispatcher=dispatcher,
-        completion_authority=CompletionAuthority(db=db, validator=AlwaysPassValidator()),
+        completion_authority=CompletionAuthority(db=db, validator=PassingCommandValidator()),
         runtime_target_controller=controller,
         provider_factory=factory,
     )
@@ -176,7 +177,7 @@ def test_provider_migration_resumes_same_attempt_on_new_provider(db, make_task):
     dispatcher = NativeToolDispatcher(db=db, registry=registry, allowed_capabilities={"workspace.edit"}, allowed_side_effect_capabilities={"workspace.edit"})
     kernel = NativeAgentKernel(
         db=db, provider=provider_a, dispatcher=dispatcher,
-        completion_authority=CompletionAuthority(db=db, validator=AlwaysPassValidator()),
+        completion_authority=CompletionAuthority(db=db, validator=PassingCommandValidator()),
         runtime_target_controller=controller,
         provider_factory=lambda target: providers[target.composite_id],
     )
@@ -211,7 +212,7 @@ def test_native_turn_durably_records_configured_and_effective_targets(db, make_t
     attempt = AttemptRepository(db).create(Attempt(run_id=run.id, attempt_number=1, status="RUNNING"))
     provider = ScriptedProviderAdapter([ProviderResponse(content="done", completion_claim=True)], runtime_target=target)
     dispatcher = NativeToolDispatcher(db=db, registry=ToolRegistry(), allowed_capabilities=set(), allowed_side_effect_capabilities=set())
-    kernel = NativeAgentKernel(db=db, provider=provider, dispatcher=dispatcher, completion_authority=CompletionAuthority(db=db, validator=AlwaysPassValidator()))
+    kernel = NativeAgentKernel(db=db, provider=provider, dispatcher=dispatcher, completion_authority=CompletionAuthority(db=db, validator=PassingCommandValidator()))
     request = AgentRequest(agent_id="truth", role=AgentRole.WORKER, objective=task.objective,
         budget=AgentBudget(max_turns=2, max_tool_calls=1), metadata={"task_id": task.id, "run_id": run.id, "attempt_id": attempt.id,
         "configured_target": target.model_dump(mode="json")})

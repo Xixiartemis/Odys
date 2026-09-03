@@ -24,6 +24,7 @@ from lhas.native.persistence import (
     ValidationFailureRepository,
 )
 from lhas.persistence.event_store import EventStore
+from lhas.persistence.phaseb_repos import ValidationResultRepository
 from lhas.persistence.repositories import AttemptRepository, TaskRepository
 from lhas.validation import ValidationCheck, ValidationLevel, ValidationResult
 
@@ -34,12 +35,38 @@ def _bounded_evidence(value: Any, limit: int = 8_000) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)[:limit]
 
 
+def _structured_validation_evidence(validation: ValidationResult) -> dict[str, Any] | None:
+    if not isinstance(validation.evidence, str):
+        return None
+    try:
+        evidence = json.loads(validation.evidence)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    return evidence if isinstance(evidence, dict) else None
+
+
+def _has_authoritative_process_result(validation: ValidationResult) -> bool:
+    evidence = _structured_validation_evidence(validation)
+    exit_code = evidence.get("exit_code") if evidence is not None else None
+    command = evidence.get("command") if evidence is not None else None
+    return (
+        validation.passed
+        and type(exit_code) is int
+        and exit_code == 0
+        and evidence.get("timed_out") is False
+        and isinstance(command, list)
+        and bool(command)
+        and all(isinstance(item, str) and item for item in command)
+    )
+
+
 class CompletionAuthority:
     def __init__(self, *, db, validator, fault_injector: Any = None):
         self.db = db
         self.validator = validator
         self.fault_injector = fault_injector or NoOpNativeFaultInjector()
         self.candidates = CompletionCandidateRepository(db)
+        self.validations = ValidationResultRepository(db)
         self.failures = ValidationFailureRepository(db)
         self.replans = ReplanSignalRepository(db)
         self.events = EventStore(db)
@@ -89,14 +116,22 @@ class CompletionAuthority:
             raw={"completion_candidate_id": candidate.id, "source": candidate.source},
         )
         validation = await self.validator.validate(task=task, attempt=attempt, result=result)
+        self.validations.create(validation)
+        evidence = _structured_validation_evidence(validation)
+        validator_command = evidence.get("command") if evidence is not None else None
         candidate.validation = {
+            "attempt_id": candidate.attempt_id,
+            "run_id": candidate.run_id,
+            "validation_result_id": validation.id,
             "passed": bool(validation.passed),
             "level": str(validation.level),
             "checks": [check.model_dump(mode="json") for check in validation.checks][:50],
             "evidence": _bounded_evidence(validation.evidence),
             "duration_ms": validation.duration_ms,
         }
-        if validation.passed:
+        if isinstance(validator_command, list):
+            candidate.validation["validator_command"] = validator_command
+        if _has_authoritative_process_result(validation) and validation.attempt_id == attempt.id:
             candidate.status = CandidateStatus.ACCEPTED
             event = EventType.COMPLETION_CANDIDATE_ACCEPTED
         else:
@@ -131,14 +166,42 @@ class CompletionAuthority:
 
 
 class AcceptedCompletionValidator:
-    """Outer validator projection: only a durable ACCEPTED candidate passes."""
+    """Outer validator projection requiring the candidate's durable process result."""
 
     def __init__(self, db):
         self.candidates = CompletionCandidateRepository(db)
+        self.validations = ValidationResultRepository(db)
 
     async def validate(self, *, task, attempt, result) -> ValidationResult:
         candidate = self.candidates.latest_for_attempt(attempt.id)
-        passed = bool(candidate and candidate.status is CandidateStatus.ACCEPTED)
+        validation = None
+        validation_id = candidate.validation.get("validation_result_id") if candidate else None
+        if candidate and isinstance(validation_id, str):
+            validation = next(
+                (item for item in self.validations.list_for_attempt(attempt.id) if item.id == validation_id),
+                None,
+            )
+        evidence = _structured_validation_evidence(validation) if validation else None
+        command_matches = (
+            evidence is not None
+            and (
+                "validator_command" not in candidate.validation
+                or evidence.get("command") == candidate.validation.get("validator_command")
+            )
+        ) if candidate else False
+        passed = bool(
+            candidate
+            and candidate.status is CandidateStatus.ACCEPTED
+            and candidate.task_id == task.id
+            and candidate.run_id == attempt.run_id
+            and candidate.attempt_id == attempt.id
+            and candidate.validation.get("run_id") == attempt.run_id
+            and candidate.validation.get("attempt_id") == attempt.id
+            and validation is not None
+            and validation.attempt_id == attempt.id
+            and _has_authoritative_process_result(validation)
+            and command_matches
+        )
         return ValidationResult(
             attempt_id=attempt.id,
             passed=passed,
@@ -152,6 +215,8 @@ class AcceptedCompletionValidator:
                 "candidate_id": candidate.id if candidate else None,
                 "candidate_status": candidate.status.value if candidate else None,
                 "acceptance_authority": "CompletionAuthority",
+                "validation_result_id": validation.id if validation else None,
+                "validator_evidence": evidence if passed else None,
             }, sort_keys=True),
             duration_ms=0,
         )

@@ -1,4 +1,5 @@
 import asyncio
+import json
 
 from lhas.agent.models import AgentBudget, AgentRequest, AgentRole, AgentStatus
 from lhas.domain.models import Attempt, Run
@@ -12,7 +13,8 @@ from lhas.persistence.repositories import AttemptRepository, RunRepository
 from lhas.planning.models import CapabilitySpec
 from lhas.tools.protocol import ToolResult, ToolResultStatus
 from lhas.tools.registry import ToolRegistry
-from lhas.validation import AlwaysPassValidator, ValidationCheck, ValidationResult
+from tests.helpers import PassingCommandValidator
+from lhas.validation import ValidationCheck, ValidationResult
 
 
 class EchoTool:
@@ -45,7 +47,7 @@ class SequenceValidator:
             attempt_id=attempt.id,
             passed=passed,
             checks=[ValidationCheck(name="acceptance", passed=passed, detail=None if passed else "not yet")],
-            evidence="pass" if passed else "criterion missing",
+            evidence=json.dumps({"command": ["pytest", "-q"], "exit_code": 0 if passed else 1, "timed_out": False}),
         )
 
 
@@ -63,7 +65,7 @@ def _kernel_case(db, make_task, responses, *, validator=None, tool=None):
         allowed_capabilities=set(registry.list_capabilities()),
         allowed_side_effect_capabilities=set(),
     )
-    authority = CompletionAuthority(db=db, validator=validator or AlwaysPassValidator())
+    authority = CompletionAuthority(db=db, validator=validator or PassingCommandValidator())
     kernel = NativeAgentKernel(db=db, provider=provider, dispatcher=dispatcher, completion_authority=authority)
     request = AgentRequest(
         agent_id="native-test",

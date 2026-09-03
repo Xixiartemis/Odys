@@ -11,7 +11,7 @@ from lhas.planning.planner import DeterministicPlanner
 from lhas.planning.service import PlanExecutionService
 from lhas.tools.protocol import ToolResult, ToolResultStatus
 from lhas.tools.registry import ToolRegistry
-from lhas.validation import AlwaysPassValidator
+from tests.helpers import PassingCommandValidator
 
 
 class DeclaredCapability:
@@ -31,7 +31,7 @@ def test_goal_plan_taskgraph_active_node_flows_into_native_kernel(db, project):
             lambda context: (seen.append(context.sections["taskgraph"]) or ProviderResponse(content="node accepted", completion_claim=True)),
         ])
         dispatcher = NativeToolDispatcher(db=db, registry=registry, allowed_capabilities=set(), allowed_side_effect_capabilities=set())
-        kernel = NativeAgentKernel(db=db, provider=provider, dispatcher=dispatcher, completion_authority=CompletionAuthority(db=db, validator=AlwaysPassValidator()))
+        kernel = NativeAgentKernel(db=db, provider=provider, dispatcher=dispatcher, completion_authority=CompletionAuthority(db=db, validator=PassingCommandValidator()))
         return NativeAgentExecutor(kernel, allowed_capabilities=set(), allowed_side_effect_capabilities=set(), max_turns=2)
 
     goal = Goal(project_id=project.id, objective="complete canonical graph", success_criteria=["accepted"], allowed_capabilities=["native.work"])
