@@ -20,12 +20,12 @@ from lhas.native.persistence import ExecutionSnapshotRepository, ToolInvocationR
 from lhas.native.provider import OpenAIChatProviderAdapter, ScriptedProviderAdapter
 from lhas.native.runtime import RuntimeTargetController
 from lhas.native.tools import NativeToolDispatcher
+from tests.helpers import PassingCommandValidator
 from lhas.persistence.planning_repositories import PlanRepository
 from lhas.persistence.repositories import AttemptRepository, ProjectRepository, RunRepository, TaskRepository
 from lhas.planning.models import Goal, Plan, PlanStatus, PlanStep
 from lhas.planning.replan import MacroReplanService
 from lhas.tools.registry import ToolRegistry
-from lhas.validation import AlwaysPassValidator
 
 
 def _target(provider: str, endpoint: str, route: str) -> RuntimeTarget:
@@ -88,7 +88,7 @@ def test_route_target_mismatch_fails_before_candidate_install(monkeypatch, db):
             allowed_capabilities=set(),
             allowed_side_effect_capabilities=set(),
         ),
-        completion_authority=CompletionAuthority(db=db, validator=AlwaysPassValidator()),
+        completion_authority=CompletionAuthority(db=db, validator=PassingCommandValidator()),
         runtime_target_controller=controller,
         provider_factory=factory,
     )
@@ -114,7 +114,7 @@ def test_request_time_transport_change_fails_before_model_call(db, make_task):
         db=db,
         provider=provider,
         dispatcher=NativeToolDispatcher(db=db, registry=ToolRegistry(), allowed_capabilities=set(), allowed_side_effect_capabilities=set()),
-        completion_authority=CompletionAuthority(db=db, validator=AlwaysPassValidator()),
+        completion_authority=CompletionAuthority(db=db, validator=PassingCommandValidator()),
         runtime_target_controller=controller,
     )
     request = AgentRequest(

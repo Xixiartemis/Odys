@@ -1,4 +1,5 @@
 import asyncio
+import json
 
 from lhas.agent.models import AgentBudget, AgentRequest, AgentRole, AgentStatus
 from lhas.domain.models import Attempt, Project, Run, Task
@@ -22,7 +23,7 @@ from lhas.platform_models import Delegation
 from lhas.tools.fakes import FakeTool
 from lhas.tools.protocol import ToolResult, ToolResultStatus
 from lhas.tools.registry import ToolRegistry
-from lhas.validation import AlwaysPassValidator
+from tests.helpers import PassingCommandValidator
 
 
 class _ReplanPlanner:
@@ -145,7 +146,12 @@ def test_w3_validator_rejection_flows_through_plan_execution(db):
             passed = not (task.objective == "b" and not self.rejected)
             if not passed:
                 self.rejected = True
-            return ValidationResult(attempt_id=attempt.id, passed=passed, checks=[ValidationCheck(name="acceptance", passed=passed)], evidence="pass" if passed else "reject")
+            return ValidationResult(
+                attempt_id=attempt.id,
+                passed=passed,
+                checks=[ValidationCheck(name="acceptance", passed=passed)],
+                evidence=json.dumps({"command": ["pytest", "-q"], "exit_code": 0 if passed else 1, "timed_out": False}),
+            )
 
     validator = RejectBOnce()
     executed = []
@@ -236,7 +242,7 @@ def test_w4_durable_child_failure_flows_through_parent_plan_execution(db):
             db=db,
             provider=provider,
             dispatcher=NativeToolDispatcher(db=db, registry=ToolRegistry(), allowed_capabilities=set(), allowed_side_effect_capabilities=set()),
-            completion_authority=CompletionAuthority(db=db, validator=AlwaysPassValidator()),
+            completion_authority=CompletionAuthority(db=db, validator=PassingCommandValidator()),
         )
         native = NativeAgentExecutor(kernel, allowed_capabilities=[], allowed_side_effect_capabilities=[], max_turns=1)
         return FailedChildThenNative(native) if step.capability == "b" else native

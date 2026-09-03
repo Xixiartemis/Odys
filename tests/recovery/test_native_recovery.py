@@ -14,7 +14,7 @@ from lhas.persistence.repositories import AttemptRepository, RunRepository
 from lhas.planning.models import CapabilitySpec
 from lhas.tools.protocol import ToolResult, ToolResultStatus
 from lhas.tools.registry import ToolRegistry
-from lhas.validation import AlwaysPassValidator
+from tests.helpers import PassingCommandValidator
 
 
 class CrashOnce:
@@ -47,8 +47,9 @@ class MutationTool:
         return ToolResult(status=ToolResultStatus.SUCCESS, output={"path": "state", "before_sha256": before.zfill(64), "after_sha256": str(self.value).zfill(64)})
 
 
-class CountingValidator(AlwaysPassValidator):
+class CountingValidator(PassingCommandValidator):
     def __init__(self):
+        super().__init__()
         self.calls = 0
 
     async def validate(self, **kwargs):
@@ -96,13 +97,13 @@ def test_crash_before_mutation_does_not_blindly_reexecute(db, make_task):
     _, _, attempt, request = _durable_case(db, make_task)
     tool = MutationTool()
     crash = CrashOnce(NativeFaultPoint.AFTER_TOOL_REQUESTED)
-    first = _kernel(db, request, tool, [ProviderResponse(tool_calls=[ProviderToolCall(id="same", name="test.mutate", arguments={"value": 1})])], AlwaysPassValidator(), fault=crash)
+    first = _kernel(db, request, tool, [ProviderResponse(tool_calls=[ProviderToolCall(id="same", name="test.mutate", arguments={"value": 1})])], PassingCommandValidator(), fault=crash)
     with pytest.raises(RuntimeError, match="AFTER_TOOL_REQUESTED"):
         asyncio.run(first.run(request))
     assert tool.calls == 0
 
     seen = {}
-    second = _kernel(db, request, tool, [lambda context: (seen.update(context.sections["execution_state"]["recent_tool_outcomes"][-1]) or ProviderResponse(content="done", completion_claim=True))], AlwaysPassValidator())
+    second = _kernel(db, request, tool, [lambda context: (seen.update(context.sections["execution_state"]["recent_tool_outcomes"][-1]) or ProviderResponse(content="done", completion_claim=True))], PassingCommandValidator())
     result = asyncio.run(second.run(request))
     assert result.status is AgentStatus.COMPLETED and tool.calls == 0
     assert seen["reconciliation"] == "SAFE_TO_RETRY" and seen["retry_was_automatic"] is False
@@ -113,7 +114,7 @@ def test_crash_after_mutation_reconciles_and_never_duplicates(db, make_task):
     _, _, attempt, request = _durable_case(db, make_task)
     tool = MutationTool()
     crash = CrashOnce(NativeFaultPoint.AFTER_TOOL_EXECUTED)
-    first = _kernel(db, request, tool, [ProviderResponse(tool_calls=[ProviderToolCall(id="mutation", name="test.mutate", arguments={"value": 7})])], AlwaysPassValidator(), fault=crash)
+    first = _kernel(db, request, tool, [ProviderResponse(tool_calls=[ProviderToolCall(id="mutation", name="test.mutate", arguments={"value": 7})])], PassingCommandValidator(), fault=crash)
     with pytest.raises(RuntimeError, match="AFTER_TOOL_EXECUTED"):
         asyncio.run(first.run(request))
     assert tool.calls == 1 and tool.value == 7
@@ -122,7 +123,7 @@ def test_crash_after_mutation_reconciles_and_never_duplicates(db, make_task):
         return True
 
     seen = {}
-    second = _kernel(db, request, tool, [lambda context: (seen.update(context.sections["execution_state"]["recent_tool_outcomes"][-1]) or ProviderResponse(content="validated", completion_claim=True))], AlwaysPassValidator(), mutation_probe=mutation_present)
+    second = _kernel(db, request, tool, [lambda context: (seen.update(context.sections["execution_state"]["recent_tool_outcomes"][-1]) or ProviderResponse(content="validated", completion_claim=True))], PassingCommandValidator(), mutation_probe=mutation_present)
     result = asyncio.run(second.run(request))
     assert result.status is AgentStatus.COMPLETED and tool.calls == 1
     assert seen["reconciliation"] == "DO_NOT_RETRY"
@@ -165,7 +166,7 @@ def test_recovered_snapshot_matches_durable_invocation_state(db, make_task):
     _, _, attempt, request = _durable_case(db, make_task)
     tool = MutationTool()
     crash = CrashOnce(NativeFaultPoint.AFTER_TOOL_OBSERVED)
-    first = _kernel(db, request, tool, [ProviderResponse(tool_calls=[ProviderToolCall(id="observed", name="test.mutate", arguments={"value": 3})])], AlwaysPassValidator(), fault=crash)
+    first = _kernel(db, request, tool, [ProviderResponse(tool_calls=[ProviderToolCall(id="observed", name="test.mutate", arguments={"value": 3})])], PassingCommandValidator(), fault=crash)
     with pytest.raises(RuntimeError, match="AFTER_TOOL_OBSERVED"):
         asyncio.run(first.run(request))
     invocation = ToolInvocationRepository(db).list_for_attempt(attempt.id)[0]
@@ -173,7 +174,7 @@ def test_recovered_snapshot_matches_durable_invocation_state(db, make_task):
     assert invocation.state.value == "FINISHED" and invocation.observed_mutation is True
     assert snapshot.model_turn_count == 1 and snapshot.tool_call_count == 0
 
-    second = _kernel(db, request, tool, [ProviderResponse(content="done", completion_claim=True)], AlwaysPassValidator())
+    second = _kernel(db, request, tool, [ProviderResponse(content="done", completion_claim=True)], PassingCommandValidator())
     result = asyncio.run(second.run(request))
     assert result.status is AgentStatus.COMPLETED and tool.calls == 1
     recovered = ExecutionSnapshotRepository(db).get_for_attempt(attempt.id)

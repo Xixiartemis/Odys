@@ -17,7 +17,8 @@ from lhas.persistence.event_store import EventStore
 from lhas.persistence.repositories import AttemptRepository, RunRepository
 from lhas.recovery import DefaultRecoveryPolicy
 from lhas.tools.registry import ToolRegistry
-from lhas.validation import AlwaysPassValidator, ValidationCheck, ValidationResult
+from tests.helpers import PassingCommandValidator
+from lhas.validation import ValidationCheck, ValidationResult
 
 
 class _ChatCompletion:
@@ -94,7 +95,7 @@ def _kernel_case(db, make_task, response):
         db=db,
         provider=provider,
         dispatcher=dispatcher,
-        completion_authority=CompletionAuthority(db=db, validator=AlwaysPassValidator()),
+        completion_authority=CompletionAuthority(db=db, validator=PassingCommandValidator()),
     )
     request = AgentRequest(
         agent_id="provider-transparency",
