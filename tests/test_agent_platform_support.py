@@ -1,4 +1,7 @@
 from pathlib import Path
+import subprocess
+import sys
+from datetime import datetime, timezone
 
 import pytest
 
@@ -70,9 +73,48 @@ def _session_repo():
 def test_session_persistence_and_lineage():
     db,repo=_session_repo(); parent=repo.create(ConversationSession(title="parent")); child=repo.create(ConversationSession(title="child",parent_session_id=parent.id))
     repo.append(SessionMessage(session_id=child.id,role="user",content="durable platform question"))
-    assert repo.list()[0].parent_session_id==parent.id
+    sessions=repo.list()
+    persisted_child=next(session for session in sessions if session.id==child.id)
+    persisted_parent=next(session for session in sessions if session.id==parent.id)
+    assert persisted_child.parent_session_id==parent.id
+    assert persisted_parent.parent_session_id is None
     assert repo.read(child.id)[0].content=="durable platform question"
     db.close()
+
+
+def test_session_lineage_is_independent_of_list_order():
+    fixed=datetime(2026,1,1,tzinfo=timezone.utc)
+    db,repo=_session_repo()
+    parent=repo.create(ConversationSession(title="parent",created_at=fixed,updated_at=fixed))
+    child=repo.create(ConversationSession(title="child",parent_session_id=parent.id,created_at=fixed,updated_at=fixed))
+    repo.append(SessionMessage(session_id=child.id,role="user",content="durable platform question",created_at=fixed))
+    sessions=repo.list()
+    persisted_child=next(session for session in sessions if session.id==child.id)
+    persisted_parent=next(session for session in sessions if session.id==parent.id)
+    assert persisted_child.parent_session_id==parent.id
+    assert persisted_parent.parent_session_id is None
+    db.close()
+
+
+def test_session_lineage_survives_process_reload(tmp_path):
+    db_path=tmp_path/"sessions.db"
+    db=Database(db_path); db.init_db(); repo=SessionRepository(db)
+    parent=repo.create(ConversationSession(title="parent"))
+    child=repo.create(ConversationSession(title="child",parent_session_id=parent.id))
+    db.close()
+    reload_code="""
+import sys
+from lhas.persistence.database import Database
+from lhas.persistence.platform_repositories import SessionRepository
+
+db=Database(sys.argv[1])
+repo=SessionRepository(db)
+sessions={session.id: session for session in repo.list()}
+assert sessions[sys.argv[2]].parent_session_id == sys.argv[3]
+assert sessions[sys.argv[3]].parent_session_id is None
+db.close()
+"""
+    subprocess.run([sys.executable,"-c",reload_code,str(db_path),child.id,parent.id],cwd=Path(__file__).resolve().parents[1],check=True,capture_output=True,text=True)
 
 
 def test_session_fts_search():
