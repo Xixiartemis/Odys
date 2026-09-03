@@ -1,34 +1,3 @@
-<<<<<<< HEAD
-<div>
-<p align="center">
-  <img src="./docs/assets/odys-logo.png" width="170" alt="Odys logo">
-</p>
-</div>
-
-<div>
-<h1 align="center">Odys</h1>
-</div>
-
-<div>
-<p align="center">
-  <strong>面向长时任务 AI Agent 的可靠执行运行时</strong>
-</p>
-</div>
-
-<div>
-<p align="center">
-  <em>Reliable execution for long-running AI agents.</em>
-</p>
-</div>
-
-<div>
-<p align="center">
-  不只让 Agent “做事”，更让它能够证明任务真的完成了。
-</p>
-</div>
-
-<div>
-=======
 <p align="center">
   <img src="./docs/assets/odys-logo.png" width="170" alt="Odys logo">
 </p>
