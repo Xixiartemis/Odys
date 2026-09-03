@@ -94,7 +94,6 @@ class CompletionAuthority:
             "level": str(validation.level),
             "checks": [check.model_dump(mode="json") for check in validation.checks][:50],
             "evidence": _bounded_evidence(validation.evidence),
-            "exit_code": validation.exit_code,
             "duration_ms": validation.duration_ms,
         }
         if validation.passed:
@@ -153,8 +152,6 @@ class AcceptedCompletionValidator:
                 "candidate_id": candidate.id if candidate else None,
                 "candidate_status": candidate.status.value if candidate else None,
                 "acceptance_authority": "CompletionAuthority",
-                "exit_code": candidate.validation.get("exit_code") if candidate else None,
             }, sort_keys=True),
-            exit_code=(candidate.validation.get("exit_code") if candidate else None),
             duration_ms=0,
         )

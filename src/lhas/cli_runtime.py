@@ -794,7 +794,6 @@ def inspect_run(
             evidence = {"summary": _bounded_text(latest_validation.evidence)}
         validation_summary = {
             "status": "PASS" if latest_validation.passed else "FAIL",
-            "exit_code": latest_validation.exit_code,
             "evidence": evidence,
         }
     configured_target = (
