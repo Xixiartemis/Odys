@@ -2,12 +2,74 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
+from typing import Any
 
-from lhas.skills.models import SkillDocument, SkillMetadata
+from lhas.skills.models import (
+    AcceptanceContract,
+    SkillDocument,
+    SkillMetadata,
+)
 
 MAX_SKILL_CHARS = 40_000
 MAX_REFERENCE_CHARS = 40_000
+
+# Keys that are parsed into structured SkillMetadata fields rather than
+# stowed in the catch-all ``metadata`` dict.
+_STRUCTURED_KEYS = frozenset({
+    "name",
+    "description",
+    "required_capabilities",
+    "optional_capabilities",
+    "acceptance_contract",
+    "workflow_template",
+})
+
+
+def _parse_list_field(value: str) -> list[str]:
+    """Parse a frontmatter value into a list of strings.
+
+    Accepts: JSON array ``["a","b"]``, or comma-separated ``a, b, c``.
+    Empty / whitespace-only input returns [].
+    """
+    stripped = value.strip()
+    if not stripped:
+        return []
+    if stripped.startswith("["):
+        try:
+            parsed = json.loads(stripped)
+            if isinstance(parsed, list):
+                return [str(item) for item in parsed]
+        except json.JSONDecodeError:
+            pass
+    # Fallback: comma-separated
+    return [item.strip().strip('"\'') for item in stripped.split(",") if item.strip()]
+
+
+def _parse_acceptance_contract(value: str) -> AcceptanceContract | None:
+    """Parse an acceptance contract from a frontmatter value.
+
+    Accepts JSON object with keys ``description``, ``expected_evidence``,
+    ``outcome_criteria``.
+    """
+    stripped = value.strip()
+    if not stripped:
+        return None
+    if stripped.startswith("{"):
+        try:
+            parsed = json.loads(stripped)
+            if isinstance(parsed, dict):
+                return AcceptanceContract(
+                    description=parsed.get("description", ""),
+                    expected_evidence=parsed.get("expected_evidence", []),
+                    outcome_criteria=parsed.get("outcome_criteria", []),
+                    metadata=parsed.get("metadata", {}),
+                )
+        except json.JSONDecodeError:
+            pass
+    # Fallback: treat as description string
+    return AcceptanceContract(description=stripped)
 
 
 def _frontmatter(text: str) -> tuple[dict[str, str], str]:
@@ -46,7 +108,11 @@ class SkillRegistry:
                 metadata = SkillMetadata(
                     name=name,
                     description=frontmatter.get("description", ""),
-                    metadata={key: value for key, value in frontmatter.items() if key not in {"name", "description"}},
+                    metadata={key: value for key, value in frontmatter.items() if key not in _STRUCTURED_KEYS},
+                    required_capabilities=_parse_list_field(frontmatter.get("required_capabilities", "")),
+                    optional_capabilities=_parse_list_field(frontmatter.get("optional_capabilities", "")),
+                    acceptance_contract=_parse_acceptance_contract(frontmatter.get("acceptance_contract", "")),
+                    workflow_template=frontmatter.get("workflow_template") or None,
                 )
                 found.setdefault(name, (metadata, skill_file))
         self._skills = found
