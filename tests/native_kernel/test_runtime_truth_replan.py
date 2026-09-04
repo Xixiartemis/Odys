@@ -158,17 +158,25 @@ def test_provider_migration_resumes_same_attempt_on_new_provider(db, make_task):
 
     class MutationTool:
         from lhas.planning.models import CapabilitySpec
-        capability = CapabilitySpec(name="workspace.edit", side_effect=True)
+        capability = CapabilitySpec(name="workspace.edit", side_effect=True,
+                                     input_schema={"type": "object", "properties": {
+                                         "path": {"type": "string"},
+                                         "old_text": {"type": "string"},
+                                         "new_text": {"type": "string"},
+                                     }, "required": ["path", "old_text", "new_text"], "additionalProperties": False})
         async def execute(self, request):
             return ToolResult(
                 status=ToolResultStatus.SUCCESS,
-                output={"before_sha256": "a" * 64, "after_sha256": "b" * 64},
+                output={"before_sha256": "a" * 64, "after_sha256": "b" * 64,
+                         "path": "f.txt", "replacements": 1, "bytes_before": 1,
+                         "bytes_after": 1, "match_mode": "exact", "candidate_count": 1,
+                         "matched_start_line": 1, "matched_end_line": 1},
             )
 
     registry = ToolRegistry()
     registry.register(MutationTool())
     provider_a = ScriptedProviderAdapter([
-        ProviderResponse(tool_calls=[ProviderToolCall(id="mutation-1", name="workspace.edit", arguments={})]),
+        ProviderResponse(tool_calls=[ProviderToolCall(id="mutation-1", name="workspace.edit", arguments={"path": "f.txt", "old_text": "before", "new_text": "after"})]),
         MonthlyQuota(),
     ], runtime_target=a)
     provider_b = ScriptedProviderAdapter([ProviderResponse(content="finished", completion_claim=True)], runtime_target=b)

@@ -17,6 +17,35 @@ from lhas.capability_registry import (
 from .protocol import ToolEvidence, ToolRequest, ToolResult, ToolResultStatus
 
 
+# Semantic argv prefix guards for capabilities that share a backend tool
+# (cli.exec).  CommandPolicy owns *executable safety*; this layer owns
+# semantic capability→operation consistency.
+_SEMANTIC_ARGV_PREFIX: dict[str, tuple[str, ...]] = {
+    "git.status": ("git", "status"),
+    "git.diff": ("git", "diff"),
+}
+
+
+def _check_semantic_argv(
+    capability_id: str, arguments: dict[str, Any]
+) -> str | None:
+    """Return an error message if the argv violates semantic prefix guard."""
+
+    prefix = _SEMANTIC_ARGV_PREFIX.get(capability_id)
+    if prefix is None:
+        return None
+    argv = arguments.get("argv")
+    if not isinstance(argv, list) or len(argv) < len(prefix):
+        return f"argv must start with {list(prefix)} for capability {capability_id}"
+    actual = tuple(str(item) for item in argv[: len(prefix)])
+    if actual != prefix:
+        return (
+            f"argv must start with {list(prefix)} for capability {capability_id}, "
+            f"got {list(actual)}"
+        )
+    return None
+
+
 class ToolErrorCode(str, Enum):
     INVALID_ARGUMENT = "INVALID_ARGUMENT"
     CAPABILITY_UNAVAILABLE = "CAPABILITY_UNAVAILABLE"
@@ -214,6 +243,20 @@ class ToolContract:
                 error_message="tool arguments failed capability input schema",
                 diagnostics=_schema_diagnostic(error),
                 retry_reason="arguments must be corrected",
+            )
+
+        # Semantic argv prefix guard — ensures that capabilities sharing a
+        # backend (cli.exec) receive arguments consistent with their declared
+        # semantic intent.  CommandPolicy owns executable safety; this layer
+        # owns capability→operation consistency.
+        argv_violation = _check_semantic_argv(capability_id, request.arguments)
+        if argv_violation is not None:
+            return ToolContractDecision(
+                valid=False,
+                error_type=ToolErrorCode.INVALID_ARGUMENT,
+                error_message=argv_violation,
+                diagnostics={"reason": "SEMANTIC_ARGV_MISMATCH"},
+                retry_reason="argv must match capability semantic prefix",
             )
 
         requested_timeout = request.timeout_seconds

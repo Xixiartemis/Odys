@@ -323,6 +323,21 @@ def default_capabilities() -> tuple[CapabilityDefinition, ...]:
             _object_schema({}), {"type": "object"},
             permissions=("environment.read",), preferred_tool="cli.exec",
         ),
+        _capability(
+            "platform.prepare", "Prepare bounded platform evidence for a worker step", "platform",
+            _object_schema({"goal": {"type": "string"}}), {"type": "object"},
+            permissions=("platform.execute",), risk_level="LOW", preferred_tool="platform.prepare",
+        ),
+        _capability(
+            "platform.delegate", "Create a durable child Task, Run and Attempt", "platform",
+            _object_schema({"goal": {"type": "string"}}), {"type": "object"},
+            permissions=("platform.delegate",), risk_level="HIGH", retryable=False, preferred_tool="platform.delegate",
+        ),
+        _capability(
+            "platform.finalize", "Finalize bounded platform evidence with a reviewer step", "platform",
+            _object_schema({"goal": {"type": "string"}}), {"type": "object"},
+            permissions=("platform.execute",), risk_level="LOW", preferred_tool="platform.finalize",
+        ),
     )
 
 

@@ -1,4 +1,23 @@
-"""Odys-owned authorization, dispatch, observation, and reconciliation."""
+"""Odys-owned authorization, dispatch, observation, and reconciliation.
+
+After P2.3 integration the normal invocation path is:
+
+    NativeToolDispatcher → CapabilityRegistry → ToolContract → ToolRegistry → Tool
+
+NativeToolDispatcher owns:
+    - invocation identity and lifecycle events
+    - policy enforcement (allowed_capabilities, side_effect, delegation budget)
+    - duplicate invocation reconciliation
+    - mutation observation
+    - observer decoration
+
+ToolContract owns:
+    - capability resolution (CapabilityRegistry)
+    - input/output JSON Schema validation
+    - semantic argv prefix guards
+    - tool resolution (ToolRegistry)
+    - evidence generation
+"""
 
 from __future__ import annotations
 
@@ -10,6 +29,11 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from lhas.agent.models import AgentRequest
+from lhas.capability_registry import (
+    CapabilityAvailability,
+    CapabilityRegistry,
+    CapabilityRuntimeContext,
+)
 from lhas.domain.enums import EventType
 from lhas.domain.models import utcnow
 from lhas.inner_agent.tool_adapter import ToolAwareObserver, _args_signature, safe_tool_summary
@@ -25,6 +49,7 @@ from lhas.native.models import (
 )
 from lhas.native.persistence import ToolInvocationRepository
 from lhas.persistence.event_store import EventStore
+from lhas.tools.contract import ToolContract, ToolErrorCode
 from lhas.tools.protocol import ToolRequest, ToolResult, ToolResultStatus
 
 
@@ -43,7 +68,55 @@ def _safe_value(value: Any, limit: int = 12_000) -> Any:
     return _safe_value(str(value), limit)
 
 
+def _build_runtime_capability_registry(registry) -> CapabilityRegistry:
+    """Build a CapabilityRegistry that covers all tools in *registry*.
+
+    Tools already declared in ``default_capabilities()`` keep their
+    canonical definitions.  Any additional tools (e.g. test helpers,
+    skills, MCP tools) get a permissive runtime definition so they can
+    pass through the ToolContract boundary.
+    """
+    from lhas.capability_registry import (
+        CapabilityDefinition,
+        RuntimePlatform,
+        default_capabilities,
+    )
+
+    existing = {d.id for d in default_capabilities()}
+    extra: list[CapabilityDefinition] = []
+    for name in registry.list_capabilities():
+        if name in existing:
+            continue
+        tool = registry.resolve(name)
+        spec = tool.capability
+        extra.append(CapabilityDefinition(
+            id=name,
+            name=name,
+            description=spec.description or f"Runtime tool {name}",
+            category="runtime",
+            version="v1",
+            input_schema=spec.input_schema or {"type": "object", "additionalProperties": True},
+            output_schema={"type": "object"},
+            platforms=(RuntimePlatform.WINDOWS, RuntimePlatform.LINUX, RuntimePlatform.MACOS),
+            permissions=("runtime.execute",),
+            risk_level="LOW",
+            workspace_scope="SOURCE_WORKSPACE",
+            timeout_seconds=30.0,
+            retryable=True,
+            preferred_tool=name,
+            source="runtime",
+            evidence_type="DETERMINISTIC_TOOL_RESULT",
+        ))
+    return CapabilityRegistry(registry, definitions=[*default_capabilities(), *extra])
+
+
 class NativeToolDispatcher:
+    """Dispatch tool calls through CapabilityRegistry → ToolContract boundary.
+
+    All normal tool invocations MUST route through ``tool_contract.invoke()``.
+    Direct ``tool.execute()`` calls are forbidden — use the contract boundary.
+    """
+
     def __init__(
         self,
         *,
@@ -51,6 +124,8 @@ class NativeToolDispatcher:
         registry,
         allowed_capabilities: set[str],
         allowed_side_effect_capabilities: set[str],
+        capability_registry: CapabilityRegistry | None = None,
+        tool_contract: ToolContract | None = None,
         fault_injector: Any = None,
         mutation_probe: Callable[[], Awaitable[bool]] | None = None,
     ):
@@ -64,27 +139,74 @@ class NativeToolDispatcher:
         self.invocations = ToolInvocationRepository(db)
         self.events = EventStore(db)
 
+        # P2.3: CapabilityRegistry + ToolContract integration.
+        # When no explicit CapabilityRegistry is provided, build one that
+        # covers all registered tools — including tools outside the default
+        # catalog (e.g. test.echo) that need a runtime CapabilityDefinition
+        # to pass through the ToolContract boundary.
+        if capability_registry is None:
+            capability_registry = _build_runtime_capability_registry(registry)
+        self.capability_registry = capability_registry
+        if tool_contract is None:
+            tool_contract = ToolContract(capability_registry, registry)
+        self.tool_contract = tool_contract
+
+        # Build a default runtime context; the real platform is injected at
+        # dispatch time via the ExecutionSnapshot / AgentRequest.
+        self._default_runtime_context = CapabilityRuntimeContext(
+            platform="windows",
+            available_tools=set(registry.list_capabilities()),
+        )
+
     def restore_observer(self, state: dict[str, Any]) -> None:
         self.observer.restore(state)
 
     def observer_state(self) -> dict[str, Any]:
         return self.observer.snapshot()
 
+    def _runtime_context(self, snapshot: ExecutionSnapshot | None = None) -> CapabilityRuntimeContext:
+        """Build a CapabilityRuntimeContext from current state."""
+        available = set(self.registry.list_capabilities())
+        return CapabilityRuntimeContext(
+            platform="windows",
+            available_tools=available,
+        )
+
     def tool_schemas(self) -> list[dict[str, Any]]:
+        """Return tool schemas from CapabilityDefinitions (semantic contract)."""
         schemas = []
         for name in sorted(self.allowed_capabilities):
             try:
-                spec = self.registry.resolve(name).capability
+                definition = self.capability_registry.get(name)
             except KeyError:
                 continue
-            if spec.requires_human_approval or (spec.side_effect and name not in self.allowed_side_effect_capabilities):
+            # Check capability availability via discovery
+            context = self._runtime_context()
+            records = {
+                r.id: r
+                for r in self.capability_registry.discover(context)
+                if r.id == name
+            }
+            record = records.get(name)
+            if record is None or record.availability is not CapabilityAvailability.AVAILABLE:
                 continue
+            # Policy: skip tools requiring human approval or unauthorized side-effects
+            try:
+                concrete = self.registry.resolve(definition.preferred_tool)
+                spec = concrete.capability
+            except (KeyError, AttributeError):
+                spec = None
+            if spec is not None:
+                if getattr(spec, "requires_human_approval", False):
+                    continue
+                if getattr(spec, "side_effect", False) and name not in self.allowed_side_effect_capabilities:
+                    continue
             schemas.append({
                 "type": "function",
                 "function": {
-                    "name": spec.name,
-                    "description": spec.description,
-                    "parameters": spec.input_schema or {"type": "object", "additionalProperties": False},
+                    "name": definition.name,
+                    "description": definition.description,
+                    "parameters": definition.input_schema or {"type": "object", "additionalProperties": False},
                 },
             })
         return schemas
@@ -94,10 +216,11 @@ class NativeToolDispatcher:
         return hashlib.sha256(f"{attempt_id}:{provider_call_id}".encode("utf-8")).hexdigest()
 
     @staticmethod
-    def _side_effect_class(name: str, spec: Any | None) -> SideEffectClass:
+    def _side_effect_class(name: str, definition: Any | None, concrete_spec: Any | None = None) -> SideEffectClass:
         if name == "platform.delegate":
             return SideEffectClass.DELEGATION
-        if spec is not None and spec.side_effect:
+        # Check the concrete tool's CapabilitySpec for side_effect
+        if concrete_spec is not None and getattr(concrete_spec, "side_effect", False):
             return SideEffectClass.WORKSPACE_MUTATION if name.startswith("workspace.") else SideEffectClass.EXTERNAL
         return SideEffectClass.READ_ONLY
 
@@ -119,12 +242,25 @@ class NativeToolDispatcher:
                 "safe_summary": existing.result_summary,
                 "duplicate_logical_invocation": True,
             }
+
+        # Resolve capability definition from CapabilityRegistry
         try:
-            tool = self.registry.resolve(call.name)
-            spec = tool.capability
+            definition = self.capability_registry.get(call.name)
         except KeyError:
-            tool = None
-            spec = None
+            definition = None
+
+        # Resolve concrete tool for side-effect classification
+        concrete_tool = None
+        concrete_spec = None
+        if definition is not None:
+            for tool_name in (definition.preferred_tool, *definition.fallback_tools):
+                try:
+                    concrete_tool = self.registry.resolve(tool_name)
+                    concrete_spec = concrete_tool.capability
+                    break
+                except KeyError:
+                    continue
+
         invocation = ToolInvocation(
             id=invocation_id,
             task_id=snapshot.task_id,
@@ -133,7 +269,7 @@ class NativeToolDispatcher:
             ordinal=snapshot.tool_call_count + 1,
             capability=call.name[:128],
             args_fingerprint=_args_signature(call.arguments),
-            side_effect_class=self._side_effect_class(call.name, spec),
+            side_effect_class=self._side_effect_class(call.name, definition, concrete_spec),
         )
         self.invocations.create(invocation)
         self.events.append(
@@ -145,16 +281,17 @@ class NativeToolDispatcher:
         )
         self.fault_injector.hit(NativeFaultPoint.AFTER_TOOL_REQUESTED, invocation=invocation)
 
-        if tool is None:
+        # --- Policy boundary (NativeToolDispatcher owns these) ---
+        if definition is None:
             return self._finish_denied(invocation, "UNKNOWN_CAPABILITY")
         if call.name not in self.allowed_capabilities:
             return self._finish_denied(invocation, "CAPABILITY_NOT_ALLOWED")
-        if spec.requires_human_approval:
-            return self._finish_denied(invocation, "HUMAN_APPROVAL_REQUIRED")
         if call.name == "platform.delegate" and len(snapshot.delegation_dependencies) >= request.budget.max_delegations:
             return self._finish_denied(invocation, "DELEGATION_BUDGET_EXHAUSTED")
-        if spec.side_effect and call.name not in self.allowed_side_effect_capabilities:
+        if concrete_spec is not None and concrete_spec.side_effect and call.name not in self.allowed_side_effect_capabilities:
             return self._finish_denied(invocation, "SIDE_EFFECT_NOT_ALLOWED")
+        if concrete_spec is not None and concrete_spec.requires_human_approval:
+            return self._finish_denied(invocation, "HUMAN_APPROVAL_REQUIRED")
 
         invocation.state = InvocationState.STARTED
         invocation.started_at = utcnow()
@@ -162,19 +299,31 @@ class NativeToolDispatcher:
         self.events.append(EventType.NATIVE_TOOL_STARTED, task_id=snapshot.task_id, run_id=snapshot.run_id, attempt_id=snapshot.attempt_id, payload={"invocation_id": invocation.id, "capability": invocation.capability})
         self.fault_injector.hit(NativeFaultPoint.AFTER_TOOL_STARTED, invocation=invocation)
         started = time.monotonic()
+
+        # --- ToolContract boundary: ALL execution goes through contract ---
+        tool_name = definition.preferred_tool
+        if concrete_tool is not None:
+            # Use the actual resolved tool name (may be a fallback)
+            tool_name = concrete_spec.name if concrete_spec else definition.preferred_tool
+
+        contract_request = ToolRequest(
+            tool_call_id=call.id[:128],
+            task_id=snapshot.task_id,
+            run_id=snapshot.run_id,
+            attempt_id=snapshot.attempt_id,
+            capability_id=call.name,
+            tool_name=tool_name,
+            arguments=call.arguments,
+            context=request.context,
+            metadata=request.metadata,
+        )
+        runtime_context = self._runtime_context(snapshot)
+
         try:
-            result = await tool.execute(ToolRequest(
-                tool_call_id=call.id[:128],
-                task_id=snapshot.task_id,
-                run_id=snapshot.run_id,
-                attempt_id=snapshot.attempt_id,
-                capability=call.name,
-                arguments=call.arguments,
-                context=request.context,
-                metadata=request.metadata,
-            ))
-        except Exception as exc:  # tool exceptions become bounded observations
+            result = await self.tool_contract.invoke(contract_request, runtime_context)
+        except Exception as exc:
             result = ToolResult(status=ToolResultStatus.FAILURE, error_type="TOOL_EXECUTION_ERROR", error_message=str(exc)[:512])
+
         self.fault_injector.hit(NativeFaultPoint.AFTER_TOOL_EXECUTED, invocation=invocation, result=result)
         duration_ms = int((time.monotonic() - started) * 1000)
         summary = self.observer.decorate(
