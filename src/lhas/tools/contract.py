@@ -217,6 +217,11 @@ class ToolContract:
             )
 
         requested_timeout = request.timeout_seconds
+        if requested_timeout is None:
+            # Legacy direct callers historically supplied this value inside
+            # arguments. It is only a source of requested timeout; the
+            # capability limit remains authoritative.
+            requested_timeout = request.arguments.get("timeout_seconds")
         effective_timeout = (
             definition.timeout_seconds
             if requested_timeout is None
@@ -274,6 +279,20 @@ class ToolContract:
                 "tool execution failed",
                 diagnostics={"exception_type": type(exc).__name__},
                 decision=decision,
+            )
+
+        if result.evidence is not None and (
+            result.evidence.capability_id != request.capability_id
+            or result.evidence.tool_name != request.tool_name
+        ):
+            return ToolResult(
+                status=ToolResultStatus.FAILURE,
+                error_type=ToolErrorCode.INTERNAL_ERROR.value,
+                error_message="tool evidence identity does not match invocation",
+                artifacts=result.artifacts,
+                usage=result.usage,
+                metadata={**result.metadata, "contract": {"reason": "EVIDENCE_IDENTITY_MISMATCH"}},
+                evidence=self._evidence(request, result),
             )
 
         if result.status is ToolResultStatus.SUCCESS:

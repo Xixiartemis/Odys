@@ -50,6 +50,15 @@ The mature `jsonschema` validator is reused for input and output schemas.
 Schema diagnostics contain only bounded path/validator information, not the
 invalid raw value.
 
+The V1 workspace output schemas are executable declarations of the existing
+backend shapes: `workspace.read` accepts both the normal
+`path/content/start_line/end_line/total_lines/truncated/sha256` result and
+the bounded `path/content/total_lines/truncated` result; `workspace.list`
+returns its `path/entries/truncated` object; `workspace.edit` returns its
+replacement and before/after digest fields; and `workspace.diff` returns its
+changed-file, diff, count, and truncation fields. These declarations are
+covered through the real workspace tools, not only fake tools.
+
 After one existing Tool call, a successful output is validated against the
 capability output schema. A mismatch becomes `OUTPUT_VALIDATION_FAILED`, with
 safe diagnostics and the original result's artifacts/usage retained. Existing
@@ -72,6 +81,12 @@ normalization.
 The contract exposes `retry_allowed` and `retry_reason` from the capability's
 `retryable` declaration. It does not perform retries; Recovery/Orchestrator
 remain responsible for that decision.
+
+Timeout precedence is explicit: top-level `ToolRequest.timeout_seconds`, then
+legacy `arguments.timeout_seconds`, then the capability default. The selected
+value is clamped to the capability limit and becomes the one canonical
+top-level request timeout. `SafeCliTool` consumes that canonical value while
+retaining the legacy arguments fallback for direct callers.
 
 ## Binding and availability
 
@@ -105,9 +120,19 @@ concrete `ToolRegistry` and derives runtime availability from that registry.
 Unknown platforms and missing backends fail closed. A request cannot name a
 different tool than the capability's explicit preferred/fallback binding.
 
+Tool-returned evidence must identify the same `capability_id` and `tool_name`
+as the invocation. A mismatched evidence identity is rejected and replaced
+only with a contract-owned failure/evidence record; a Tool cannot forge the
+invocation provenance.
+
 The contract does not move command allowlists into the capability layer.
 `cli.exec` and Safe CLI continue to enforce the existing command policy, so a
 dangerous or unallowlisted command remains `COMMAND_NOT_ALLOWED`.
+
+Semantic matching between a shared `cli.exec` binding and operation-specific
+argv (for example `git.status` versus `git.diff`) is **NOT YET ENFORCED** by
+this V1 contract. That belongs to a later Phase 2.3 adapter concern; no new
+CLI policy engine is introduced here.
 
 `CapabilitySelectionMetrics` remains the only deterministic selection
 observation helper. Tool Contract adds no second metrics authority or

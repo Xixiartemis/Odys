@@ -50,6 +50,8 @@ class ToolRequest(BaseModel):
 
     @model_validator(mode="after")
     def synchronize_capability_alias(self) -> "ToolRequest":
+        if self.capability is None and self.capability_id is None:
+            raise ValueError("capability or capability_id is required")
         if self.capability and self.capability_id and self.capability != self.capability_id:
             raise ValueError("capability and capability_id must identify the same capability")
         if self.capability_id is None:

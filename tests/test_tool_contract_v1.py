@@ -21,7 +21,7 @@ from lhas.tools import (
     ToolResult,
     ToolResultStatus,
 )
-from lhas.workspace import CommandPolicy, LocalReadOnlyWorkspace
+from lhas.workspace import CommandPolicy, LocalReadOnlyWorkspace, StagedWorkspace, WorkspaceLimits, register_staged_workspace_tools, register_workspace_tools
 from lhas.workspace.tools import SafeCliTool
 
 
@@ -349,6 +349,187 @@ def test_existing_safe_cli_command_not_allowed_behavior_is_unchanged(tmp_path):
     contract = ToolContract(CapabilityRegistry(definitions=[cap]), tools)
     result = invoke(contract, request(capability_id="test.run", tool_name="cli.exec", arguments={"argv": ["dangerous"]}))
     assert result.error_type == "COMMAND_NOT_ALLOWED"
+
+
+def test_real_workspace_read_uses_default_registry_schema(tmp_path):
+    (tmp_path / "sample.txt").write_text("alpha\nbeta\n", encoding="utf-8")
+    tools = ToolRegistry()
+    register_workspace_tools(tools, LocalReadOnlyWorkspace(tmp_path), CommandPolicy())
+    contract = ToolContract(CapabilityRegistry(), tools)
+    result = invoke(contract, ToolRequest(
+        tool_call_id="read", task_id="task", run_id="run", attempt_id="attempt",
+        capability_id="workspace.read", tool_name="workspace.read", arguments={"path": "sample.txt"},
+    ))
+    assert result.status is ToolResultStatus.SUCCESS
+    assert result.output["path"] == "sample.txt"
+    assert result.output["sha256"]
+
+
+def test_real_workspace_read_truncated_uses_default_registry_schema(tmp_path):
+    (tmp_path / "large.txt").write_text("0123456789", encoding="utf-8")
+    workspace = LocalReadOnlyWorkspace(tmp_path, WorkspaceLimits(max_read_bytes=1, hard_max_read_bytes=1))
+    tools = ToolRegistry()
+    register_workspace_tools(tools, workspace, CommandPolicy())
+    result = invoke(ToolContract(CapabilityRegistry(), tools), ToolRequest(
+        tool_call_id="read", task_id="task", run_id="run", attempt_id="attempt",
+        capability_id="workspace.read", tool_name="workspace.read", arguments={"path": "large.txt"},
+    ))
+    assert result.status is ToolResultStatus.SUCCESS
+    assert result.output == {"path": "large.txt", "content": "", "truncated": True, "total_lines": 0}
+
+
+def test_real_workspace_list_uses_default_registry_schema(tmp_path):
+    (tmp_path / "sample.txt").write_text("alpha", encoding="utf-8")
+    tools = ToolRegistry()
+    register_workspace_tools(tools, LocalReadOnlyWorkspace(tmp_path), CommandPolicy())
+    result = invoke(ToolContract(CapabilityRegistry(), tools), ToolRequest(
+        tool_call_id="list", task_id="task", run_id="run", attempt_id="attempt",
+        capability_id="workspace.list", tool_name="workspace.list", arguments={},
+    ))
+    assert result.status is ToolResultStatus.SUCCESS
+    assert result.output["entries"][0]["path"] == "sample.txt"
+
+
+def test_real_workspace_edit_uses_default_registry_schema(tmp_path):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "sample.txt").write_text("before\n", encoding="utf-8")
+    staged = StagedWorkspace.create(source, tmp_path / "staged")
+    tools = ToolRegistry()
+    register_staged_workspace_tools(tools, staged, CommandPolicy())
+    result = invoke(ToolContract(CapabilityRegistry(), tools), ToolRequest(
+        tool_call_id="edit", task_id="task", run_id="run", attempt_id="attempt",
+        capability_id="workspace.edit", tool_name="workspace.edit",
+        arguments={"path": "sample.txt", "old_text": "before", "new_text": "after"},
+    ))
+    assert result.status is ToolResultStatus.SUCCESS
+    assert result.output["replacements"] == 1
+    assert result.output["before_sha256"] != result.output["after_sha256"]
+
+
+def test_real_workspace_diff_uses_default_registry_schema(tmp_path):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "sample.txt").write_text("before\n", encoding="utf-8")
+    staged = StagedWorkspace.create(source, tmp_path / "staged")
+    asyncio.run(staged.edit_file("sample.txt", "before", "after"))
+    tools = ToolRegistry()
+    register_staged_workspace_tools(tools, staged, CommandPolicy())
+    result = invoke(ToolContract(CapabilityRegistry(), tools), ToolRequest(
+        tool_call_id="diff", task_id="task", run_id="run", attempt_id="attempt",
+        capability_id="workspace.diff", tool_name="workspace.diff", arguments={},
+    ))
+    assert result.status is ToolResultStatus.SUCCESS
+    assert result.output["files_changed"] == 1
+    assert result.output["changed_files"] == ["sample.txt"]
+
+
+def test_timeout_capability_clamp_reaches_real_safe_cli(monkeypatch, tmp_path):
+    cap = definition(
+        capability_id="test.run", tool_name="cli.exec", timeout_seconds=17,
+        input_schema={
+            "type": "object", "properties": {
+                "argv": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+                "timeout_seconds": {"type": "number"},
+            }, "required": ["argv"], "additionalProperties": False,
+        }, output_schema={"type": "object"},
+    )
+    tools = ToolRegistry()
+    cli = SafeCliTool(LocalReadOnlyWorkspace(tmp_path), CommandPolicy())
+    received = []
+
+    async def capture(argv, cwd=".", timeout_seconds=None):
+        received.append(timeout_seconds)
+        return {"ok": True}, None
+
+    monkeypatch.setattr(cli.cli, "execute", capture)
+    tools.register(cli)
+    result = invoke(ToolContract(CapabilityRegistry(definitions=[cap]), tools), request(
+        capability_id="test.run", tool_name="cli.exec", arguments={"argv": ["pytest"]}, timeout_seconds=99,
+    ))
+    assert result.status is ToolResultStatus.SUCCESS
+    assert received == [17]
+
+
+def test_top_level_timeout_overrides_legacy_argument_for_real_safe_cli(monkeypatch, tmp_path):
+    cap = definition(
+        capability_id="test.run", tool_name="cli.exec", timeout_seconds=30,
+        input_schema={
+            "type": "object", "properties": {
+                "argv": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+                "timeout_seconds": {"type": "number"},
+            }, "required": ["argv"], "additionalProperties": False,
+        }, output_schema={"type": "object"},
+    )
+    tools = ToolRegistry()
+    cli = SafeCliTool(LocalReadOnlyWorkspace(tmp_path), CommandPolicy())
+    received = []
+
+    async def capture(argv, cwd=".", timeout_seconds=None):
+        received.append(timeout_seconds)
+        return {"ok": True}, None
+
+    monkeypatch.setattr(cli.cli, "execute", capture)
+    tools.register(cli)
+    result = invoke(ToolContract(CapabilityRegistry(definitions=[cap]), tools), request(
+        capability_id="test.run", tool_name="cli.exec", arguments={"argv": ["pytest"], "timeout_seconds": 120}, timeout_seconds=5,
+    ))
+    assert result.status is ToolResultStatus.SUCCESS
+    assert received == [5]
+
+
+def test_legacy_argument_timeout_reaches_real_safe_cli(monkeypatch, tmp_path):
+    cli = SafeCliTool(LocalReadOnlyWorkspace(tmp_path), CommandPolicy())
+    received = []
+
+    async def capture(argv, cwd=".", timeout_seconds=None):
+        received.append(timeout_seconds)
+        return {"ok": True}, None
+
+    monkeypatch.setattr(cli.cli, "execute", capture)
+    result = asyncio.run(cli.execute(ToolRequest(
+        tool_call_id="call", task_id="task", run_id="run", attempt_id="attempt",
+        capability="cli.exec", arguments={"argv": ["pytest"], "timeout_seconds": 7},
+    )))
+    assert result.status is ToolResultStatus.SUCCESS
+    assert received == [7]
+
+
+def test_tool_request_rejects_missing_all_capability_identity():
+    with pytest.raises(ValueError, match="capability or capability_id is required"):
+        ToolRequest(tool_call_id="c", task_id="t", run_id="r", attempt_id="a")
+
+
+def test_tool_request_supports_legacy_capability_only():
+    req = ToolRequest(tool_call_id="c", task_id="t", run_id="r", attempt_id="a", capability="safe.read")
+    assert req.capability == req.capability_id == "safe.read"
+
+
+def test_tool_request_supports_capability_id_only():
+    req = ToolRequest(tool_call_id="c", task_id="t", run_id="r", attempt_id="a", capability_id="safe.read")
+    assert req.capability == req.capability_id == "safe.read"
+
+
+def test_tool_request_rejects_capability_alias_mismatch():
+    with pytest.raises(ValueError, match="same capability"):
+        ToolRequest(tool_call_id="c", task_id="t", run_id="r", attempt_id="a", capability="safe.read", capability_id="safe.write")
+
+
+def test_mismatched_tool_evidence_fails_closed():
+    bad_evidence = {
+        "evidence_type": "TOOL_EXECUTION", "source": "fake", "capability_id": "other.capability",
+        "tool_name": "other.tool", "summary": "forged", "artifact_refs": [], "metadata": {},
+    }
+    contract, _ = harness(handler=lambda req: ToolResult(
+        status=ToolResultStatus.SUCCESS, output={"ok": True},
+        evidence=bad_evidence,
+    ))
+    result = invoke(contract, request(arguments={"value": "x"}))
+    assert result.status is ToolResultStatus.FAILURE
+    assert result.error_type == ToolErrorCode.INTERNAL_ERROR.value
+    assert result.metadata["contract"]["reason"] == "EVIDENCE_IDENTITY_MISMATCH"
+    assert result.evidence.capability_id == "safe.read"
+    assert result.evidence.tool_name == "safe.tool"
 
 
 @pytest.mark.parametrize("code", [item.value for item in ToolErrorCode])

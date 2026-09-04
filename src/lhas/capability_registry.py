@@ -163,6 +163,84 @@ def _object_schema(properties: Mapping[str, Any], required: Iterable[str] = ()) 
 
 _PATH = {"type": "string"}
 _ARGV = {"type": "array", "items": {"type": "string"}, "minItems": 1}
+_WORKSPACE_READ_OUTPUT = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "path": {"type": "string"},
+        "content": {"type": "string"},
+        "start_line": {"type": "integer", "minimum": 1},
+        "end_line": {"type": "integer", "minimum": 0},
+        "total_lines": {"type": "integer", "minimum": 0},
+        "truncated": {"type": "boolean"},
+        "sha256": {"type": "string", "minLength": 64, "maxLength": 64},
+    },
+    "anyOf": [
+        {
+            "required": ["path", "content", "start_line", "end_line", "total_lines", "truncated", "sha256"]
+        },
+        {
+            "required": ["path", "content", "total_lines", "truncated"],
+            "properties": {"truncated": {"const": True}},
+        },
+    ],
+}
+_WORKSPACE_LIST_OUTPUT = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "path": {"type": "string"},
+        "entries": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "path": {"type": "string"},
+                    "type": {"type": "string", "enum": ["file", "directory"]},
+                    "size": {"type": "integer", "minimum": 0},
+                    "relative_path": {"type": "string"},
+                },
+                "required": ["path", "type", "size", "relative_path"],
+            },
+        },
+        "truncated": {"type": "boolean"},
+    },
+    "required": ["path", "entries", "truncated"],
+}
+_WORKSPACE_EDIT_OUTPUT = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "path": {"type": "string"},
+        "replacements": {"type": "integer", "minimum": 1},
+        "before_sha256": {"type": "string", "minLength": 64, "maxLength": 64},
+        "after_sha256": {"type": "string", "minLength": 64, "maxLength": 64},
+        "bytes_before": {"type": "integer", "minimum": 0},
+        "bytes_after": {"type": "integer", "minimum": 0},
+        "match_mode": {"type": "string"},
+        "candidate_count": {"type": "integer", "minimum": 0},
+        "matched_start_line": {"type": ["integer", "null"], "minimum": 1},
+        "matched_end_line": {"type": ["integer", "null"], "minimum": 1},
+    },
+    "required": [
+        "path", "replacements", "before_sha256", "after_sha256", "bytes_before",
+        "bytes_after", "match_mode", "candidate_count", "matched_start_line", "matched_end_line",
+    ],
+}
+_WORKSPACE_DIFF_OUTPUT = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "changed_files": {"type": "array", "items": {"type": "string"}},
+        "diff": {"type": "string"},
+        "files_changed": {"type": "integer", "minimum": 0},
+        "lines_added": {"type": "integer", "minimum": 0},
+        "lines_removed": {"type": "integer", "minimum": 0},
+        "truncated": {"type": "boolean"},
+    },
+    "required": ["changed_files", "diff", "files_changed", "lines_added", "lines_removed", "truncated"],
+}
 
 
 def _capability(
@@ -206,24 +284,24 @@ def default_capabilities() -> tuple[CapabilityDefinition, ...]:
         _capability(
             "workspace.read", "Read a text file in the source workspace", "workspace",
             _object_schema({"path": _PATH, "start_line": {"type": "integer"}, "end_line": {"type": "integer"}}, ["path"]),
-            _object_schema({"content": {"type": "string"}, "sha256": {"type": "string"}}),
+            _WORKSPACE_READ_OUTPUT,
             permissions=("workspace.read",), preferred_tool="workspace.read",
         ),
         _capability(
             "workspace.list", "List files in the source workspace", "workspace",
             _object_schema({"path": _PATH, "recursive": {"type": "boolean"}, "max_entries": {"type": "integer"}}),
-            {"type": "array"}, permissions=("workspace.read",), preferred_tool="workspace.list",
+            _WORKSPACE_LIST_OUTPUT, permissions=("workspace.read",), preferred_tool="workspace.list",
         ),
         _capability(
             "workspace.edit", "Apply an explicit edit in the staged workspace", "workspace",
             _object_schema({"path": _PATH, "old_text": {"type": "string"}, "new_text": {"type": "string"}}, ["path", "old_text", "new_text"]),
-            _object_schema({"path": _PATH, "sha256": {"type": "string"}}),
+            _WORKSPACE_EDIT_OUTPUT,
             permissions=("workspace.write",), risk_level="MEDIUM", retryable=False, preferred_tool="workspace.edit",
         ),
         _capability(
             "workspace.diff", "Show staged workspace changes", "workspace",
             _object_schema({"path": _PATH, "max_diff_bytes": {"type": "integer"}}),
-            {"type": "object"}, permissions=("workspace.read",), preferred_tool="workspace.diff",
+            _WORKSPACE_DIFF_OUTPUT, permissions=("workspace.read",), preferred_tool="workspace.diff",
         ),
         _capability(
             "test.run", "Run an explicitly permitted test command", "verification",
