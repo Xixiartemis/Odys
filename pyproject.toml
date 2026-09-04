@@ -5,6 +5,7 @@ description = "LHAS (Long-Horizon Agent System) - a verifiable agent runtime / h
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "jsonschema>=4,<5",
     "pydantic>=2.7,<3",
     "sqlalchemy>=2.0,<3",
     "typer>=0.12,<1",

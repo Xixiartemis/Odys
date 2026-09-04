@@ -139,7 +139,13 @@ class SafeCliTool:
     async def execute(self, request):
         args = request.arguments
         try:
-            output, error = await self.cli.execute(args.get("argv"), args.get("cwd", "."), args.get("timeout_seconds"))
+            # Tool Contract supplies the canonical effective timeout at the
+            # request level. Direct legacy callers continue to use the
+            # arguments-level timeout when no canonical value is present.
+            timeout_seconds = request.timeout_seconds
+            if timeout_seconds is None:
+                timeout_seconds = args.get("timeout_seconds")
+            output, error = await self.cli.execute(args.get("argv"), args.get("cwd", "."), timeout_seconds)
         except WorkspacePathEscape:
             return _failure("WORKSPACE_PATH_ESCAPE", "cwd outside workspace", path_kind="cwd")
         if error:

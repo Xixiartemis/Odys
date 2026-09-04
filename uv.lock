@@ -642,6 +642,7 @@ name = "lhas"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "jsonschema" },
     { name = "pydantic" },
     { name = "rich" },
     { name = "sqlalchemy" },
@@ -661,6 +662,7 @@ live = [
 
 [package.metadata]
 requires-dist = [
+    { name = "jsonschema", specifier = ">=4,<5" },
     { name = "openai-agents", marker = "extra == 'agent'", specifier = ">=0.19,<0.20" },
     { name = "pydantic", specifier = ">=2.7,<3" },
     { name = "pypdf", marker = "extra == 'live'", specifier = ">=5,<6" },
