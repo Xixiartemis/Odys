@@ -23,7 +23,9 @@ from lhas.tools.contract import ToolContract
 
 class _ToolExecutor:
     name = "ToolRegistryExecutor"
-    def __init__(self, registry, step, db, context, tool_contract=None):
+    def __init__(self, registry, step, db, context, tool_contract):
+        if tool_contract is None:
+            raise ValueError("_ToolExecutor requires a valid ToolContract; direct Tool.execute is forbidden")
         self.registry, self.step, self.db, self.context, self.tool_contract = registry, step, db, context, tool_contract
     async def execute(self, request: ExecutionRequest) -> ExecutionResult:
         event = EventStore(self.db)
@@ -34,10 +36,7 @@ class _ToolExecutor:
         safe_request={"tool_call_id":tr.tool_call_id,"capability":tr.capability}
         event.append(EventType.TOOL_CALL_STARTED, task_id=request.task_id, run_id=request.run_id, attempt_id=request.attempt_id, payload={"request":safe_request})
         try:
-            if self.tool_contract is not None:
-                result = await invoke_via_contract(self.tool_contract, tr)
-            else:
-                result = await tool.execute(tr)
+            result = await invoke_via_contract(self.tool_contract, tr)
             typ = EventType.TOOL_CALL_COMPLETED if result.status == ToolResultStatus.SUCCESS else EventType.TOOL_CALL_FAILED
             safe_result={"status":result.status.value,"error_type":result.error_type,"artifact_keys":sorted(result.artifacts)[:20]}
             event.append(typ, task_id=request.task_id, run_id=request.run_id, attempt_id=request.attempt_id, payload={"request":safe_request,"result":safe_result})
@@ -76,18 +75,27 @@ class _TaskGraphAgentExecutor:
 
 class PlanExecutionService:
     def __init__(self, db: Database, planner: Planner, registry: ToolRegistry, agent_executor_factory=None, tool_contract=None, capability_registry=None):
-        self.db, self.planner, self.registry, self.agent_executor_factory, self.tool_contract, self.capability_registry = db, planner, registry, agent_executor_factory, tool_contract, capability_registry
+        self.db, self.planner, self.registry, self.agent_executor_factory = db, planner, registry, agent_executor_factory
+        # If no explicit tool_contract provided, build one from default_capabilities()
+        # (NOT from ToolRegistry — that would be reverse synthesis)
+        if tool_contract is None and capability_registry is None:
+            from lhas.tools.invocation import build_contract_for_registry
+            self.capability_registry, self.tool_contract = build_contract_for_registry(registry)
+        else:
+            self.tool_contract = tool_contract
+            self.capability_registry = capability_registry
     def _step_executor(self, plan, step, context):
         if self.agent_executor_factory is not None:
             return _TaskGraphAgentExecutor(self.agent_executor_factory(step),plan,step,self.db)
         return _ToolExecutor(self.registry,step,self.db,context,self.tool_contract)
     def _emit(self, typ, payload): EventStore(self.db).append(typ, payload=payload)
     def _planner_capabilities(self):
-        """Project CapabilitySpecs only from tools backed by CapabilityDefinitions.
+        """Return tool specs for plan creation.
 
-        When a capability_registry is available, only tools with explicit
-        CapabilityDefinitions are planner/model-visible.  Falls back to
-        raw registry specs when no capability_registry is provided.
+        When a capability_registry is provided, only tools with explicit
+        CapabilityDefinitions are planner-visible (strict authority).
+        When no capability_registry, return all registered specs
+        (backward compatible with tests that don't use the contract path).
         """
         if self.capability_registry is not None:
             from lhas.capability_registry import CapabilityRuntimeContext

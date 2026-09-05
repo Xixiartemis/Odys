@@ -15,7 +15,7 @@ from lhas.persistence.phaseb_repos import FailureReportRepository, RecoveryActio
 def test_planner_and_tool_execution(db):
     project=Project(name="planning-domain")
     ProjectRepository(db).create(project)
-    specs=[CapabilitySpec(name=n,description=n) for n in ("repo.search","repo.read","code.inspect","code.patch","test.run")]
+    specs=[CapabilitySpec(name=n,description=n) for n in ("repo.search","repo.read","code.inspect","code.patch","verify.run")]
     reg=ToolRegistry()
     for s in specs: reg.register(FakeTool(s))
     goal=Goal(project_id=project.id,objective="propose issue",allowed_capabilities=[s.name for s in specs],metadata={"plan_steps":[s.name for s in specs]})
