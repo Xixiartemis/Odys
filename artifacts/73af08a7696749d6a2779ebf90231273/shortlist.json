@@ -1,0 +1,89 @@
+{
+  "shortlist": [
+    {
+      "job_id": "9a83653e988a",
+      "company": "jobs.example",
+      "title": "React Agent",
+      "location": "unknown",
+      "source_url": "https://jobs.example/a",
+      "jd_text": "https://jobs.example/a Role  React TypeScript Python Agent engineer",
+      "content_hash": "53aff6865c4011e1b488bf32ae47e3495c12b22cea7ebf915222b92275216a77",
+      "status": "unknown",
+      "requirements": [],
+      "responsibilities": [],
+      "search_snippet": "React Python",
+      "page_title": "https://jobs.example/a Role  React TypeScript Python Agent engineer",
+      "match_score": 50.0,
+      "classification": "strong",
+      "fit_reasons": [
+        "shared skill/text: agent",
+        "shared skill/text: python",
+        "shared skill/text: react",
+        "shared skill/text: typescript"
+      ],
+      "risks": [],
+      "evidence": [
+        "agent",
+        "python",
+        "react",
+        "typescript"
+      ],
+      "resume_evidence": [
+        "agent",
+        "python",
+        "react",
+        "typescript"
+      ],
+      "job_evidence": [
+        "agent",
+        "python",
+        "react",
+        "typescript"
+      ]
+    },
+    {
+      "job_id": "2e057d233b8e",
+      "company": "jobs.example",
+      "title": "TypeScript Agent",
+      "location": "unknown",
+      "source_url": "https://jobs.example/b",
+      "jd_text": "https://jobs.example/b Role  React TypeScript Python Agent engineer",
+      "content_hash": "dd414d727535f8bca124c05870dfdd272522d2ac854f1293aa7da36772aedf8a",
+      "status": "unknown",
+      "requirements": [],
+      "responsibilities": [],
+      "search_snippet": "TypeScript Agent",
+      "page_title": "https://jobs.example/b Role  React TypeScript Python Agent engineer",
+      "match_score": 50.0,
+      "classification": "strong",
+      "fit_reasons": [
+        "shared skill/text: agent",
+        "shared skill/text: python",
+        "shared skill/text: react",
+        "shared skill/text: typescript"
+      ],
+      "risks": [],
+      "evidence": [
+        "agent",
+        "python",
+        "react",
+        "typescript"
+      ],
+      "resume_evidence": [
+        "agent",
+        "python",
+        "react",
+        "typescript"
+      ],
+      "job_evidence": [
+        "agent",
+        "python",
+        "react",
+        "typescript"
+      ]
+    }
+  ],
+  "total_candidates": 2,
+  "duplicate_count": 0,
+  "expired_filtered": 0
+}

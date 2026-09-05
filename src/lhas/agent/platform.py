@@ -87,10 +87,11 @@ class _DelegationTool:
 
 
 class PlatformGoalService:
-    def __init__(self,db,planner,registry): self.db=db; self.planner=planner; self.registry=registry
+    def __init__(self,db,planner,registry,tool_contract=None,capability_registry=None):
+        self.db=db; self.planner=planner; self.registry=registry; self.tool_contract=tool_contract; self.capability_registry=capability_registry
     async def submit(self,objective:str,context:dict,project_id:str)->GoalSubmissionResult:
         goal=Goal(project_id=project_id,objective=objective,success_criteria=["all planned tasks pass validator"],allowed_capabilities=list(ScriptedPlatformPlanner.CAPABILITIES),metadata={"platform":"agent-foundation"})
-        plan=await PlanExecutionService(self.db,self.planner,self.registry).execute_goal(goal,context=context)
+        plan=await PlanExecutionService(self.db,self.planner,self.registry,tool_contract=self.tool_contract,capability_registry=self.capability_registry).execute_goal(goal,context=context)
         refs=[]
         for step in plan.steps:
             if step.task_id:
@@ -141,7 +142,7 @@ class OfflineAgentPlatform:
         self.registry.register(_DelegationTool(delegation))
         self.registry.register(_KernelTool("platform.finalize",worker_kernel,AgentRole.REVIEWER))
         simple_kernel=ScriptedAgentKernel(lambda request: AgentResult(status=AgentStatus.COMPLETED,final_output=f"Odys offline: {request.objective[:500]}",completion_claim=True,turn_count=1))
-        goal_service=PlatformGoalService(db,ScriptedPlatformPlanner(),self.registry)
+        goal_service=PlatformGoalService(db,ScriptedPlatformPlanner(),self.registry,tool_contract=_contract,capability_registry=_cap_reg)
         self.root=RootAgentService(db,simple_kernel,goal_service,SessionRepository(db),memory,skills,self.project_root,ContextAssembler())
         self.project=project; self.skills=skills; self.memory=memory; self.knowledge=knowledge; self.toolsets=toolsets; self.delegation=delegation
         return self
