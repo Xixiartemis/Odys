@@ -228,6 +228,9 @@ def allowed_tools(registry, request, trace=None):
     except ImportError as exc:
         raise RuntimeError("agent extra is required for FunctionTool adapter") from exc
 
+    from lhas.tools.invocation import build_contract_for_registry, invoke_via_contract
+    _, _contract = build_contract_for_registry(registry)
+
     allowed = []
     filtered = []
     observer=ToolAwareObserver()
@@ -262,12 +265,13 @@ def allowed_tools(registry, request, trace=None):
                     runtime_context = runtime_context.execution_context
                 if not isinstance(runtime_context, dict):
                     runtime_context = request.context
-                result = await registry.resolve(_name).execute(ToolRequest(
+                result = await invoke_via_contract(_contract, ToolRequest(
                     tool_call_id=getattr(ctx, "tool_call_id", "inner-tool"),
                     task_id=request.task_id,
                     run_id=request.run_id,
                     attempt_id=request.attempt_id,
-                    capability=_name,
+                    capability_id=_name,
+                    tool_name=_name,
                     arguments=args,
                     context=runtime_context,
                     metadata=request.metadata,

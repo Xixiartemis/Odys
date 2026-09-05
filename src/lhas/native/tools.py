@@ -74,7 +74,12 @@ def _build_runtime_capability_registry(registry) -> CapabilityRegistry:
     Tools already declared in ``default_capabilities()`` keep their
     canonical definitions.  Any additional tools (e.g. test helpers,
     skills, MCP tools) get a permissive runtime definition so they can
-    pass through the ToolContract boundary.
+    pass through the ToolContract boundary for INVOCATION ROUTING.
+
+    Model-facing schema exposure is handled separately in
+    ``NativeToolDispatcher.tool_schemas()`` which only exposes
+    capabilities from the default catalog — undeclared tools do NOT
+    become model-visible even though they can be invoked internally.
     """
     from lhas.capability_registry import (
         CapabilityDefinition,
@@ -173,12 +178,21 @@ class NativeToolDispatcher:
         )
 
     def tool_schemas(self) -> list[dict[str, Any]]:
-        """Return tool schemas from CapabilityDefinitions (semantic contract)."""
+        """Return tool schemas from CapabilityDefinitions (semantic contract).
+
+        Only explicitly declared capabilities are exposed to the model.
+        Runtime-fallback capabilities (source="runtime") are excluded —
+        they exist for internal routing only and must not appear in
+        model-facing schemas.
+        """
         schemas = []
         for name in sorted(self.allowed_capabilities):
             try:
                 definition = self.capability_registry.get(name)
             except KeyError:
+                continue
+            # Exclude runtime-fallback capabilities from model-facing schemas
+            if getattr(definition, "source", None) == "runtime":
                 continue
             # Check capability availability via discovery
             context = self._runtime_context()

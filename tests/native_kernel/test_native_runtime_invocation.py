@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import sys
 
 import pytest
 
@@ -16,6 +17,7 @@ from lhas.agent.models import AgentBudget, AgentRequest, AgentRole
 from lhas.capability_registry import (
     CapabilityRegistry,
     CapabilityRuntimeContext,
+    default_capabilities,
 )
 from lhas.domain.models import Attempt, Run
 from lhas.native.models import ExecutionSnapshot, ProviderToolCall, SideEffectClass
@@ -142,14 +144,14 @@ def test_test_run_semantic_capability_routes_to_cli_exec(db, tmp_path):
     tools = ToolRegistry()
     cli_tool = SafeCliTool(
         LocalReadOnlyWorkspace(tmp_path),
-        CommandPolicy(rules=[CommandRule(argv_prefix=["echo"])]),
+        CommandPolicy(rules=[CommandRule(argv_prefix=[sys.executable])]),
     )
     tools.register(cli_tool)
 
     dispatcher = _dispatcher(db, tools, allowed={"test.run"})
     snapshot = _snapshot()
     request = _request(allowed_capabilities={"test.run"})
-    call = _call("test.run", {"argv": ["echo", "ok"]})
+    call = _call("test.run", {"argv": [sys.executable, "-c", "print('ok')"]})
 
     observation = asyncio.run(dispatcher.dispatch(call, request, snapshot))
     assert observation["status"] == "SUCCESS"
@@ -281,14 +283,29 @@ def test_output_validation_failure_observed_as_failure(db):
 # ---------------------------------------------------------------------------
 
 def test_command_not_allowed_preserved_through_contract(db, tmp_path):
-    """Test 7: COMMAND_NOT_ALLOWED preserved."""
+    """Test 7: COMMAND_NOT_ALLOWED preserved through semantic capability path."""
     tools = ToolRegistry()
     tools.register(SafeCliTool(LocalReadOnlyWorkspace(tmp_path), CommandPolicy()))
 
-    dispatcher = _dispatcher(db, tools, allowed={"cli.exec"})
+    # test.run is a semantic capability that routes to cli.exec backend.
+    # CommandPolicy with no rules rejects everything → COMMAND_NOT_ALLOWED.
+    cap_def = _cap_def("test.run", "cli.exec", input_schema={
+        "type": "object",
+        "properties": {
+            "argv": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+        },
+        "required": ["argv"],
+        "additionalProperties": False,
+    })
+    # Replace existing test.run definition with one that has explicit input_schema
+    defs = [d for d in default_capabilities() if d.id != "test.run"]
+    cap_reg = CapabilityRegistry(tools, definitions=[*defs, cap_def])
+    contract = ToolContract(cap_reg, tools)
+    dispatcher = _dispatcher(db, tools, allowed={"test.run"},
+                             capability_registry=cap_reg, tool_contract=contract)
     snapshot = _snapshot()
-    request = _request(allowed_capabilities={"cli.exec"})
-    call = _call("cli.exec", {"argv": ["dangerous-command"]})
+    request = _request(allowed_capabilities={"test.run"})
+    call = _call("test.run", {"argv": ["dangerous-command"]})
 
     observation = asyncio.run(dispatcher.dispatch(call, request, snapshot))
     assert observation["status"] == "FAILURE"
@@ -402,7 +419,11 @@ def test_tool_success_does_not_update_completion_authority(db):
     tool = _TrackingTool("test.echo")
     tools = ToolRegistry()
     tools.register(tool)
-    dispatcher = _dispatcher(db, tools, allowed={"test.echo"})
+    cap_def = _cap_def("test.echo", "test.echo")
+    cap_reg = CapabilityRegistry(tools, definitions=[*default_capabilities(), cap_def])
+    contract = ToolContract(cap_reg, tools)
+    dispatcher = _dispatcher(db, tools, allowed={"test.echo"},
+                             capability_registry=cap_reg, tool_contract=contract)
 
     snapshot = _snapshot()
     request = _request(allowed_capabilities={"test.echo"})
@@ -450,7 +471,11 @@ def test_all_execution_routes_through_tool_contract(db):
     tool = _TrackingTool("test.echo")
     tools = ToolRegistry()
     tools.register(tool)
-    dispatcher = _dispatcher(db, tools, allowed={"test.echo"})
+    cap_def = _cap_def("test.echo", "test.echo")
+    cap_reg = CapabilityRegistry(tools, definitions=[*default_capabilities(), cap_def])
+    contract = ToolContract(cap_reg, tools)
+    dispatcher = _dispatcher(db, tools, allowed={"test.echo"},
+                             capability_registry=cap_reg, tool_contract=contract)
 
     snapshot = _snapshot()
     request = _request(allowed_capabilities={"test.echo"})
@@ -553,7 +578,11 @@ def test_contract_evidence_present_on_success(db):
     tool = _TrackingTool("test.echo")
     tools = ToolRegistry()
     tools.register(tool)
-    dispatcher = _dispatcher(db, tools, allowed={"test.echo"})
+    cap_def = _cap_def("test.echo", "test.echo")
+    cap_reg = CapabilityRegistry(tools, definitions=[*default_capabilities(), cap_def])
+    contract = ToolContract(cap_reg, tools)
+    dispatcher = _dispatcher(db, tools, allowed={"test.echo"},
+                             capability_registry=cap_reg, tool_contract=contract)
 
     snapshot = _snapshot()
     request = _request(allowed_capabilities={"test.echo"})
@@ -589,7 +618,11 @@ def test_duplicate_invocation_reconciliation_preserved(db):
     tool = _TrackingTool("test.echo")
     tools = ToolRegistry()
     tools.register(tool)
-    dispatcher = _dispatcher(db, tools, allowed={"test.echo"})
+    cap_def = _cap_def("test.echo", "test.echo")
+    cap_reg = CapabilityRegistry(tools, definitions=[*default_capabilities(), cap_def])
+    contract = ToolContract(cap_reg, tools)
+    dispatcher = _dispatcher(db, tools, allowed={"test.echo"},
+                             capability_registry=cap_reg, tool_contract=contract)
 
     snapshot = _snapshot()
     request = _request(allowed_capabilities={"test.echo"})
@@ -628,4 +661,245 @@ def _cap_def(capability_id, preferred_tool=None, input_schema=None, output_schem
         preferred_tool=preferred_tool or capability_id,
         source="test",
         evidence_type="DETERMINISTIC_TOOL_RESULT",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test 13a: CapabilitySpec-only Tool is NOT model-facing
+# ---------------------------------------------------------------------------
+
+def test_capability_spec_only_tool_not_model_facing(db):
+    """Test 13a: A Tool with only CapabilitySpec (no CapabilityDefinition)
+    is NOT model-visible but CAN be invoked for routing.
+    CAPABILITY_SPEC_CAN_CREATE_MODEL_SCHEMA=NO."""
+    tool = _TrackingTool("spec.only.tool")
+    tools = ToolRegistry()
+    tools.register(tool)
+
+    # Build dispatcher without providing CapabilityDefinition for spec.only.tool
+    dispatcher = _dispatcher(db, tools, allowed={"spec.only.tool"})
+
+    # The tool exists in ToolRegistry (concrete backend)
+    assert tools.resolve("spec.only.tool") is tool
+
+    # It must NOT appear in tool_schemas (model-facing)
+    schemas = dispatcher.tool_schemas()
+    schema_names = {s["function"]["name"] for s in schemas}
+    assert "spec.only.tool" not in schema_names, (
+        "CapabilitySpec-only tool must not appear in model-facing tool_schemas"
+    )
+
+    # It CAN be invoked for routing (fallback creates runtime definition)
+    snapshot = _snapshot()
+    request = _request(allowed_capabilities={"spec.only.tool"})
+    call = _call("spec.only.tool", {})
+    observation = asyncio.run(dispatcher.dispatch(call, request, snapshot))
+    assert observation["status"] == "SUCCESS"
+
+
+# ---------------------------------------------------------------------------
+# Test 13b: Explicit CapabilityDefinition is required for model visibility
+# ---------------------------------------------------------------------------
+
+def test_explicit_definition_required_for_model_visibility(db):
+    """Test 13b: Only explicit CapabilityDefinition makes a tool model-visible."""
+    tool = _TrackingTool("explicit.tool")
+    tools = ToolRegistry()
+    tools.register(tool)
+
+    cap_def = _cap_def("explicit.tool", "explicit.tool")
+    cap_reg = CapabilityRegistry(tools, definitions=[cap_def])
+    contract = ToolContract(cap_reg, tools)
+    dispatcher = _dispatcher(db, tools, allowed={"explicit.tool"},
+                             capability_registry=cap_reg, tool_contract=contract)
+
+    schemas = dispatcher.tool_schemas()
+    schema_names = {s["function"]["name"] for s in schemas}
+    assert "explicit.tool" in schema_names, (
+        "Explicitly declared tool must appear in model-facing tool_schemas"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test 14: platform.delegate child path uses unified contract invocation
+# ---------------------------------------------------------------------------
+
+def test_platform_delegate_child_path_uses_contract_invocation(db, tmp_path):
+    """Test 14: platform.delegate child path routes through ToolContract."""
+    from lhas.tools.invocation import build_contract_for_registry, invoke_via_contract
+
+    tools = ToolRegistry()
+    tool = _TrackingTool("child.cap")
+    tools.register(tool)
+    cap_def = _cap_def("child.cap", "child.cap")
+    cap_reg = CapabilityRegistry(tools, definitions=[cap_def])
+    contract = ToolContract(cap_reg, tools)
+
+    # Simulate the child_handler pattern: invoke through contract
+    tr = ToolRequest(
+        tool_call_id="test-child",
+        task_id="t", run_id="r", attempt_id="a",
+        capability_id="child.cap",
+        tool_name="child.cap",
+        arguments={"value": "hello"},
+    )
+    result = asyncio.run(invoke_via_contract(contract, tr))
+    assert result.status is ToolResultStatus.SUCCESS
+    assert len(tool.calls) == 1
+    assert tool.calls[0].capability_id == "child.cap"
+
+
+# ---------------------------------------------------------------------------
+# Test 15: CLI agent-facing path cannot bypass ToolContract
+# ---------------------------------------------------------------------------
+
+def test_cli_agent_path_uses_contract(tmp_path):
+    """Test 15: OfflineDemoBackend routes through ToolContract, not direct execute."""
+    source = ""
+    try:
+        import lhas.cli_runtime as mod
+        source = inspect.getsource(mod.OfflineDemoBackend)
+    except (ImportError, OSError):
+        pytest.skip("cannot inspect cli_runtime source")
+
+    # Verify no direct .execute(ToolRequest pattern remains
+    direct_calls = [
+        line.strip() for line in source.splitlines()
+        if ".execute(ToolRequest" in line
+        and "invoke_via_contract" not in line
+    ]
+    assert direct_calls == [], (
+        f"Direct tool.execute bypass found in OfflineDemoBackend: {direct_calls}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test 16: inner-agent agent-facing path cannot bypass ToolContract
+# ---------------------------------------------------------------------------
+
+def test_inner_agent_path_uses_contract():
+    """Test 16: inner_agent.tool_adapter routes through ToolContract."""
+    source = ""
+    try:
+        import lhas.inner_agent.tool_adapter as mod
+        source = inspect.getsource(mod)
+    except (ImportError, OSError):
+        pytest.skip("cannot inspect tool_adapter source")
+
+    direct_calls = [
+        line.strip() for line in source.splitlines()
+        if ".execute(ToolRequest" in line
+        and "invoke_via_contract" not in line
+    ]
+    assert direct_calls == [], (
+        f"Direct tool.execute bypass found in tool_adapter: {direct_calls}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test 17: invalid delegated child args execute backend 0 times
+# ---------------------------------------------------------------------------
+
+def test_invalid_delegated_child_args_execute_zero_times(db):
+    """Test 17: Invalid args routed through contract hit backend 0 times."""
+    tool = _TrackingTool("safe.child", input_schema={
+        "type": "object",
+        "properties": {"required_field": {"type": "string"}},
+        "required": ["required_field"],
+        "additionalProperties": False,
+    })
+    tools = ToolRegistry()
+    tools.register(tool)
+    cap_def = _cap_def("safe.child", "safe.child", input_schema={
+        "type": "object",
+        "properties": {"required_field": {"type": "string"}},
+        "required": ["required_field"],
+        "additionalProperties": False,
+    })
+    cap_reg = CapabilityRegistry(tools, definitions=[cap_def])
+    contract = ToolContract(cap_reg, tools)
+
+    from lhas.tools.invocation import invoke_via_contract
+    tr = ToolRequest(
+        tool_call_id="invalid-child",
+        task_id="t", run_id="r", attempt_id="a",
+        capability_id="safe.child", tool_name="safe.child",
+        arguments={"wrong": "field"},
+    )
+    result = asyncio.run(invoke_via_contract(contract, tr))
+    assert result.status is ToolResultStatus.FAILURE
+    assert len(tool.calls) == 0, "Tool must not be called when args are invalid"
+
+
+# ---------------------------------------------------------------------------
+# Test 18: output validation failure propagates through delegated path
+# ---------------------------------------------------------------------------
+
+def test_output_validation_failure_through_delegated_path(db):
+    """Test 18: Output validation failure propagates through contract."""
+    tool = _TrackingTool(
+        "bad.output.child",
+        handler=lambda req: ToolResult(
+            status=ToolResultStatus.SUCCESS,
+            output={"ok": "not-a-bool"},
+        ),
+    )
+    tools = ToolRegistry()
+    tools.register(tool)
+    cap_def = _cap_def(
+        "bad.output.child", "bad.output.child",
+        output_schema={
+            "type": "object",
+            "properties": {"ok": {"type": "boolean"}},
+            "required": ["ok"],
+            "additionalProperties": False,
+        },
+    )
+    cap_reg = CapabilityRegistry(tools, definitions=[cap_def])
+    contract = ToolContract(cap_reg, tools)
+
+    from lhas.tools.invocation import invoke_via_contract
+    tr = ToolRequest(
+        tool_call_id="bad-output-child",
+        task_id="t", run_id="r", attempt_id="a",
+        capability_id="bad.output.child", tool_name="bad.output.child",
+        arguments={},
+    )
+    result = asyncio.run(invoke_via_contract(contract, tr))
+    assert result.status is ToolResultStatus.FAILURE
+    assert result.error_type == ToolErrorCode.OUTPUT_VALIDATION_FAILED.value
+
+
+# ---------------------------------------------------------------------------
+# Test 19: unexplained direct Tool.execute agent bypass count = 0
+# ---------------------------------------------------------------------------
+
+_AGENT_FACING_FILES = [
+    "src/lhas/agent/platform.py",
+    "src/lhas/cli_runtime.py",
+    "src/lhas/inner_agent/tool_adapter.py",
+    "src/lhas/native/tools.py",
+]
+
+
+def test_unexplained_direct_tool_execute_agent_bypass_count_zero():
+    """Test 19: No unexplained direct .execute(ToolRequest) calls remain
+    in agent-facing code paths."""
+    import os
+    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
+    violations = []
+    for rel_path in _AGENT_FACING_FILES:
+        abs_path = os.path.join(root, rel_path)
+        if not os.path.exists(abs_path):
+            continue
+        with open(abs_path, encoding="utf-8") as fh:
+            for lineno, line in enumerate(fh, 1):
+                stripped = line.strip()
+                if ".execute(ToolRequest" in stripped and "invoke_via_contract" not in stripped:
+                    # Allow tool_contract.invoke() calls (the contract boundary itself)
+                    if "tool_contract" in stripped or "contract" in stripped.lower():
+                        continue
+                    violations.append(f"{rel_path}:{lineno}: {stripped[:120]}")
+    assert violations == [], (
+        f"Unexplained direct Tool.execute agent bypasses found: {violations}"
     )

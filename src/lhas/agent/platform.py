@@ -119,11 +119,13 @@ class OfflineAgentPlatform:
         mcp_caps=set(register_mcp_tools(self.registry,self.mcp,infos))
         for info in infos: EventStore(db).append(EventType.MCP_TOOL_DISCOVERED,payload={"server_name":info.server_name,"capability":info.name,"origin":"mcp"})
         toolsets=ToolsetRegistry(self.registry); toolsets.extend("mcp",mcp_caps)
+        from lhas.tools.invocation import build_contract_for_registry, invoke_via_contract
+        _cap_reg, _contract = build_contract_for_registry(self.registry)
 
         async def child_handler(request:AgentRequest):
             traces=[]
             async def call(capability,args):
-                result=await self.registry.resolve(capability).execute(ToolRequest(tool_call_id=new_id(),task_id=str(request.metadata["task_id"]),run_id=str(request.metadata["run_id"]),attempt_id=str(request.metadata["attempt_id"]),capability=capability,arguments=args,context=request.context,metadata={"role":request.role.value}))
+                result=await invoke_via_contract(_contract,ToolRequest(tool_call_id=new_id(),task_id=str(request.metadata["task_id"]),run_id=str(request.metadata["run_id"]),attempt_id=str(request.metadata["attempt_id"]),capability_id=capability,tool_name=capability,arguments=args,context=request.context,metadata={"role":request.role.value}))
                 traces.append({"capability":capability,"status":result.status.value,"error_type":result.error_type})
                 return result
             skill=await call("skills.view",{"name":"coding/code-review"})
