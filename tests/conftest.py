@@ -13,6 +13,20 @@ from lhas.persistence.repositories import ProjectRepository
 from lhas.task_service import create_task
 
 
+@pytest.fixture(autouse=True)
+def isolated_agent_environment(monkeypatch):
+    """Keep provider selection tests independent of the invoking shell."""
+    for name in (
+        "ODYS_AGENT_API_KEY",
+        "ODYS_AGENT_API_MODE",
+        "ODYS_AGENT_BASE_URL",
+        "ODYS_AGENT_MODEL",
+        "ODYS_AGENT_PROVIDER_PROFILE",
+        "ODYS_AGENT_SDK_TRACING",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
+
 @pytest.fixture()
 def db(tmp_path):
     database = Database(tmp_path / "test.db")
