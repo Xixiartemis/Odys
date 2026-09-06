@@ -14,7 +14,11 @@ from lhas.persistence.repositories import AttemptRepository, RunRepository
 from lhas.planning.models import CapabilitySpec
 from lhas.tools.protocol import ToolResult, ToolResultStatus
 from lhas.tools.registry import ToolRegistry
-from tests.helpers import PassingCommandValidator
+from tests.helpers import (
+    PassingCommandValidator,
+    make_test_capability_definition,
+    make_test_capability_registry,
+)
 
 
 class CrashOnce:
@@ -75,6 +79,8 @@ def _durable_case(db, make_task):
 def _kernel(db, request, tool, responses, validator, *, fault=None, mutation_probe=None):
     registry = ToolRegistry()
     registry.register(tool)
+    cap_def = make_test_capability_definition(tool.capability.name, side_effect=tool.capability.side_effect, input_schema=tool.capability.input_schema)
+    cap_reg, contract = make_test_capability_registry(registry, definitions=[cap_def])
     dispatcher = NativeToolDispatcher(
         db=db,
         registry=registry,
@@ -82,6 +88,8 @@ def _kernel(db, request, tool, responses, validator, *, fault=None, mutation_pro
         allowed_side_effect_capabilities={"test.mutate"},
         fault_injector=fault,
         mutation_probe=mutation_probe,
+        capability_registry=cap_reg,
+        tool_contract=contract,
     )
     authority = CompletionAuthority(db=db, validator=validator, fault_injector=fault)
     return NativeAgentKernel(

@@ -221,7 +221,7 @@ class ToolAwareObserver:
         return summary
 
 
-def allowed_tools(registry, request, trace=None):
+def allowed_tools(registry, request, trace=None, definitions=None):
     """Build SDK FunctionTool objects only for safe allow-listed capabilities."""
     try:
         from agents import FunctionTool
@@ -229,23 +229,28 @@ def allowed_tools(registry, request, trace=None):
         raise RuntimeError("agent extra is required for FunctionTool adapter") from exc
 
     from lhas.tools.invocation import build_contract_for_registry, invoke_via_contract
-    _, _contract = build_contract_for_registry(registry)
+    _capability_registry, _contract = build_contract_for_registry(registry, definitions=definitions)
 
     allowed = []
     filtered = []
     observer=ToolAwareObserver()
     for name in request.allowed_capabilities:
         try:
-            tool = registry.resolve(name)
+            definition = _capability_registry.get(name)
         except KeyError:
             filtered.append(name)
             continue
-        spec = tool.capability
+        try:
+            backend = registry.resolve(definition.preferred_tool)
+        except KeyError:
+            filtered.append(name)
+            continue
+        spec = backend.capability
         if spec.requires_human_approval or (spec.side_effect and name not in request.allowed_side_effect_capabilities):
             filtered.append(name)
             continue
 
-        async def invoke(ctx, raw, _name=name, _spec=spec):
+        async def invoke(ctx, raw, _name=name, _backend_name=backend.capability.name):
             try:
                 args = json.loads(raw) if isinstance(raw, str) else raw
                 if not isinstance(args, dict):
@@ -271,7 +276,7 @@ def allowed_tools(registry, request, trace=None):
                     run_id=request.run_id,
                     attempt_id=request.attempt_id,
                     capability_id=_name,
-                    tool_name=_name,
+                    tool_name=_backend_name,
                     arguments=args,
                     context=runtime_context,
                     metadata=request.metadata,
@@ -334,9 +339,9 @@ def allowed_tools(registry, request, trace=None):
                 return {"status": "FAILURE", "error_type": "TOOL_ADAPTER_ERROR", "error_message": message, "output": None}
 
         allowed.append(FunctionTool(
-            name=spec.name,
-            description=spec.description,
-            params_json_schema=spec.input_schema or {"type": "object", "additionalProperties": False},
+            name=definition.name,
+            description=definition.description,
+            params_json_schema=definition.input_schema or {"type": "object", "additionalProperties": False},
             on_invoke_tool=invoke,
         ))
     return allowed, filtered

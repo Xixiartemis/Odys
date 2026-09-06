@@ -11,7 +11,11 @@ from lhas.planning.planner import DeterministicPlanner
 from lhas.planning.service import PlanExecutionService
 from lhas.tools.protocol import ToolResult, ToolResultStatus
 from lhas.tools.registry import ToolRegistry
-from tests.helpers import PassingCommandValidator
+from tests.helpers import (
+    PassingCommandValidator,
+    make_test_capability_definition,
+    make_test_capability_registry,
+)
 
 
 class DeclaredCapability:
@@ -35,7 +39,9 @@ def test_goal_plan_taskgraph_active_node_flows_into_native_kernel(db, project):
         return NativeAgentExecutor(kernel, allowed_capabilities=set(), allowed_side_effect_capabilities=set(), max_turns=2)
 
     goal = Goal(project_id=project.id, objective="complete canonical graph", success_criteria=["accepted"], allowed_capabilities=["native.work"])
-    service = PlanExecutionService(db, DeterministicPlanner(), registry, agent_executor_factory=executor_factory)
+    defs = [make_test_capability_definition("native.work")]
+    cap_reg, contract = make_test_capability_registry(registry, defs)
+    service = PlanExecutionService(db, DeterministicPlanner(), registry, agent_executor_factory=executor_factory, capability_registry=cap_reg, tool_contract=contract)
     plan = asyncio.run(service.execute_goal(goal))
     assert plan.status.value == "COMPLETED"
     assert len(plan.steps) == 1

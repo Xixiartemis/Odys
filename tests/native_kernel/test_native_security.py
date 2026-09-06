@@ -7,6 +7,12 @@ from lhas.native.models import ExecutionSnapshot, ProviderToolCall
 from lhas.native.persistence import ToolInvocationRepository
 from lhas.native.tools import NativeToolDispatcher
 from lhas.persistence.event_store import EventStore
+from lhas.capability_registry import (
+    CapabilityDefinition,
+    CapabilityRegistry,
+    RuntimePlatform,
+    default_capabilities,
+)
 from lhas.planning.models import CapabilitySpec
 from lhas.tools.protocol import ToolResult, ToolResultStatus
 from lhas.tools.registry import ToolRegistry
@@ -30,10 +36,39 @@ def test_native_context_is_deterministic_and_bounded():
     assert first.truncated_sections
 
 
+def _test_secret_definition() -> CapabilityDefinition:
+    """Minimal CapabilityDefinition for the test.secret capability."""
+    return CapabilityDefinition(
+        id="test.secret",
+        name="test.secret",
+        description="security test",
+        category="test",
+        version="v1",
+        input_schema={"type": "object", "additionalProperties": True},
+        output_schema={"type": "object"},
+        platforms=(RuntimePlatform.WINDOWS, RuntimePlatform.LINUX, RuntimePlatform.MACOS),
+        permissions=(),
+        risk_level="LOW",
+        workspace_scope="SOURCE_WORKSPACE",
+        timeout_seconds=30.0,
+        retryable=True,
+        preferred_tool="test.secret",
+        fallback_tools=(),
+        source="test",
+        evidence_type="DETERMINISTIC_TOOL_RESULT",
+    )
+
+
 def test_raw_tool_arguments_and_secrets_are_not_persisted(db):
     registry = ToolRegistry()
     registry.register(SecretEchoTool())
-    dispatcher = NativeToolDispatcher(db=db, registry=registry, allowed_capabilities={"test.secret"}, allowed_side_effect_capabilities=set())
+    cap_registry = CapabilityRegistry(
+        registry, definitions=(*default_capabilities(), _test_secret_definition()),
+    )
+    dispatcher = NativeToolDispatcher(
+        db=db, registry=registry, allowed_capabilities={"test.secret"},
+        allowed_side_effect_capabilities=set(), capability_registry=cap_registry,
+    )
     snapshot = ExecutionSnapshot(task_id="task", run_id="run", attempt_id="attempt", goal="goal")
     request = AgentRequest(agent_id="a", role=AgentRole.WORKER, objective="goal", allowed_capabilities={"test.secret"}, metadata={"task_id": "task", "run_id": "run", "attempt_id": "attempt"})
     observation = asyncio.run(dispatcher.dispatch(ProviderToolCall(id="secret-call", name="test.secret", arguments={"token": "super-secret", "query": "private"}), request, snapshot))

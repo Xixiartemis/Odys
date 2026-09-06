@@ -23,7 +23,7 @@ from lhas.platform_models import Delegation
 from lhas.tools.fakes import FakeTool
 from lhas.tools.protocol import ToolResult, ToolResultStatus
 from lhas.tools.registry import ToolRegistry
-from tests.helpers import PassingCommandValidator
+from tests.helpers import PassingCommandValidator, make_test_capability_definition, make_test_capability_registry
 
 
 class _ReplanPlanner:
@@ -50,6 +50,7 @@ class _ReplanPlanner:
 
 def _tools(log):
     registry = ToolRegistry()
+    cap_names = list("abcde")
 
     def handler(name):
         def run(request):
@@ -59,9 +60,9 @@ def _tools(log):
             return ToolResult(status=ToolResultStatus.SUCCESS, output={"route": name})
         return run
 
-    for name in "abcde":
+    for name in cap_names:
         registry.register(FakeTool(CapabilitySpec(name=name, description=name), handler(name)))
-    return registry
+    return registry, [make_test_capability_definition(n) for n in cap_names]
 
 
 def _goal(db, name):
@@ -73,7 +74,9 @@ def test_w1_invalid_assumption_replans_to_new_route(db):
     log = []
     planner = _ReplanPlanner()
     goal = _goal(db, "w1-invalid-assumption")
-    plan = asyncio.run(PlanExecutionService(db, planner, _tools(log)).execute_goal(goal))
+    tools_reg, cap_defs = _tools(log)
+    cap_reg, contract = make_test_capability_registry(tools_reg, cap_defs)
+    plan = asyncio.run(PlanExecutionService(db, planner, tools_reg, capability_registry=cap_reg, tool_contract=contract).execute_goal(goal))
     assert planner.calls == [False, True]
     assert log[:1] == ["a"] and log.count("b") == 2
     assert log[-2:] == ["d", "e"]
@@ -117,10 +120,12 @@ def test_w2_repeated_dead_end_replans_materially_different_path(db):
                 return ToolResult(status=ToolResultStatus.FAILURE, error_type="STRATEGY_DEAD_END", error_message="same scoped strategy failed")
             return ToolResult(status=ToolResultStatus.SUCCESS, output={"route": capability})
         registry.register(FakeTool(CapabilitySpec(name=name), run))
+    cap_defs = [make_test_capability_definition(n) for n in ("probe", "stale-original", "alternate", "verify")]
+    cap_reg, contract = make_test_capability_registry(registry, cap_defs)
     planner = DeadEndPlanner()
     goal = _goal(db, "w2-dead-end")
     goal.allowed_capabilities = ["probe", "stale-original", "alternate", "verify"]
-    plan = asyncio.run(PlanExecutionService(db, planner, registry).execute_goal(goal))
+    plan = asyncio.run(PlanExecutionService(db, planner, registry, capability_registry=cap_reg, tool_contract=contract).execute_goal(goal))
     assert log == ["probe", "probe", "alternate", "verify"]
     assert "stale-original" not in log
     assert planner.calls == [False, True]
@@ -172,8 +177,9 @@ def test_w3_validator_rejection_flows_through_plan_execution(db):
 
     goal = _goal(db, "w3-validator")
     planner = _ReplanPlanner()
-    registry = _tools([])
-    finished = asyncio.run(PlanExecutionService(db, planner, registry, agent_executor_factory=agent_factory).execute_goal(goal))
+    tools_reg, cap_defs = _tools([])
+    cap_reg, contract = make_test_capability_registry(tools_reg, cap_defs)
+    finished = asyncio.run(PlanExecutionService(db, planner, tools_reg, agent_executor_factory=agent_factory, capability_registry=cap_reg, tool_contract=contract).execute_goal(goal))
     assert finished.status is PlanStatus.COMPLETED
     assert {step.capability for step in finished.steps if step.status is PlanStepStatus.COMPLETED} >= {"a", "d", "e"}
     assert "c" not in executed and executed == ["a", "b", "d", "e"]
@@ -187,7 +193,8 @@ def test_w3_validator_rejection_flows_through_plan_execution(db):
 def test_w4_durable_child_failure_flows_through_parent_plan_execution(db):
     goal = _goal(db, "w4-child")
     planner = _ReplanPlanner(PlanMode.SIMPLE_DEPENDENCY)
-    registry = _tools([])
+    tools_reg, cap_defs = _tools([])
+    cap_reg, contract = make_test_capability_registry(tools_reg, cap_defs)
     delegation_ids = []
     executed = []
 
@@ -247,7 +254,7 @@ def test_w4_durable_child_failure_flows_through_parent_plan_execution(db):
         native = NativeAgentExecutor(kernel, allowed_capabilities=[], allowed_side_effect_capabilities=[], max_turns=1)
         return FailedChildThenNative(native) if step.capability == "b" else native
 
-    finished = asyncio.run(PlanExecutionService(db, planner, registry, agent_executor_factory=agent_factory).execute_goal(goal))
+    finished = asyncio.run(PlanExecutionService(db, planner, tools_reg, agent_executor_factory=agent_factory, capability_registry=cap_reg, tool_contract=contract).execute_goal(goal))
     assert finished.status is PlanStatus.COMPLETED
     assert "c" not in executed
     assert executed[:2] == ["a", "b"] and executed[-2:] == ["d", "e"]

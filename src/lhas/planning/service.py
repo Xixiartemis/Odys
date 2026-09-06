@@ -83,7 +83,7 @@ class PlanExecutionService:
             self.capability_registry, self.tool_contract = build_contract_for_registry(registry)
         else:
             self.tool_contract = tool_contract
-            self.capability_registry = capability_registry
+            self.capability_registry = capability_registry or getattr(tool_contract, "capability_registry", None)
     def _step_executor(self, plan, step, context):
         if self.agent_executor_factory is not None:
             return _TaskGraphAgentExecutor(self.agent_executor_factory(step),plan,step,self.db)
@@ -94,15 +94,14 @@ class PlanExecutionService:
 
         When a capability_registry is provided, only tools with explicit
         CapabilityDefinitions are planner-visible (strict authority).
-        When no capability_registry, return all registered specs
-        (backward compatible with tests that don't use the contract path).
+        Without a semantic registry there is no planner-visible capability.
         """
         if self.capability_registry is not None:
             from lhas.capability_registry import CapabilityRuntimeContext
             ctx = CapabilityRuntimeContext(platform="windows", available_tools=set(self.registry.list_capabilities()))
             available = {d.id for d in self.capability_registry.list_available(ctx)}
             return [spec for spec in self.registry.specs() if spec.name in available]
-        return self.registry.specs()
+        return []
     def _resolve_capability_spec(self, capability_name: str):
         """Resolve the CapabilitySpec for a step, preferring CapabilityDefinition authority."""
         return self.registry.resolve(capability_name).capability

@@ -15,6 +15,7 @@ from lhas.agent.planner import ScriptedPlatformPlanner
 from lhas.agent.profile import AgentProfileRegistry
 from lhas.agent.root import GoalSubmissionResult, RootAgentService
 from lhas.agent.toolsets import ToolsetRegistry
+from lhas.capability_registry import CapabilityDefinition, RuntimePlatform
 from lhas.domain.enums import EventType
 from lhas.domain.models import Project, new_id
 from lhas.knowledge import LocalKnowledgeProvider
@@ -29,6 +30,53 @@ from lhas.platform_models import DelegationRequest
 from lhas.skills import SkillRegistry
 from lhas.tools.protocol import ToolRequest, ToolResult, ToolResultStatus
 from lhas.tools.registry import ToolRegistry
+
+
+def _adapter_definition(
+    capability_id: str,
+    description: str,
+    input_schema: dict[str, Any],
+    output_schema: dict[str, Any] | None = None,
+) -> CapabilityDefinition:
+    """Declare a platform adapter capability without inspecting its backend."""
+    return CapabilityDefinition(
+        id=capability_id,
+        name=capability_id,
+        description=description,
+        category="platform-adapter",
+        version="v1",
+        input_schema=input_schema,
+        output_schema=output_schema or {"type": "object"},
+        platforms=(RuntimePlatform.WINDOWS, RuntimePlatform.LINUX, RuntimePlatform.MACOS),
+        permissions=("platform.read",),
+        risk_level="LOW",
+        workspace_scope="SOURCE_WORKSPACE",
+        timeout_seconds=30.0,
+        retryable=True,
+        preferred_tool=capability_id,
+        source="platform-adapter",
+        evidence_type="DETERMINISTIC_TOOL_RESULT",
+    )
+
+
+_PLATFORM_ADAPTER_DEFINITIONS = (
+    _adapter_definition(
+        "skills.view",
+        "Load one explicitly named skill",
+        {"type": "object", "properties": {"name": {"type": "string"}, "reference_path": {"type": ["string", "null"]}}, "required": ["name"], "additionalProperties": False},
+    ),
+    _adapter_definition(
+        "knowledge.search",
+        "Search bounded project knowledge",
+        {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"], "additionalProperties": False},
+        {"type": "array"},
+    ),
+    _adapter_definition(
+        "mcp.offline.echo",
+        "Call the bounded offline MCP echo adapter",
+        {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"], "additionalProperties": False},
+    ),
+)
 
 
 class _SkillsTool:
@@ -121,7 +169,10 @@ class OfflineAgentPlatform:
         for info in infos: EventStore(db).append(EventType.MCP_TOOL_DISCOVERED,payload={"server_name":info.server_name,"capability":info.name,"origin":"mcp"})
         toolsets=ToolsetRegistry(self.registry); toolsets.extend("mcp",mcp_caps)
         from lhas.tools.invocation import build_contract_for_registry, invoke_via_contract
-        _cap_reg, _contract = build_contract_for_registry(self.registry)
+        _cap_reg, _contract = build_contract_for_registry(
+            self.registry,
+            definitions=_PLATFORM_ADAPTER_DEFINITIONS,
+        )
 
         async def child_handler(request:AgentRequest):
             traces=[]

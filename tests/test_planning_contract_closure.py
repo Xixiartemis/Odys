@@ -110,6 +110,27 @@ def _make_project(db):
     return ProjectRepository(db).create(Project(name="contract-test"))
 
 
+def _explicit_definition(capability_id: str) -> CapabilityDefinition:
+    return CapabilityDefinition(
+        id=capability_id,
+        name=capability_id,
+        description=f"Explicit capability {capability_id}",
+        category="test",
+        version="v1",
+        input_schema={"type": "object", "additionalProperties": True},
+        output_schema={"type": "object"},
+        platforms=(RuntimePlatform.WINDOWS, RuntimePlatform.LINUX, RuntimePlatform.MACOS),
+        permissions=("test.execute",),
+        risk_level="LOW",
+        workspace_scope="SOURCE_WORKSPACE",
+        timeout_seconds=30.0,
+        retryable=True,
+        preferred_tool=capability_id,
+        source="explicit-test",
+        evidence_type="DETERMINISTIC_TOOL_RESULT",
+    )
+
+
 # ---------------------------------------------------------------------------
 # Test 1-3: platform.prepare/delegate/finalize through PlanExecutionService traverses ToolContract
 # ---------------------------------------------------------------------------
@@ -358,16 +379,9 @@ def test_command_not_allowed_preserved(tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_capability_spec_only_tool_not_planner_visible(tmp_path):
-    """Test 8: CapabilitySpec-only Tool is NOT planner/model visible."""
+    """Test 8: CapabilitySpec-only Tool is not semantic or model visible."""
     db = _make_db(tmp_path)
     project = _make_project(db)
-
-    # Register a tool that has a CapabilitySpec but is NOT in default_capabilities()
-    # and does NOT get a CapabilityDefinition from build_contract_for_registry
-    # because it's not in the registry when we build the contract.
-    #
-    # Instead, test that when capability_registry is provided, only tools with
-    # CapabilityDefinitions are visible to the planner.
 
     platform_tool = _InstrumentedTool(CapabilitySpec(name="platform.prepare", description="prepare"))
     secret_tool = _InstrumentedTool(CapabilitySpec(name="secret.backend", description="internal"))
@@ -376,10 +390,28 @@ def test_capability_spec_only_tool_not_planner_visible(tmp_path):
     reg.register(platform_tool)
     reg.register(secret_tool)
 
-    # Build contract with only platform.prepare in the registry
-    small_reg = ToolRegistry()
-    small_reg.register(platform_tool)
-    cap_reg, contract = build_contract_for_registry(small_reg)
+    cap_reg, contract = build_contract_for_registry(reg)
+
+    # A backend CapabilitySpec must never create a semantic definition.
+    assert "secret.backend" not in {definition.id for definition in cap_reg.list_all()}
+
+    # The contract must reject the undeclared semantic capability before the
+    # concrete backend is reached.
+    rejected = asyncio.run(invoke_via_contract(contract, ToolRequest(
+        tool_call_id="spec-only", task_id="t", run_id="r", attempt_id="a",
+        capability_id="secret.backend", tool_name="secret.backend", arguments={},
+    )))
+    assert rejected.error_type == ToolErrorCode.CAPABILITY_UNAVAILABLE.value
+    assert secret_tool.execute_count == 0
+
+    # Model-facing exposure is also fail-closed for the undeclared backend.
+    from lhas.native.tools import NativeToolDispatcher
+    dispatcher = NativeToolDispatcher(
+        db=db, registry=reg, allowed_capabilities={"secret.backend"},
+        allowed_side_effect_capabilities=set(), capability_registry=cap_reg,
+        tool_contract=contract,
+    )
+    assert dispatcher.tool_schemas() == []
 
     # The planner sees capabilities from _planner_capabilities()
     # secret.backend should NOT be visible because it has no CapabilityDefinition
@@ -421,11 +453,11 @@ def test_explicit_definition_projection_visible(tmp_path):
     db = _make_db(tmp_path)
     project = _make_project(db)
 
-    platform_tool = _InstrumentedTool(CapabilitySpec(name="platform.prepare", description="prepare"))
+    explicit_tool = _InstrumentedTool(CapabilitySpec(name="explicit.backend", description="backend"))
     reg = ToolRegistry()
-    reg.register(platform_tool)
+    reg.register(explicit_tool)
 
-    cap_reg, contract = build_contract_for_registry(reg)
+    cap_reg, contract = build_contract_for_registry(reg, definitions=[_explicit_definition("explicit.backend")])
 
     planner_caps = []
 
@@ -440,18 +472,26 @@ def test_explicit_definition_projection_visible(tmp_path):
             )
             return Plan(goal_id=goal.id, mode=PlanMode.LINEAR, status="READY", steps=[step], version="P-1.0")
 
-    goal = Goal(
-        project_id=project.id, objective="test visibility",
-        allowed_capabilities=["platform.prepare"],
-    )
     svc = PlanExecutionService(
         db, _CapturingPlanner(), reg,
         tool_contract=contract, capability_registry=cap_reg,
     )
+    goal = Goal(
+        project_id=project.id, objective="test visibility",
+        allowed_capabilities=["explicit.backend"],
+    )
     plan = asyncio.run(svc.execute_goal(goal))
 
     cap_names = [c.name for c in planner_caps]
-    assert "platform.prepare" in cap_names
+    assert "explicit.backend" in cap_names
+
+    from lhas.native.tools import NativeToolDispatcher
+    dispatcher = NativeToolDispatcher(
+        db=db, registry=reg, allowed_capabilities={"explicit.backend"},
+        allowed_side_effect_capabilities=set(), capability_registry=cap_reg,
+        tool_contract=contract,
+    )
+    assert [item["function"]["name"] for item in dispatcher.tool_schemas()] == ["explicit.backend"]
 
 
 # ---------------------------------------------------------------------------

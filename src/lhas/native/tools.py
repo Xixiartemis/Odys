@@ -33,6 +33,7 @@ from lhas.capability_registry import (
     CapabilityAvailability,
     CapabilityRegistry,
     CapabilityRuntimeContext,
+    default_capabilities,
 )
 from lhas.domain.enums import EventType
 from lhas.domain.models import utcnow
@@ -69,50 +70,13 @@ def _safe_value(value: Any, limit: int = 12_000) -> Any:
 
 
 def _build_runtime_capability_registry(registry) -> CapabilityRegistry:
-    """Build a CapabilityRegistry that covers all tools in *registry*.
+    """Build the runtime view from the explicit core catalog only.
 
-    Tools already declared in ``default_capabilities()`` keep their
-    canonical definitions.  Any additional tools (e.g. test helpers,
-    skills, MCP tools) get a permissive runtime definition so they can
-    pass through the ToolContract boundary for INVOCATION ROUTING.
-
-    Model-facing schema exposure is handled separately in
-    ``NativeToolDispatcher.tool_schemas()`` which only exposes
-    capabilities from the default catalog — undeclared tools do NOT
-    become model-visible even though they can be invoked internally.
+    Backend ``CapabilitySpec`` values are never promoted into semantic
+    definitions here.  Adapter-specific definitions must be supplied by the
+    adapter when constructing its own ``CapabilityRegistry``.
     """
-    from lhas.capability_registry import (
-        CapabilityDefinition,
-        RuntimePlatform,
-        default_capabilities,
-    )
-
-    existing = {d.id for d in default_capabilities()}
-    extra: list[CapabilityDefinition] = []
-    for name in registry.list_capabilities():
-        if name in existing:
-            continue
-        tool = registry.resolve(name)
-        spec = tool.capability
-        extra.append(CapabilityDefinition(
-            id=name,
-            name=name,
-            description=spec.description or f"Runtime tool {name}",
-            category="runtime",
-            version="v1",
-            input_schema=spec.input_schema or {"type": "object", "additionalProperties": True},
-            output_schema={"type": "object"},
-            platforms=(RuntimePlatform.WINDOWS, RuntimePlatform.LINUX, RuntimePlatform.MACOS),
-            permissions=("runtime.execute",),
-            risk_level="LOW",
-            workspace_scope="SOURCE_WORKSPACE",
-            timeout_seconds=30.0,
-            retryable=True,
-            preferred_tool=name,
-            source="runtime",
-            evidence_type="DETERMINISTIC_TOOL_RESULT",
-        ))
-    return CapabilityRegistry(registry, definitions=[*default_capabilities(), *extra])
+    return CapabilityRegistry(registry, definitions=default_capabilities())
 
 
 class NativeToolDispatcher:
@@ -145,10 +109,8 @@ class NativeToolDispatcher:
         self.events = EventStore(db)
 
         # P2.3: CapabilityRegistry + ToolContract integration.
-        # When no explicit CapabilityRegistry is provided, build one that
-        # covers all registered tools — including tools outside the default
-        # catalog (e.g. test.echo) that need a runtime CapabilityDefinition
-        # to pass through the ToolContract boundary.
+        # When no explicit CapabilityRegistry is provided, use the explicit
+        # core catalog. Undeclared backend tools fail closed at the contract.
         if capability_registry is None:
             capability_registry = _build_runtime_capability_registry(registry)
         self.capability_registry = capability_registry

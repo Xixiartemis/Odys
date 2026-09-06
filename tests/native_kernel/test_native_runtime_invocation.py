@@ -361,7 +361,10 @@ def test_platform_delegate_retains_delegation_budget_and_side_effect(db):
 
     tools = ToolRegistry()
     tools.register(DelegateTool())
-    dispatcher = _dispatcher(db, tools, allowed={"platform.delegate"})
+    cap_reg = CapabilityRegistry(tools, definitions=default_capabilities())
+    dispatcher = _dispatcher(db, tools, allowed={"platform.delegate"},
+                             capability_registry=cap_reg,
+                             tool_contract=ToolContract(cap_reg, tools))
 
     # Budget = 0 → should be denied before execution
     snapshot = _snapshot(delegation_dependencies={})
@@ -392,7 +395,10 @@ def test_platform_delegate_success_with_budget(db):
 
     tools = ToolRegistry()
     tools.register(DelegateTool())
-    dispatcher = _dispatcher(db, tools, allowed={"platform.delegate"})
+    cap_reg = CapabilityRegistry(tools, definitions=default_capabilities())
+    dispatcher = _dispatcher(db, tools, allowed={"platform.delegate"},
+                             capability_registry=cap_reg,
+                             tool_contract=ToolContract(cap_reg, tools))
 
     snapshot = _snapshot(delegation_dependencies={})
     request = _request(allowed_capabilities={"platform.delegate"}, max_delegations=5)
@@ -669,9 +675,7 @@ def _cap_def(capability_id, preferred_tool=None, input_schema=None, output_schem
 # ---------------------------------------------------------------------------
 
 def test_capability_spec_only_tool_not_model_facing(db):
-    """Test 13a: A Tool with only CapabilitySpec (no CapabilityDefinition)
-    is NOT model-visible but CAN be invoked for routing.
-    CAPABILITY_SPEC_CAN_CREATE_MODEL_SCHEMA=NO."""
+    """Test 13a: A Tool with only CapabilitySpec is fully fail-closed."""
     tool = _TrackingTool("spec.only.tool")
     tools = ToolRegistry()
     tools.register(tool)
@@ -689,12 +693,14 @@ def test_capability_spec_only_tool_not_model_facing(db):
         "CapabilitySpec-only tool must not appear in model-facing tool_schemas"
     )
 
-    # It CAN be invoked for routing (fallback creates runtime definition)
+    # It cannot be semantically invoked without an explicit definition.
     snapshot = _snapshot()
     request = _request(allowed_capabilities={"spec.only.tool"})
     call = _call("spec.only.tool", {})
     observation = asyncio.run(dispatcher.dispatch(call, request, snapshot))
-    assert observation["status"] == "SUCCESS"
+    assert observation["status"] == "FAILURE"
+    assert observation["error_type"] == "UNKNOWN_CAPABILITY"
+    assert tool.calls == []
 
 
 # ---------------------------------------------------------------------------
