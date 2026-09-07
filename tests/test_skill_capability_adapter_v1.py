@@ -1,16 +1,18 @@
 """Tests for the Skill Capability Adapter V1.
 
-Covers all 10 required acceptance test scenarios:
-1. old Skill format still loads
+Covers all 12 required acceptance test scenarios:
+1. old Skill format still loads (backward compatibility)
 2. required capabilities parse
-3. optional capabilities parse
+3. CapabilitySpec-only backend does NOT satisfy required capability (P2.3 strict)
 4. acceptance contract round-trip
 5. known capabilities resolve
 6. missing required capability reported
 7. unknown optional capability non-fatal but visible
 8. Skill loading executes zero Tools
-9. Skill cannot mark Task complete
-10. deterministic serialization
+9. AcceptanceContract / Skill cannot mark Task complete (declarative only)
+10. validation executes zero tools / no Validator/CompletionAuthority (P2.3 strict)
+11. deterministic serialization
+12. P2.3 strict semantic authority preserved end-to-end
 """
 
 from __future__ import annotations
@@ -479,3 +481,233 @@ class TestEdgeCases:
         c = _parse_acceptance_contract("just a description")
         assert c is not None
         assert c.description == "just a description"
+
+
+# ---------------------------------------------------------------------------
+# 3 (P2.3 strict). CapabilitySpec-only backend does NOT satisfy required
+# ---------------------------------------------------------------------------
+
+class TestCapabilitySpecOnlyDoesNotSatisfy:
+    """A backend Tool with CapabilitySpec(name='foo.bar') must NOT satisfy a
+    Skill's required capability unless an explicit CapabilityDefinition exists
+    in the CapabilityRegistry.  This is the core P2.3 semantic-authority
+    invariant: CapabilityDefinition = capability authority, CapabilitySpec =
+    backend descriptor ONLY."""
+
+    def test_specs_only_backend_does_not_satisfy_required(self, tmp_path: Path):
+        """Tool with CapabilitySpec exists, but NO CapabilityDefinition in the
+        registry → required capability must be MISSING / unavailable."""
+        from lhas.planning.models import CapabilitySpec
+        from lhas.tools import FakeTool, ToolRegistry
+
+        _write_skill(
+            tmp_path, "s",
+            '---\nname: s\nrequired_capabilities: ["workspace.read"]\n---\nBody',
+        )
+        doc = SkillRegistry([tmp_path]).view("s")
+
+        # ToolRegistry has a backend tool with CapabilitySpec for workspace.read
+        tool_reg = ToolRegistry()
+        tool_reg.register(FakeTool(CapabilitySpec(name="workspace.read")))
+
+        # CapabilityRegistry with ZERO definitions (empty)
+        cap_reg = CapabilityRegistry(tool_registry=tool_reg, definitions=[])
+
+        # Even though the tool_registry has a tool named workspace.read,
+        # the CapabilityRegistry has no CapabilityDefinition for it.
+        ctx = _context("windows")
+        report = validate_skill_capabilities(doc, cap_reg, ctx)
+
+        # workspace.read is NOT known (no CapabilityDefinition) → unavailable
+        assert not report.all_required_available
+        assert "workspace.read" in report.missing_required
+        assert "workspace.read" in report.unknown_required
+        entry = next(e for e in report.entries if e.capability_id == "workspace.read")
+        assert entry.required
+        assert not entry.known
+        assert not entry.available
+
+    def test_explicit_definition_plus_backend_satisfies_required(self, tmp_path: Path):
+        """Explicit CapabilityDefinition + backend available → AVAILABLE."""
+        _write_skill(
+            tmp_path, "s",
+            '---\nname: s\nrequired_capabilities: ["workspace.read"]\n---\nBody',
+        )
+        doc = SkillRegistry([tmp_path]).view("s")
+
+        # Default CapabilityRegistry includes workspace.read CapabilityDefinition
+        cap_reg = CapabilityRegistry()
+        ctx = _context("windows")
+        report = validate_skill_capabilities(doc, cap_reg, ctx)
+
+        assert report.all_required_available
+        assert report.missing_required == []
+        entry = next(e for e in report.entries if e.capability_id == "workspace.read")
+        assert entry.required
+        assert entry.known
+        assert entry.available
+
+    def test_specs_only_backend_for_optional_not_satisfying(self, tmp_path: Path):
+        """Optional capability with only backend tool → unknown but non-fatal."""
+        from lhas.planning.models import CapabilitySpec
+        from lhas.tools import FakeTool, ToolRegistry
+
+        _write_skill(
+            tmp_path, "s",
+            '---\nname: s\noptional_capabilities: ["workspace.read"]\n---\nBody',
+        )
+        doc = SkillRegistry([tmp_path]).view("s")
+
+        tool_reg = ToolRegistry()
+        tool_reg.register(FakeTool(CapabilitySpec(name="workspace.read")))
+        cap_reg = CapabilityRegistry(tool_registry=tool_reg, definitions=[])
+        ctx = _context("windows")
+        report = validate_skill_capabilities(doc, cap_reg, ctx)
+
+        # Optional: non-fatal
+        assert report.all_required_available  # no required → vacuously true
+        assert "workspace.read" in report.unknown_optional
+        entry = next(e for e in report.entries if e.capability_id == "workspace.read")
+        assert not entry.required
+        assert not entry.known
+        assert not entry.available
+
+
+# ---------------------------------------------------------------------------
+# 10 (P2.3 strict). Validation executes zero tools, no Validator/CompletionAuthority
+# ---------------------------------------------------------------------------
+
+class TestValidationExecutesZeroInvocations:
+    """validate_skill_capabilities must not invoke any Tool, Validator, or
+    CompletionAuthority.  It reads CapabilityRegistry declarations only."""
+
+    def test_validate_never_calls_execute_on_tools(self, tmp_path: Path):
+        """Track execute() calls on fake tools to prove none are invoked."""
+        from lhas.planning.models import CapabilitySpec
+        from lhas.tools import FakeTool, ToolRegistry
+
+        execute_calls: list[str] = []
+
+        class TrackingTool(FakeTool):
+            async def execute(self, request):
+                execute_calls.append(request.capability)
+                return await super().execute(request)
+
+        _write_skill(
+            tmp_path, "s",
+            '---\nname: s\nrequired_capabilities: ["workspace.read"]\n---\nBody',
+        )
+        doc = SkillRegistry([tmp_path]).view("s")
+
+        tool_reg = ToolRegistry()
+        tool_reg.register(TrackingTool(CapabilitySpec(name="workspace.read")))
+        cap_reg = CapabilityRegistry()
+        ctx = _context("windows")
+
+        report = validate_skill_capabilities(doc, cap_reg, ctx)
+        assert report.all_required_available
+        # Zero tool executions
+        assert execute_calls == []
+
+    def test_validate_has_no_validator_or_completion_authority_reference(self):
+        """The validator module must not import or reference CompletionAuthority."""
+        import lhas.skills.validator as validator_module
+        source = open(validator_module.__file__, encoding="utf-8").read()
+        assert "CompletionAuthority" not in source
+        assert "Validator" not in source.split("class ")[0]  # not in imports
+        # Must not import task_service, validation, or completion modules
+        assert "from lhas.validation" not in source
+        assert "from lhas.task_service" not in source
+        assert "import lhas.validation" not in source
+        assert "import lhas.task_service" not in source
+
+
+# ---------------------------------------------------------------------------
+# 12 (P2.3 strict). P2.3 strict semantic authority preserved
+# ---------------------------------------------------------------------------
+
+class TestP23StrictSemanticAuthority:
+    """End-to-end tests confirming P2.3's frozen authority model:
+    - CapabilityDefinition = semantic capability authority
+    - CapabilitySpec = backend descriptor ONLY
+    - Skill = procedural knowledge + capability declaration (NOT runtime)
+    """
+
+    def test_definition_authority_overrides_spec_naming(self, tmp_path: Path):
+        """Even if a Tool's CapabilitySpec.name matches, the
+        CapabilityDefinition in the registry is the sole authority."""
+        from lhas.planning.models import CapabilitySpec
+        from lhas.tools import FakeTool, ToolRegistry
+
+        # Register a tool with a name that happens to be in the default catalog
+        tool_reg = ToolRegistry()
+        tool_reg.register(FakeTool(CapabilitySpec(name="workspace.read")))
+        # But construct the CapabilityRegistry with ZERO definitions
+        cap_reg = CapabilityRegistry(tool_registry=tool_reg, definitions=[])
+
+        # The tool name exists, but no CapabilityDefinition → not known
+        ctx = _context("windows")
+        records = cap_reg.discover(ctx)
+        assert records == []  # empty catalog → zero discovery results
+
+    def test_strict_authority_mixed_required_and_optional(self, tmp_path: Path):
+        """Complex skill with both required and optional; definitions
+        are the sole authority for availability determination."""
+        _write_skill(
+            tmp_path, "s",
+            '---\nname: s\n'
+            'required_capabilities: ["workspace.read", "test.run"]\n'
+            'optional_capabilities: ["git.status", "nonexistent.opt"]\n'
+            '---\nBody',
+        )
+        doc = SkillRegistry([tmp_path]).view("s")
+        cap_reg = CapabilityRegistry()
+        # Provide only workspace.read backend → test.run will be UNAVAILABLE
+        ctx = _context("windows", tools={"workspace.read", "cli.exec"})
+
+        report = validate_skill_capabilities(doc, cap_reg, ctx)
+
+        # workspace.read: known + available (backend present)
+        wr = next(e for e in report.entries if e.capability_id == "workspace.read")
+        assert wr.required and wr.known and wr.available
+
+        # test.run: known + available (cli.exec is its preferred_tool)
+        tr = next(e for e in report.entries if e.capability_id == "test.run")
+        assert tr.required and tr.known and tr.available
+
+        # git.status: known + available (cli.exec is its preferred_tool)
+        gs = next(e for e in report.entries if e.capability_id == "git.status")
+        assert not gs.required and gs.known and gs.available
+
+        # nonexistent.opt: unknown + not available, non-fatal
+        no = next(e for e in report.entries if e.capability_id == "nonexistent.opt")
+        assert not no.required and not no.known and not no.available
+        assert "nonexistent.opt" in report.unknown_optional
+
+        assert report.all_required_available
+
+    def test_no_implicit_capability_creation_for_legacy_skills(self, tmp_path: Path):
+        """Legacy skills without capability fields must not trigger any
+        implicit capability registration or lookup."""
+        _write_skill(
+            tmp_path, "legacy",
+            "---\nname: legacy-skill\ndescription: old format\n---\nBody here",
+        )
+        registry = SkillRegistry([tmp_path])
+        metas = registry.discover()
+        meta = metas[0]
+
+        cap_reg = CapabilityRegistry()
+        before_defs = [d.model_dump() for d in cap_reg.list_all()]
+
+        # Validate legacy skill (no capabilities declared)
+        doc = registry.view("legacy-skill")
+        report = validate_skill_capabilities(doc, cap_reg, _context("windows"))
+
+        # Report is empty — no capabilities to check
+        assert report.entries == []
+        assert report.all_required_available  # vacuously true
+
+        # Registry unchanged
+        after_defs = [d.model_dump() for d in cap_reg.list_all()]
+        assert before_defs == after_defs

@@ -22,7 +22,7 @@ def _skill_tree(root: Path):
 
 def test_skills_level_zero_metadata_only(tmp_path):
     _skill_tree(tmp_path); items=SkillRegistry([tmp_path]).list()
-    assert items[0].model_dump()=={"name":"coding/demo","description":"Demo skill","metadata":{"version":"1"}}
+    assert items[0].model_dump()=={"name":"coding/demo","description":"Demo skill","metadata":{"version":"1"},"required_capabilities":[],"optional_capabilities":[],"acceptance_contract":None,"workflow_template":None}
 
 
 def test_skills_level_one_and_two_progressive_disclosure(tmp_path):
