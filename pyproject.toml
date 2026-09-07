@@ -15,6 +15,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest>=8,<9",
+    "pytest-asyncio>=0.21",
 ]
 live = [
     "pypdf>=5,<6",
