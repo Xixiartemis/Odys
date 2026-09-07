@@ -28,10 +28,12 @@ def test_final_claim_does_not_bypass_validator(db):
     assert run.status.value=="ESCALATED"
 
 def test_tool_allowlist_and_side_effect_filter():
+    from tests.helpers import make_test_capability_definition
     reg=ToolRegistry(); reg.register(FakeTool(CapabilitySpec(name="safe.a",description="a"))); reg.register(FakeTool(CapabilitySpec(name="secret.c",description="c"))); reg.register(FakeTool(CapabilitySpec(name="write.file",description="write",side_effect=True,requires_human_approval=True)))
-    request=InnerAgentRequest(task_id="t",run_id="r",attempt_id="a",objective="x",allowed_capabilities=["safe.a","write.file"])
+    defs=[make_test_capability_definition("safe.a"), make_test_capability_definition("write.file", side_effect=True)]
+    request=InnerAgentRequest(task_id="t",run_id="r",attempt_id="a",objective="x",allowed_capabilities=["safe.a","write.file"],allowed_side_effect_capabilities=set())
     # Adapter is tested only when optional SDK is installed.
-    try: tools,filtered=allowed_tools(reg,request)
+    try: tools,filtered=allowed_tools(reg,request,definitions=defs)
     except RuntimeError: return
     assert [t.name for t in tools]==["safe.a"] and set(filtered)=={"write.file"}
 

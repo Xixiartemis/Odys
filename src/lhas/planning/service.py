@@ -18,19 +18,25 @@ from lhas.planning.replan_policy import ReplanTriggerPolicy
 from lhas.tools.registry import ToolRegistry
 from lhas.tools.protocol import ToolRequest, ToolResultStatus
 
+from lhas.tools.invocation import invoke_via_contract
+from lhas.tools.contract import ToolContract
+
 class _ToolExecutor:
     name = "ToolRegistryExecutor"
-    def __init__(self, registry, step, db, context): self.registry, self.step, self.db, self.context = registry, step, db, context
+    def __init__(self, registry, step, db, context, tool_contract):
+        if tool_contract is None:
+            raise ValueError("_ToolExecutor requires a valid ToolContract; direct Tool.execute is forbidden")
+        self.registry, self.step, self.db, self.context, self.tool_contract = registry, step, db, context, tool_contract
     async def execute(self, request: ExecutionRequest) -> ExecutionResult:
         event = EventStore(self.db)
         try: tool = self.registry.resolve(self.step.capability)
         except KeyError as exc: return ExecutionResult(status=ExecutionStatus.FAILURE, error_type="UNKNOWN_CAPABILITY", error_message=str(exc))
         tr = ToolRequest(tool_call_id=new_id(), task_id=request.task_id, run_id=request.run_id, attempt_id=request.attempt_id,
-                         capability=self.step.capability, arguments=self.step.inputs, context={**self.context, **request.context}, metadata=request.metadata)
+                         capability=self.step.capability, tool_name=self.step.capability, arguments=self.step.inputs, context={**self.context, **request.context}, metadata=request.metadata)
         safe_request={"tool_call_id":tr.tool_call_id,"capability":tr.capability}
         event.append(EventType.TOOL_CALL_STARTED, task_id=request.task_id, run_id=request.run_id, attempt_id=request.attempt_id, payload={"request":safe_request})
         try:
-            result = await tool.execute(tr)
+            result = await invoke_via_contract(self.tool_contract, tr)
             typ = EventType.TOOL_CALL_COMPLETED if result.status == ToolResultStatus.SUCCESS else EventType.TOOL_CALL_FAILED
             safe_result={"status":result.status.value,"error_type":result.error_type,"artifact_keys":sorted(result.artifacts)[:20]}
             event.append(typ, task_id=request.task_id, run_id=request.run_id, attempt_id=request.attempt_id, payload={"request":safe_request,"result":safe_result})
@@ -68,12 +74,37 @@ class _TaskGraphAgentExecutor:
     async def status(self, run_id): return await self.executor.status(run_id)
 
 class PlanExecutionService:
-    def __init__(self, db: Database, planner: Planner, registry: ToolRegistry, agent_executor_factory=None): self.db, self.planner, self.registry, self.agent_executor_factory = db, planner, registry, agent_executor_factory
+    def __init__(self, db: Database, planner: Planner, registry: ToolRegistry, agent_executor_factory=None, tool_contract=None, capability_registry=None):
+        self.db, self.planner, self.registry, self.agent_executor_factory = db, planner, registry, agent_executor_factory
+        # If no explicit tool_contract provided, build one from default_capabilities()
+        # (NOT from ToolRegistry — that would be reverse synthesis)
+        if tool_contract is None and capability_registry is None:
+            from lhas.tools.invocation import build_contract_for_registry
+            self.capability_registry, self.tool_contract = build_contract_for_registry(registry)
+        else:
+            self.tool_contract = tool_contract
+            self.capability_registry = capability_registry or getattr(tool_contract, "capability_registry", None)
     def _step_executor(self, plan, step, context):
         if self.agent_executor_factory is not None:
             return _TaskGraphAgentExecutor(self.agent_executor_factory(step),plan,step,self.db)
-        return _ToolExecutor(self.registry,step,self.db,context)
+        return _ToolExecutor(self.registry,step,self.db,context,self.tool_contract)
     def _emit(self, typ, payload): EventStore(self.db).append(typ, payload=payload)
+    def _planner_capabilities(self):
+        """Return tool specs for plan creation.
+
+        When a capability_registry is provided, only tools with explicit
+        CapabilityDefinitions are planner-visible (strict authority).
+        Without a semantic registry there is no planner-visible capability.
+        """
+        if self.capability_registry is not None:
+            from lhas.capability_registry import CapabilityRuntimeContext
+            ctx = CapabilityRuntimeContext(platform="windows", available_tools=set(self.registry.list_capabilities()))
+            available = {d.id for d in self.capability_registry.list_available(ctx)}
+            return [spec for spec in self.registry.specs() if spec.name in available]
+        return []
+    def _resolve_capability_spec(self, capability_name: str):
+        """Resolve the CapabilitySpec for a step, preferring CapabilityDefinition authority."""
+        return self.registry.resolve(capability_name).capability
     def _record_step_replan_signal(self, step, run_id: str) -> None:
         """Turn a durable step failure into the canonical replan input."""
         attempts = AttemptRepository(self.db).list_for_run(run_id)
@@ -108,7 +139,7 @@ class PlanExecutionService:
         if not signals:
             return False
         result = await MacroReplanService(self.db, self.planner).consume(
-            goal=goal, plan=plan, signals=signals, context={**context, "capabilities": self.registry.specs()}
+            goal=goal, plan=plan, signals=signals, context={**context, "capabilities": self._planner_capabilities()}
         )
         return result.accepted
     async def execute_goal(self, goal: Goal, *, context: dict[str, Any] | None = None, experiment_id: str | None = None, approved_step_ids: set[str] | None = None, resume_plan_id: str | None = None) -> Plan:
@@ -120,7 +151,7 @@ class PlanExecutionService:
             if plan is None or plan.goal_id != goal.id: raise KeyError(f"plan not found for goal: {resume_plan_id}")
             self._emit(EventType.HUMAN_APPROVAL_GRANTED, {"plan_id": plan.id, "approved_step_ids": sorted(approved_step_ids or set())})
         else:
-            plan = await self.planner.create_plan(goal=goal, capabilities=self.registry.specs(), context=context or {})
+            plan = await self.planner.create_plan(goal=goal, capabilities=self._planner_capabilities(), context=context or {})
             plans.create(plan)
             self._emit(EventType.PLAN_CREATED, {"plan": plan.model_dump(mode="json")})
         if plan.mode.value != "LINEAR":

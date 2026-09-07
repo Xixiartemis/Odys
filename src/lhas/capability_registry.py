@@ -293,15 +293,51 @@ def default_capabilities() -> tuple[CapabilityDefinition, ...]:
             _WORKSPACE_LIST_OUTPUT, permissions=("workspace.read",), preferred_tool="workspace.list",
         ),
         _capability(
+            "workspace.search", "Search workspace text by query string", "workspace",
+            _object_schema(
+                {"query": {"type": "string"}, "path": _PATH, "glob": {"type": "string"},
+                 "max_matches": {"type": "integer"}, "context_lines": {"type": "integer"}},
+                ["query"],
+            ),
+            {"type": "object"}, permissions=("workspace.read",), preferred_tool="workspace.search",
+        ),
+        _capability(
             "workspace.edit", "Apply an explicit edit in the staged workspace", "workspace",
             _object_schema({"path": _PATH, "old_text": {"type": "string"}, "new_text": {"type": "string"}}, ["path", "old_text", "new_text"]),
             _WORKSPACE_EDIT_OUTPUT,
             permissions=("workspace.write",), risk_level="MEDIUM", retryable=False, preferred_tool="workspace.edit",
         ),
         _capability(
+            "workspace.edit_lines", "Version-checked inclusive line replacement in staged workspace", "workspace",
+            _object_schema(
+                {"path": _PATH, "start_line": {"type": "integer", "minimum": 1},
+                 "end_line": {"type": "integer", "minimum": 1},
+                 "new_lines": {"type": "array", "items": {"type": "string"}},
+                 "expected_sha256": {"type": "string", "minLength": 64, "maxLength": 64}},
+                ["path", "start_line", "end_line", "new_lines", "expected_sha256"],
+            ),
+            {"type": "object"},
+            permissions=("workspace.write",), risk_level="MEDIUM", retryable=False, preferred_tool="workspace.edit_lines",
+        ),
+        _capability(
             "workspace.diff", "Show staged workspace changes", "workspace",
             _object_schema({"path": _PATH, "max_diff_bytes": {"type": "integer"}}),
             _WORKSPACE_DIFF_OUTPUT, permissions=("workspace.read",), preferred_tool="workspace.diff",
+        ),
+        _capability(
+            "workspace.restore", "Restore staged file to baseline", "workspace",
+            _object_schema({"path": _PATH}, ["path"]),
+            {"type": "object"},
+            permissions=("workspace.write",), risk_level="MEDIUM", retryable=False, preferred_tool="workspace.restore",
+        ),
+        _capability(
+            "cli.exec", "Execute an explicitly allowed CLI command", "execution",
+            _object_schema(
+                {"argv": _ARGV, "cwd": _PATH, "timeout_seconds": {"type": "number"}},
+                ["argv"],
+            ),
+            {"type": "object"},
+            permissions=("process.execute",), timeout_seconds=120.0, preferred_tool="cli.exec",
         ),
         _capability(
             "test.run", "Run an explicitly permitted test command", "verification",
@@ -322,6 +358,21 @@ def default_capabilities() -> tuple[CapabilityDefinition, ...]:
             "environment.inspect", "Inspect bounded runtime environment facts", "environment",
             _object_schema({}), {"type": "object"},
             permissions=("environment.read",), preferred_tool="cli.exec",
+        ),
+        _capability(
+            "platform.prepare", "Prepare bounded platform evidence for a worker step", "platform",
+            _object_schema({"goal": {"type": "string"}}), {"type": "object"},
+            permissions=("platform.execute",), risk_level="LOW", preferred_tool="platform.prepare",
+        ),
+        _capability(
+            "platform.delegate", "Create a durable child Task, Run and Attempt", "platform",
+            _object_schema({"goal": {"type": "string"}}), {"type": "object"},
+            permissions=("platform.delegate",), risk_level="HIGH", retryable=False, preferred_tool="platform.delegate",
+        ),
+        _capability(
+            "platform.finalize", "Finalize bounded platform evidence with a reviewer step", "platform",
+            _object_schema({"goal": {"type": "string"}}), {"type": "object"},
+            permissions=("platform.execute",), risk_level="LOW", preferred_tool="platform.finalize",
         ),
     )
 

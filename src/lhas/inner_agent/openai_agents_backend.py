@@ -31,7 +31,7 @@ class AgentsSdkModelConfig:
 
 class OpenAIAgentsBackend:
     name="openai-agents"
-    def __init__(self, registry, config=None, runner=None, provider_factory=None, run_config_factory=None): self.registry=registry; self.config=config or AgentsSdkModelConfig(); self.runner=runner; self.provider_factory=provider_factory; self.run_config_factory=run_config_factory
+    def __init__(self, registry, config=None, runner=None, provider_factory=None, run_config_factory=None, definitions=None): self.registry=registry; self.config=config or AgentsSdkModelConfig(); self.runner=runner; self.provider_factory=provider_factory; self.run_config_factory=run_config_factory; self.definitions=definitions
     def _instructions(self, r): return "Complete the current subgoal. Tool failures are observations; adjust strategy. Never blindly repeat a failed call when retry_same_arguments=false. workspace.edit permits only a unique exact match or a unique whole-line newline/trailing-space normalization; ambiguity always fails. After an edit-target mismatch, reread or search for current context and use workspace.edit_lines with the current SHA when appropriate. When strategy_change_required=true, change information-gathering strategy before reconstructing the edit. Refresh the file SHA after STALE_FILE_VERSION. Adapt to the reported allowed CLI prefixes and workspace-relative path/cwd boundary without expanding permissions. Establish edit -> validate -> observe loops early, specifically edit -> diff/read -> cli.exec pytest -> observe; after a meaningful mutation inspect the change and validate promptly. A pytest observation informs your next action but never replaces the outer validator. Do not claim uncalled work, expand permissions, or expose hidden reasoning. Once acceptance evidence passes, stop and return a concise completion claim. Final output is only a candidate claim; an outer validator independently verifies it.\nObjective: "+r.objective+"\nConstraints: "+str(r.constraints)+"\nAcceptance: "+str(r.acceptance_criteria)+"\nContext: "+str(r.context)
     async def run(self, request):
         trace = InnerAgentTrace()
@@ -45,7 +45,7 @@ class OpenAIAgentsBackend:
             self.config.validate()
             from agents import Agent, Runner, OpenAIProvider, RunConfig
             runner=self.runner or Runner
-            tools,filtered=allowed_tools(self.registry,request,trace=trace)
+            tools,filtered=allowed_tools(self.registry,request,trace=trace,definitions=self.definitions)
             if self.provider_factory:
                 provider = self.provider_factory(api_key=self.config.api_key, base_url=self.config.base_url, use_responses=self.config.api_mode == "responses")
             elif self.config.provider_profile.name == "mimo":

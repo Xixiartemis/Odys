@@ -21,7 +21,10 @@ from lhas.tools import FakeTool, ToolRegistry
 
 CAPABILITY_IDS = {
     "workspace.read", "workspace.list", "workspace.edit", "workspace.diff",
+    "workspace.search", "workspace.edit_lines", "workspace.restore",
+    "cli.exec",
     "test.run", "git.status", "git.diff", "environment.inspect",
+    "platform.prepare", "platform.delegate", "platform.finalize",
 }
 
 
@@ -29,9 +32,9 @@ def context(platform="windows", tools=None):
     return CapabilityRuntimeContext(platform=platform, available_tools=tools)
 
 
-def test_v1_registers_exactly_eight_stable_capabilities():
+def test_v1_registers_exactly_fifteen_stable_capabilities():
     registry = CapabilityRegistry()
-    assert len(registry.list_all()) == 8
+    assert len(registry.list_all()) == 15
     assert {item.id for item in registry.list_all()} == CAPABILITY_IDS
     assert [item.id for item in registry.list_all()] == sorted(CAPABILITY_IDS)
 
@@ -59,7 +62,7 @@ def test_get_returns_definition_and_unknown_is_rejected():
 
 
 @pytest.mark.parametrize("platform", ["windows", "linux", "macos"])
-def test_known_platforms_discover_all_eight(platform):
+def test_known_platforms_discover_all_fifteen(platform):
     assert {item.id for item in CapabilityRegistry().list_available(context(platform))} == CAPABILITY_IDS
 
 
@@ -93,10 +96,16 @@ def test_explicit_tool_registry_is_used_for_availability_and_binding():
     tools = ToolRegistry()
     read = FakeTool(CapabilitySpec(name="workspace.read"))
     cli = FakeTool(CapabilitySpec(name="cli.exec"))
+    prep = FakeTool(CapabilitySpec(name="platform.prepare"))
+    delegate = FakeTool(CapabilitySpec(name="platform.delegate"))
+    finalize = FakeTool(CapabilitySpec(name="platform.finalize"))
     tools.register(read)
     tools.register(cli)
+    tools.register(prep)
+    tools.register(delegate)
+    tools.register(finalize)
     registry = CapabilityRegistry(tools)
-    assert {item.id for item in registry.list_available(context("linux"))} == {"workspace.read", "test.run", "git.status", "git.diff", "environment.inspect"}
+    assert {item.id for item in registry.list_available(context("linux"))} == {"workspace.read", "cli.exec", "test.run", "git.status", "git.diff", "environment.inspect", "platform.prepare", "platform.delegate", "platform.finalize"}
     assert registry.resolve_tool("test.run") is cli
     assert registry.resolve_tool("workspace.read") is read
 
@@ -110,13 +119,13 @@ def test_missing_binding_cannot_be_resolved():
 
 def test_all_bindings_are_explicit_and_resolve_against_existing_tool_names():
     registry = CapabilityRegistry()
-    assert {item.preferred_tool for item in registry.list_all()} == {"workspace.read", "workspace.list", "workspace.edit", "workspace.diff", "cli.exec"}
+    assert {item.preferred_tool for item in registry.list_all()} == {"workspace.read", "workspace.list", "workspace.search", "workspace.edit", "workspace.edit_lines", "workspace.diff", "workspace.restore", "cli.exec", "platform.prepare", "platform.delegate", "platform.finalize"}
     assert registry.get("test.run").preferred_tool == "cli.exec"
 
 
 def test_many_capabilities_may_share_cli_adapter_but_one_definition_cannot_duplicate_it():
     registry = CapabilityRegistry()
-    assert sum(item.preferred_tool == "cli.exec" for item in registry.list_all()) == 4
+    assert sum(item.preferred_tool == "cli.exec" for item in registry.list_all()) == 5
     base = registry.get("test.run")
     duplicate = base.model_copy(update={"fallback_tools": ("cli.exec",)})
     with pytest.raises(ValueError, match="preferred tool also listed"):

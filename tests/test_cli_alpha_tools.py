@@ -27,6 +27,7 @@ from lhas.planning.models import CapabilitySpec
 from lhas.workspace import CommandPolicy, CommandRule, RunWorkspaceManager, StagedWorkspace
 from lhas.workspace.safe_cli import SafeCli
 from lhas.workspace.tools import SafeCliTool, WorkspaceEditLinesTool, WorkspaceEditTool
+from tests.helpers import make_test_capability_definition
 
 
 def _source(tmp_path: Path, data: bytes = b"one\ntwo\nthree\n") -> Path:
@@ -142,6 +143,7 @@ def test_stale_and_command_not_allowed_feedback(tmp_path):
 
 
 def test_repeated_failure_adaptation_uses_only_signature():
+    from tests.helpers import make_test_capability_definition
     registry = ToolRegistry()
     registry.register(FakeTool(
         CapabilitySpec(name="safe.fail", description="fails"),
@@ -152,12 +154,13 @@ def test_repeated_failure_adaptation_uses_only_signature():
             metadata={"action": "REREAD_THEN_LINE_EDIT", "retry_same_arguments": False},
         ),
     ))
+    defs = [make_test_capability_definition("safe.fail")]
     trace = InnerAgentTrace()
     request = InnerAgentRequest(
         task_id="t", run_id="r", attempt_id="a", objective="x",
         allowed_capabilities=["safe.fail"],
     )
-    tools, _ = allowed_tools(registry, request, trace)
+    tools, _ = allowed_tools(registry, request, trace, definitions=defs)
     context = SimpleNamespace(tool_call_id="call", context={})
     raw = json.dumps({"path": "secret-value-that-must-not-persist"})
     first = asyncio.run(tools[0].on_invoke_tool(context, raw))

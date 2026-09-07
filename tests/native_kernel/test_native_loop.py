@@ -13,7 +13,12 @@ from lhas.persistence.repositories import AttemptRepository, RunRepository
 from lhas.planning.models import CapabilitySpec
 from lhas.tools.protocol import ToolResult, ToolResultStatus
 from lhas.tools.registry import ToolRegistry
-from tests.helpers import PassingCommandValidator
+from tests.helpers import (
+    PassingCommandValidator,
+    make_test_capability_definition,
+    make_test_capability_registry,
+)
+from lhas.capability_registry import default_capabilities
 from lhas.validation import ValidationCheck, ValidationResult
 
 
@@ -58,12 +63,27 @@ def _kernel_case(db, make_task, responses, *, validator=None, tool=None):
     registry = ToolRegistry()
     if tool is not None:
         registry.register(tool)
+    # Build explicit CapabilityDefinitions for any registered test tools
+    # that aren't already in the default catalog (e.g. platform.delegate)
+    cap_reg = None
+    contract = None
+    if tool is not None:
+        default_ids = {d.id for d in default_capabilities()}
+        defs = []
+        if tool.capability.name not in default_ids:
+            defs.append(make_test_capability_definition(
+                tool.capability.name,
+                input_schema=tool.capability.input_schema,
+            ))
+        cap_reg, contract = make_test_capability_registry(registry, definitions=defs)
     provider = ScriptedProviderAdapter(responses)
     dispatcher = NativeToolDispatcher(
         db=db,
         registry=registry,
         allowed_capabilities=set(registry.list_capabilities()),
         allowed_side_effect_capabilities=set(),
+        capability_registry=cap_reg,
+        tool_contract=contract,
     )
     authority = CompletionAuthority(db=db, validator=validator or PassingCommandValidator())
     kernel = NativeAgentKernel(db=db, provider=provider, dispatcher=dispatcher, completion_authority=authority)

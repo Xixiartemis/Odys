@@ -9,6 +9,7 @@ from lhas.planning.service import PlanExecutionService
 from lhas.tools.fakes import FakeTool
 from lhas.tools.registry import ToolRegistry
 from lhas.tools.protocol import ToolResult, ToolResultStatus
+from tests.helpers import make_test_capability_definition, make_test_capability_registry
 
 class FixedPlanner:
     def __init__(self, plan): self.plan=plan
@@ -32,7 +33,9 @@ def test_dependency_graph_independent_branch_continues(db):
     def fail(req): return ToolResult(status=ToolResultStatus.FAILURE,error_type="TOOL_ERROR",error_message="bad")
     reg=ToolRegistry()
     for name in "abcd": reg.register(FakeTool(CapabilitySpec(name=name,description=name), fail if name=="b" else (lambda r,n=name:n)))
-    result=asyncio.run(PlanExecutionService(db,FixedPlanner(plan),reg).execute_goal(goal)); states={s.id:s.status for s in result.steps}
+    defs=[make_test_capability_definition(name, output_schema={}) for name in "abcd"]
+    cap_reg, contract = make_test_capability_registry(reg, defs)
+    result=asyncio.run(PlanExecutionService(db,FixedPlanner(plan),reg,capability_registry=cap_reg,tool_contract=contract).execute_goal(goal)); states={s.id:s.status for s in result.steps}
     assert result.status==PlanStatus.FAILED and states["a"]==PlanStepStatus.COMPLETED and states["b"]==PlanStepStatus.FAILED and states["d"]==PlanStepStatus.BLOCKED and states["c"]==PlanStepStatus.COMPLETED
 
 def test_dependency_approval_resume_same_plan(db):
@@ -44,7 +47,9 @@ def test_dependency_approval_resume_same_plan(db):
         def run(r): counts[name]+=1; return name
         return run
     for name,gated in (("a",False),("b",True),("c",False),("d",False)): reg.register(FakeTool(CapabilitySpec(name=name,description=name,side_effect=gated,requires_human_approval=gated),counted(name)))
-    svc=PlanExecutionService(db,FixedPlanner(plan),reg); waiting=asyncio.run(svc.execute_goal(goal)); assert waiting.status==PlanStatus.WAITING_FOR_HUMAN_APPROVAL and waiting.steps[2].status==PlanStepStatus.COMPLETED
+    defs=[make_test_capability_definition(name, output_schema={}, side_effect=(name=="b"), requires_human_approval=(name=="b")) for name in "abcd"]
+    cap_reg, contract = make_test_capability_registry(reg, defs)
+    svc=PlanExecutionService(db,FixedPlanner(plan),reg,capability_registry=cap_reg,tool_contract=contract); waiting=asyncio.run(svc.execute_goal(goal)); assert waiting.status==PlanStatus.WAITING_FOR_HUMAN_APPROVAL and waiting.steps[2].status==PlanStepStatus.COMPLETED
     resumed=asyncio.run(svc.resume_after_approval(waiting.id,goal,"b")); assert resumed.id==waiting.id and resumed.status==PlanStatus.COMPLETED and resumed.steps[0].status==PlanStepStatus.COMPLETED and counts=={"a":1,"b":1,"c":1,"d":1}
 
 def test_true_diamond_order_and_context_persistence(db):
@@ -56,7 +61,9 @@ def test_true_diamond_order_and_context_persistence(db):
         return run
     reg=ToolRegistry()
     for name in "abcd": reg.register(FakeTool(CapabilitySpec(name=name,description=name),tool(name)))
-    result=asyncio.run(PlanExecutionService(db,FixedPlanner(plan),reg).execute_goal(goal)); assert [x for x in log]==["a","b","c","d"]
+    defs=[make_test_capability_definition(name, output_schema={}) for name in "abcd"]
+    cap_reg, contract = make_test_capability_registry(reg, defs)
+    result=asyncio.run(PlanExecutionService(db,FixedPlanner(plan),reg,capability_registry=cap_reg,tool_contract=contract).execute_goal(goal)); assert [x for x in log]==["a","b","c","d"]
     assert "a" in contexts["b"]["steps"] and "c" not in contexts["b"]["steps"]
     assert "c" in contexts["d"]["steps"] and "b" in contexts["d"]["steps"]
     persisted={s.id:s.execution_context for s in result.steps}; assert "c" not in persisted["b"]["steps"] and "a" in persisted["b"]["steps"]
@@ -79,7 +86,9 @@ def test_gated_branch_does_not_pause_independent_descendant(db):
     reg=ToolRegistry()
     for name,gated in (("a",False),("b",True),("c",False),("d",False),("e",False)):
         reg.register(FakeTool(CapabilitySpec(name=name,description=name,side_effect=gated,requires_human_approval=gated),tool(name)))
-    svc=PlanExecutionService(db,FixedPlanner(plan),reg); first=asyncio.run(svc.execute_goal(goal)); assert first.status==PlanStatus.WAITING_FOR_HUMAN_APPROVAL and counts=={"a":1,"b":0,"c":1,"d":0,"e":1}
+    defs=[make_test_capability_definition(name, output_schema={}, side_effect=(name=="b"), requires_human_approval=(name=="b")) for name in "abcde"]
+    cap_reg, contract = make_test_capability_registry(reg, defs)
+    svc=PlanExecutionService(db,FixedPlanner(plan),reg,capability_registry=cap_reg,tool_contract=contract); first=asyncio.run(svc.execute_goal(goal)); assert first.status==PlanStatus.WAITING_FOR_HUMAN_APPROVAL and counts=={"a":1,"b":0,"c":1,"d":0,"e":1}
     events=EventStore(db).list_all(); assert sum(e.event_type==EventType.HUMAN_APPROVAL_REQUIRED for e in events)==1
     assert sum(e.event_type==EventType.PLAN_STEP_READY and e.payload.get("step_id")=="b" for e in events)==1
     resumed=asyncio.run(svc.resume_after_approval(first.id,goal,"b")); assert resumed.id==first.id and resumed.status==PlanStatus.COMPLETED and counts=={"a":1,"b":1,"c":1,"d":1,"e":1}

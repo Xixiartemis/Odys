@@ -13,6 +13,7 @@ from lhas.tools.fakes import FakeTool
 from lhas.tools.protocol import ToolRequest, ToolResult, ToolResultStatus
 from lhas.tools.registry import ToolRegistry
 from lhas.workspace import CommandPolicy, StagedWorkspace, WorkspaceLimits
+from tests.helpers import make_test_capability_definition
 
 
 _SCRIPT_PATH = Path(__file__).parents[1] / "scripts" / "e5_live_model_smoke.py"
@@ -72,7 +73,7 @@ def test_failed_tool_observation_has_safe_error_type_only():
     )
     request = InnerAgentRequest(task_id="t", run_id="r", attempt_id="a", objective="x", allowed_capabilities=["safe.tool"])
     trace = InnerAgentTrace()
-    tools, _ = allowed_tools(registry, request, trace=trace)
+    tools, _ = allowed_tools(registry, request, trace=trace, definitions=[make_test_capability_definition("safe.tool")])
     observed = asyncio.run(tools[0].on_invoke_tool(SimpleNamespace(tool_call_id="c", context={}), "{}"))
     summary = next(item for item in trace.items if item["event"] == "TOOL_OBSERVATION_SUMMARY")
     assert observed["error_type"] == "COMMAND_NOT_ALLOWED"

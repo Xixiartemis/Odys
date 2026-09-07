@@ -15,6 +15,7 @@ from lhas.agent.planner import ScriptedPlatformPlanner
 from lhas.agent.profile import AgentProfileRegistry
 from lhas.agent.root import GoalSubmissionResult, RootAgentService
 from lhas.agent.toolsets import ToolsetRegistry
+from lhas.capability_registry import CapabilityDefinition, RuntimePlatform
 from lhas.domain.enums import EventType
 from lhas.domain.models import Project, new_id
 from lhas.knowledge import LocalKnowledgeProvider
@@ -29,6 +30,53 @@ from lhas.platform_models import DelegationRequest
 from lhas.skills import SkillRegistry
 from lhas.tools.protocol import ToolRequest, ToolResult, ToolResultStatus
 from lhas.tools.registry import ToolRegistry
+
+
+def _adapter_definition(
+    capability_id: str,
+    description: str,
+    input_schema: dict[str, Any],
+    output_schema: dict[str, Any] | None = None,
+) -> CapabilityDefinition:
+    """Declare a platform adapter capability without inspecting its backend."""
+    return CapabilityDefinition(
+        id=capability_id,
+        name=capability_id,
+        description=description,
+        category="platform-adapter",
+        version="v1",
+        input_schema=input_schema,
+        output_schema=output_schema or {"type": "object"},
+        platforms=(RuntimePlatform.WINDOWS, RuntimePlatform.LINUX, RuntimePlatform.MACOS),
+        permissions=("platform.read",),
+        risk_level="LOW",
+        workspace_scope="SOURCE_WORKSPACE",
+        timeout_seconds=30.0,
+        retryable=True,
+        preferred_tool=capability_id,
+        source="platform-adapter",
+        evidence_type="DETERMINISTIC_TOOL_RESULT",
+    )
+
+
+_PLATFORM_ADAPTER_DEFINITIONS = (
+    _adapter_definition(
+        "skills.view",
+        "Load one explicitly named skill",
+        {"type": "object", "properties": {"name": {"type": "string"}, "reference_path": {"type": ["string", "null"]}}, "required": ["name"], "additionalProperties": False},
+    ),
+    _adapter_definition(
+        "knowledge.search",
+        "Search bounded project knowledge",
+        {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"], "additionalProperties": False},
+        {"type": "array"},
+    ),
+    _adapter_definition(
+        "mcp.offline.echo",
+        "Call the bounded offline MCP echo adapter",
+        {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"], "additionalProperties": False},
+    ),
+)
 
 
 class _SkillsTool:
@@ -87,10 +135,11 @@ class _DelegationTool:
 
 
 class PlatformGoalService:
-    def __init__(self,db,planner,registry): self.db=db; self.planner=planner; self.registry=registry
+    def __init__(self,db,planner,registry,tool_contract=None,capability_registry=None):
+        self.db=db; self.planner=planner; self.registry=registry; self.tool_contract=tool_contract; self.capability_registry=capability_registry
     async def submit(self,objective:str,context:dict,project_id:str)->GoalSubmissionResult:
         goal=Goal(project_id=project_id,objective=objective,success_criteria=["all planned tasks pass validator"],allowed_capabilities=list(ScriptedPlatformPlanner.CAPABILITIES),metadata={"platform":"agent-foundation"})
-        plan=await PlanExecutionService(self.db,self.planner,self.registry).execute_goal(goal,context=context)
+        plan=await PlanExecutionService(self.db,self.planner,self.registry,tool_contract=self.tool_contract,capability_registry=self.capability_registry).execute_goal(goal,context=context)
         refs=[]
         for step in plan.steps:
             if step.task_id:
@@ -119,11 +168,16 @@ class OfflineAgentPlatform:
         mcp_caps=set(register_mcp_tools(self.registry,self.mcp,infos))
         for info in infos: EventStore(db).append(EventType.MCP_TOOL_DISCOVERED,payload={"server_name":info.server_name,"capability":info.name,"origin":"mcp"})
         toolsets=ToolsetRegistry(self.registry); toolsets.extend("mcp",mcp_caps)
+        from lhas.tools.invocation import build_contract_for_registry, invoke_via_contract
+        _cap_reg, _contract = build_contract_for_registry(
+            self.registry,
+            definitions=_PLATFORM_ADAPTER_DEFINITIONS,
+        )
 
         async def child_handler(request:AgentRequest):
             traces=[]
             async def call(capability,args):
-                result=await self.registry.resolve(capability).execute(ToolRequest(tool_call_id=new_id(),task_id=str(request.metadata["task_id"]),run_id=str(request.metadata["run_id"]),attempt_id=str(request.metadata["attempt_id"]),capability=capability,arguments=args,context=request.context,metadata={"role":request.role.value}))
+                result=await invoke_via_contract(_contract,ToolRequest(tool_call_id=new_id(),task_id=str(request.metadata["task_id"]),run_id=str(request.metadata["run_id"]),attempt_id=str(request.metadata["attempt_id"]),capability_id=capability,tool_name=capability,arguments=args,context=request.context,metadata={"role":request.role.value}))
                 traces.append({"capability":capability,"status":result.status.value,"error_type":result.error_type})
                 return result
             skill=await call("skills.view",{"name":"coding/code-review"})
@@ -139,7 +193,7 @@ class OfflineAgentPlatform:
         self.registry.register(_DelegationTool(delegation))
         self.registry.register(_KernelTool("platform.finalize",worker_kernel,AgentRole.REVIEWER))
         simple_kernel=ScriptedAgentKernel(lambda request: AgentResult(status=AgentStatus.COMPLETED,final_output=f"Odys offline: {request.objective[:500]}",completion_claim=True,turn_count=1))
-        goal_service=PlatformGoalService(db,ScriptedPlatformPlanner(),self.registry)
+        goal_service=PlatformGoalService(db,ScriptedPlatformPlanner(),self.registry,tool_contract=_contract,capability_registry=_cap_reg)
         self.root=RootAgentService(db,simple_kernel,goal_service,SessionRepository(db),memory,skills,self.project_root,ContextAssembler())
         self.project=project; self.skills=skills; self.memory=memory; self.knowledge=knowledge; self.toolsets=toolsets; self.delegation=delegation
         return self

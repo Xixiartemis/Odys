@@ -244,6 +244,8 @@ class OfflineDemoBackend:
     def __init__(self, registry: ToolRegistry, verify_argv: list[str]):
         self.registry = registry
         self.verify_argv = list(verify_argv)
+        from lhas.tools.invocation import build_contract_for_registry
+        _, self._contract = build_contract_for_registry(registry)
 
     async def run(self, request):
         trace: list[dict[str, Any]] = []
@@ -254,12 +256,14 @@ class OfflineDemoBackend:
             nonlocal tool_calls
             tool_calls += 1
             trace.append({"event": "TOOL_STARTED", "tool_name": capability, "tool_call_id": f"offline-{tool_calls}"})
-            result = await self.registry.resolve(capability).execute(ToolRequest(
+            from lhas.tools.invocation import invoke_via_contract
+            result = await invoke_via_contract(self._contract, ToolRequest(
                 tool_call_id=f"offline-{tool_calls}",
                 task_id=request.task_id,
                 run_id=request.run_id,
                 attempt_id=request.attempt_id,
-                capability=capability,
+                capability_id=capability,
+                tool_name=capability,
                 arguments=arguments,
                 context=request.context,
                 metadata=request.metadata,

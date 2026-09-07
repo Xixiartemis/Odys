@@ -1,6 +1,7 @@
 import asyncio
 from types import SimpleNamespace
 
+from lhas.capability_registry import CapabilityDefinition, RuntimePlatform
 from lhas.inner_agent import (
     AgentsSdkModelConfig, InnerAgentBackend, InnerAgentExecutor, InnerAgentRequest,
     InnerAgentResult, InnerAgentStatus, OdysAgentRunContext, OdysAgentsRunHooks,
@@ -18,6 +19,28 @@ def _request(**kw):
     values = {"task_id": "t", "run_id": "r", "attempt_id": "a", "objective": "x", "allowed_capabilities": []}
     values.update(kw)
     return InnerAgentRequest(**values)
+
+
+def _cap_def(capability_id, preferred_tool=None):
+    """Build a minimal CapabilityDefinition for test use."""
+    return CapabilityDefinition(
+        id=capability_id,
+        name=capability_id,
+        description=f"test capability {capability_id}",
+        category="test",
+        version="v1",
+        input_schema={"type": "object", "additionalProperties": False},
+        output_schema={"type": "object"},
+        platforms=(RuntimePlatform.LINUX, RuntimePlatform.WINDOWS, RuntimePlatform.MACOS),
+        permissions=(),
+        risk_level="LOW",
+        workspace_scope="SOURCE_WORKSPACE",
+        timeout_seconds=30.0,
+        retryable=True,
+        preferred_tool=preferred_tool or capability_id,
+        source="test",
+        evidence_type="DETERMINISTIC_TOOL_RESULT",
+    )
 
 
 def test_public_inner_agent_exports():
@@ -44,7 +67,7 @@ def test_tool_observation_excludes_usage_and_preserves_accounting():
     reg = ToolRegistry(); cap = CapabilitySpec(name="safe.a", description="a")
     reg.register(FakeTool(cap, lambda req: ToolResult(status=ToolResultStatus.FAILURE, error_type="NOT_FOUND", error_message="missing", usage={"requests": 2})))
     req = _request(allowed_capabilities=["safe.a"]); trace = InnerAgentTrace()
-    tools, _ = allowed_tools(reg, req, trace)
+    tools, _ = allowed_tools(reg, req, trace, definitions=[_cap_def("safe.a")])
     observed = asyncio.run(tools[0].on_invoke_tool(SimpleNamespace(tool_call_id="call-456", context={}), "{}"))
     assert observed["status"] == "FAILURE" and observed["error_type"] == "NOT_FOUND" and "usage" not in observed
     assert trace.items[-1]["usage"] == {"requests": 2}
@@ -54,7 +77,7 @@ def test_tool_adapter_preserves_tool_call_id():
     seen = []
     reg = ToolRegistry(); cap = CapabilitySpec(name="safe.a", description="a")
     reg.register(FakeTool(cap, lambda req: seen.append(req) or {"ok": True}))
-    tools, _ = allowed_tools(reg, _request(allowed_capabilities=["safe.a"]))
+    tools, _ = allowed_tools(reg, _request(allowed_capabilities=["safe.a"]), definitions=[_cap_def("safe.a")])
     asyncio.run(tools[0].on_invoke_tool(SimpleNamespace(tool_call_id="call-456", context={}), "{}"))
     assert seen[0].tool_call_id == "call-456"
 
@@ -124,7 +147,7 @@ def test_real_backend_tool_accounting_keeps_usage_out_of_observation():
             observation = await agent.tools[0].on_invoke_tool(SimpleNamespace(tool_call_id="call-1", context=kwargs["context"]), "{}")
             assert "usage" not in observation
             return SimpleNamespace(final_output="done", context_wrapper=SimpleNamespace(usage={}))
-    backend = OpenAIAgentsBackend(reg, AgentsSdkModelConfig(model="m", api_key="k"), runner=Runner())
+    backend = OpenAIAgentsBackend(reg, AgentsSdkModelConfig(model="m", api_key="k"), runner=Runner(), definitions=[_cap_def("repo.search")])
     result = asyncio.run(backend.run(_request(allowed_capabilities=["repo.search"])))
     accounting = [item for item in result.trace if item["event"] == "TOOL_ACCOUNTING"]
     assert accounting and accounting[0]["tool_name"] == "repo.search" and accounting[0]["usage"] == {"requests": 2}
