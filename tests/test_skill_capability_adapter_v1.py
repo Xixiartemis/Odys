@@ -27,6 +27,7 @@ from lhas.capability_registry import (
     CapabilityAvailability,
     CapabilityRegistry,
     CapabilityRuntimeContext,
+    default_capabilities,
 )
 from lhas.skills.models import (
     AcceptanceContract,
@@ -711,3 +712,184 @@ class TestP23StrictSemanticAuthority:
         # Registry unchanged
         after_defs = [d.model_dump() for d in cap_reg.list_all()]
         assert before_defs == after_defs
+
+
+# ---------------------------------------------------------------------------
+# Cross-adapter integration: MCP CapabilityDefinition ↔ Skills validation
+# ---------------------------------------------------------------------------
+
+class TestMCPCapabilityVisibleToSkills:
+    """Prove that an MCP-contributed CapabilityDefinition is visible to
+    Skills validation, while a CapabilitySpec-only backend is NOT.
+
+    Invariants verified:
+    - MCP explicit CapabilityDefinition (mcp.odys-fake.echo) registered in
+      CapabilityRegistry is AVAILABLE to a Skill that declares it as required.
+    - CapabilitySpec-only backend (no CapabilityDefinition) does NOT satisfy.
+    - Zero Tool/MCP invocation during validation.
+    - Registry unchanged after validation.
+    - MCP semantic ID preserved unchanged (no double-prefix).
+    """
+
+    def test_mcp_definition_satisfies_skill_required(self, tmp_path: Path):
+        """An MCP CapabilityDefinition registered in the CapabilityRegistry
+        is AVAILABLE when a Skill declares it as required."""
+        from lhas.mcp.capabilities import mcp_tool_to_capability
+        from lhas.mcp.models import MCPToolInfo
+
+        # Create an explicit CapabilityDefinition from MCPToolInfo
+        mcp_info = MCPToolInfo(
+            name="mcp.odys-fake.echo",
+            description="Return bounded offline evidence",
+            input_schema={"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]},
+            server_name="odys-fake",
+        )
+        mcp_def = mcp_tool_to_capability(mcp_info)
+
+        # Register MCP definition alongside core definitions
+        core_defs = list(default_capabilities())
+        cap_reg = CapabilityRegistry(definitions=core_defs + [mcp_def])
+
+        # Skill requires the MCP capability
+        _write_skill(
+            tmp_path, "mcp-skill",
+            '---\nname: mcp-skill\n'
+            'required_capabilities: ["mcp.odys-fake.echo"]\n'
+            '---\nBody',
+        )
+        doc = SkillRegistry([tmp_path]).view("mcp-skill")
+
+        report = validate_skill_capabilities(doc, cap_reg, _context("windows"))
+
+        # MCP capability is known and available
+        assert report.all_required_available
+        assert report.missing_required == []
+        entry = next(e for e in report.entries if e.capability_id == "mcp.odys-fake.echo")
+        assert entry.required
+        assert entry.known
+        assert entry.available
+
+    def test_spec_only_backend_does_not_satisfy_mcp_required(self, tmp_path: Path):
+        """A CapabilitySpec-only backend (no CapabilityDefinition) does NOT
+        satisfy a Skill's required MCP capability."""
+        from lhas.planning.models import CapabilitySpec
+        from lhas.tools import FakeTool, ToolRegistry
+
+        # Tool with CapabilitySpec for the MCP capability name
+        tool_reg = ToolRegistry()
+        tool_reg.register(FakeTool(CapabilitySpec(name="mcp.odys-fake.echo")))
+
+        # CapabilityRegistry with ZERO definitions (empty)
+        cap_reg = CapabilityRegistry(tool_registry=tool_reg, definitions=[])
+
+        _write_skill(
+            tmp_path, "mcp-skill",
+            '---\nname: mcp-skill\n'
+            'required_capabilities: ["mcp.odys-fake.echo"]\n'
+            '---\nBody',
+        )
+        doc = SkillRegistry([tmp_path]).view("mcp-skill")
+
+        report = validate_skill_capabilities(doc, cap_reg, _context("windows"))
+
+        # NOT available — no CapabilityDefinition exists
+        assert not report.all_required_available
+        assert "mcp.odys-fake.echo" in report.missing_required
+        assert "mcp.odys-fake.echo" in report.unknown_required
+        entry = next(e for e in report.entries if e.capability_id == "mcp.odys-fake.echo")
+        assert entry.required
+        assert not entry.known
+        assert not entry.available
+
+    def test_zero_invocation_during_mcp_validation(self, tmp_path: Path):
+        """Validation of a Skill requiring an MCP capability executes zero
+        tools and makes no MCP calls."""
+        from lhas.mcp.capabilities import mcp_tool_to_capability
+        from lhas.mcp.models import MCPToolInfo
+        from lhas.planning.models import CapabilitySpec
+        from lhas.tools import FakeTool, ToolRegistry
+
+        execute_calls: list[str] = []
+
+        class TrackingTool(FakeTool):
+            async def execute(self, request):
+                execute_calls.append(request.capability)
+                return await super().execute(request)
+
+        mcp_info = MCPToolInfo(
+            name="mcp.odys-fake.echo",
+            server_name="odys-fake",
+        )
+        mcp_def = mcp_tool_to_capability(mcp_info)
+
+        tool_reg = ToolRegistry()
+        tool_reg.register(TrackingTool(CapabilitySpec(name="mcp.odys-fake.echo")))
+        cap_reg = CapabilityRegistry(
+            tool_registry=tool_reg,
+            definitions=list(default_capabilities()) + [mcp_def],
+        )
+
+        _write_skill(
+            tmp_path, "mcp-skill",
+            '---\nname: mcp-skill\n'
+            'required_capabilities: ["mcp.odys-fake.echo"]\n'
+            '---\nBody',
+        )
+        doc = SkillRegistry([tmp_path]).view("mcp-skill")
+        report = validate_skill_capabilities(doc, cap_reg, _context("windows"))
+
+        assert report.all_required_available
+        # Zero tool executions
+        assert execute_calls == []
+
+    def test_registry_unchanged_after_mcp_validation(self, tmp_path: Path):
+        """Validation must not mutate the CapabilityRegistry, even when MCP
+        capabilities are involved."""
+        from lhas.mcp.capabilities import mcp_tool_to_capability
+        from lhas.mcp.models import MCPToolInfo
+
+        mcp_info = MCPToolInfo(name="mcp.odys-fake.echo", server_name="odys-fake")
+        mcp_def = mcp_tool_to_capability(mcp_info)
+        cap_reg = CapabilityRegistry(definitions=list(default_capabilities()) + [mcp_def])
+
+        before = [d.model_dump() for d in cap_reg.list_all()]
+
+        _write_skill(
+            tmp_path, "mcp-skill",
+            '---\nname: mcp-skill\n'
+            'required_capabilities: ["mcp.odys-fake.echo", "nonexistent"]\n'
+            '---\nBody',
+        )
+        doc = SkillRegistry([tmp_path]).view("mcp-skill")
+        validate_skill_capabilities(doc, cap_reg, _context("windows"))
+
+        after = [d.model_dump() for d in cap_reg.list_all()]
+        assert before == after
+
+    def test_mcp_semantic_id_preserved_unchanged(self, tmp_path: Path):
+        """The MCP semantic ID is preserved as-is — no double-prefix
+        rewriting by the Skills layer."""
+        from lhas.mcp.capabilities import mcp_tool_to_capability
+        from lhas.mcp.models import MCPToolInfo
+
+        mcp_info = MCPToolInfo(name="mcp.odys-fake.echo", server_name="odys-fake")
+        mcp_def = mcp_tool_to_capability(mcp_info)
+
+        # Verify the definition itself has no double prefix
+        assert mcp_def.id == "mcp.odys-fake.echo"
+        assert not mcp_def.id.startswith("mcp.mcp.")
+
+        # Verify the Skills report preserves the ID unchanged
+        cap_reg = CapabilityRegistry(definitions=list(default_capabilities()) + [mcp_def])
+        _write_skill(
+            tmp_path, "mcp-skill",
+            '---\nname: mcp-skill\n'
+            'required_capabilities: ["mcp.odys-fake.echo"]\n'
+            '---\nBody',
+        )
+        doc = SkillRegistry([tmp_path]).view("mcp-skill")
+        report = validate_skill_capabilities(doc, cap_reg, _context("windows"))
+
+        entry = next(e for e in report.entries if e.capability_id == "mcp.odys-fake.echo")
+        # ID preserved exactly as registered
+        assert entry.capability_id == "mcp.odys-fake.echo"
