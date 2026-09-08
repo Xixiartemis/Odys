@@ -1,7 +1,7 @@
 # Phase 2 Capability Conformance Matrix
 
-**Generated from**: `7e6dcc227b0ae809a462bdf9a581d0c300f1fde3`
-**Date**: 2026-09-07
+**Generated from**: `8968a309f581cace037866189be33c4957fc6f47`
+**Date**: 2026-09-08
 **Status**: Canonical Phase 2 runtime audit
 
 ---
@@ -145,7 +145,7 @@ Skills reference capabilities by ID in `required_capabilities` and `optional_cap
 The MCP path is:
 
 ```
-MCPManager.discover_tools() → list[MCPToolInfo]
+MCPManager.discover(server_name) → list[MCPToolInfo]
   → mcp_tool_to_capability(info) → CapabilityDefinition
   → merge_capability_definitions(core, mcp) → single registry
 ```
@@ -263,7 +263,7 @@ No MCP capabilities are statically enumerable from the codebase.
 
 ### 9.1 No Violations Found
 
-The merged runtime at `7e6dcc2` correctly enforces:
+The merged runtime at `8968a30` correctly enforces:
 
 1. **Authority boundary**: `CapabilityDefinition` is the sole semantic authority; `CapabilitySpec` is never promoted
 2. **Execution boundary**: All tool calls route through `ToolContract.invoke()`; direct `tool.execute()` is forbidden

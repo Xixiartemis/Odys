@@ -1,7 +1,7 @@
 {
   "version": "phase2-conformance-matrix-v1",
-  "base_sha": "7e6dcc227b0ae809a462bdf9a581d0c300f1fde3",
-  "generated_at": "2026-09-07",
+  "base_sha": "8968a309f581cace037866189be33c4957fc6f47",
+  "generated_at": "2026-09-08",
   "source_files": [
     "src/lhas/capability_registry.py",
     "src/lhas/tools/registry.py",
@@ -61,14 +61,30 @@
         "type": "object",
         "additionalProperties": false,
         "properties": {
-          "argv": {"type": "array", "items": {"type": "string"}, "minItems": 1},
-          "cwd": {"type": "string"},
-          "timeout_seconds": {"type": "number"}
+          "argv": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1
+          },
+          "cwd": {
+            "type": "string"
+          },
+          "timeout_seconds": {
+            "type": "number"
+          }
         },
-        "required": ["argv"]
+        "required": [
+          "argv"
+        ]
       },
-      "output_schema": {"type": "object"},
-      "permissions": ["process.execute"],
+      "output_schema": {
+        "type": "object"
+      },
+      "permissions": [
+        "process.execute"
+      ],
       "risk_level": "LOW",
       "workspace_scope": "SOURCE_WORKSPACE",
       "contract_path": "CapabilityRegistry -> ToolContract -> ToolRegistry -> Tool",
@@ -78,8 +94,12 @@
       "typed_evidence": true,
       "evidence_capability_identity": true,
       "direct_execute_bypass": "AUTHORIZED_INTERNAL_BACKEND_ONLY",
-      "platform_support": ["windows", "linux", "macos"],
-      "test_evidence": "not_proven",
+      "platform_support": [
+        "windows",
+        "linux",
+        "macos"
+      ],
+      "test_evidence": "TestContractPath::test_builtin_invocation_through_contract; TestDiscoveryBinding; TestMetaEnumeration",
       "status": "PASS"
     },
     {
@@ -96,8 +116,12 @@
         "additionalProperties": false,
         "properties": {}
       },
-      "output_schema": {"type": "object"},
-      "permissions": ["environment.read"],
+      "output_schema": {
+        "type": "object"
+      },
+      "permissions": [
+        "environment.read"
+      ],
       "risk_level": "LOW",
       "workspace_scope": "SOURCE_WORKSPACE",
       "contract_path": "CapabilityRegistry -> ToolContract -> ToolRegistry -> Tool",
@@ -107,8 +131,12 @@
       "typed_evidence": true,
       "evidence_capability_identity": true,
       "direct_execute_bypass": "AUTHORIZED_INTERNAL_BACKEND_ONLY",
-      "platform_support": ["windows", "linux", "macos"],
-      "test_evidence": "not_proven",
+      "platform_support": [
+        "windows",
+        "linux",
+        "macos"
+      ],
+      "test_evidence": "TestDiscoveryBinding; TestMetaEnumeration",
       "status": "PASS"
     },
     {
@@ -124,12 +152,24 @@
         "type": "object",
         "additionalProperties": false,
         "properties": {
-          "argv": {"type": "array", "items": {"type": "string"}, "minItems": 1},
-          "cwd": {"type": "string"}
+          "argv": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1
+          },
+          "cwd": {
+            "type": "string"
+          }
         }
       },
-      "output_schema": {"type": "object"},
-      "permissions": ["process.execute"],
+      "output_schema": {
+        "type": "object"
+      },
+      "permissions": [
+        "process.execute"
+      ],
       "risk_level": "LOW",
       "workspace_scope": "SOURCE_WORKSPACE",
       "contract_path": "CapabilityRegistry -> ToolContract -> ToolRegistry -> Tool",
@@ -139,8 +179,12 @@
       "typed_evidence": true,
       "evidence_capability_identity": true,
       "direct_execute_bypass": "AUTHORIZED_INTERNAL_BACKEND_ONLY",
-      "platform_support": ["windows", "linux", "macos"],
-      "test_evidence": "not_proven",
+      "platform_support": [
+        "windows",
+        "linux",
+        "macos"
+      ],
+      "test_evidence": "TestDiscoveryBinding; TestMetaEnumeration",
       "status": "PASS"
     },
     {
@@ -156,12 +200,24 @@
         "type": "object",
         "additionalProperties": false,
         "properties": {
-          "argv": {"type": "array", "items": {"type": "string"}, "minItems": 1},
-          "cwd": {"type": "string"}
+          "argv": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1
+          },
+          "cwd": {
+            "type": "string"
+          }
         }
       },
-      "output_schema": {"type": "object"},
-      "permissions": ["process.execute"],
+      "output_schema": {
+        "type": "object"
+      },
+      "permissions": [
+        "process.execute"
+      ],
       "risk_level": "LOW",
       "workspace_scope": "SOURCE_WORKSPACE",
       "contract_path": "CapabilityRegistry -> ToolContract -> ToolRegistry -> Tool",
@@ -171,8 +227,12 @@
       "typed_evidence": true,
       "evidence_capability_identity": true,
       "direct_execute_bypass": "AUTHORIZED_INTERNAL_BACKEND_ONLY",
-      "platform_support": ["windows", "linux", "macos"],
-      "test_evidence": "not_proven",
+      "platform_support": [
+        "windows",
+        "linux",
+        "macos"
+      ],
+      "test_evidence": "TestDiscoveryBinding; TestMetaEnumeration",
       "status": "PASS"
     },
     {
@@ -188,11 +248,17 @@
         "type": "object",
         "additionalProperties": false,
         "properties": {
-          "goal": {"type": "string"}
+          "goal": {
+            "type": "string"
+          }
         }
       },
-      "output_schema": {"type": "object"},
-      "permissions": ["platform.delegate"],
+      "output_schema": {
+        "type": "object"
+      },
+      "permissions": [
+        "platform.delegate"
+      ],
       "risk_level": "HIGH",
       "workspace_scope": "SOURCE_WORKSPACE",
       "contract_path": "CapabilityRegistry -> ToolContract -> ToolRegistry -> Tool",
@@ -202,8 +268,12 @@
       "typed_evidence": true,
       "evidence_capability_identity": true,
       "direct_execute_bypass": "AUTHORIZED_INTERNAL_BACKEND_ONLY",
-      "platform_support": ["windows", "linux", "macos"],
-      "test_evidence": "not_proven",
+      "platform_support": [
+        "windows",
+        "linux",
+        "macos"
+      ],
+      "test_evidence": "TestContractPath::test_platform_invocation_through_contract; TestPlatformConformance; TestMetaEnumeration",
       "status": "PASS"
     },
     {
@@ -219,11 +289,17 @@
         "type": "object",
         "additionalProperties": false,
         "properties": {
-          "goal": {"type": "string"}
+          "goal": {
+            "type": "string"
+          }
         }
       },
-      "output_schema": {"type": "object"},
-      "permissions": ["platform.execute"],
+      "output_schema": {
+        "type": "object"
+      },
+      "permissions": [
+        "platform.execute"
+      ],
       "risk_level": "LOW",
       "workspace_scope": "SOURCE_WORKSPACE",
       "contract_path": "CapabilityRegistry -> ToolContract -> ToolRegistry -> Tool",
@@ -233,8 +309,12 @@
       "typed_evidence": true,
       "evidence_capability_identity": true,
       "direct_execute_bypass": "AUTHORIZED_INTERNAL_BACKEND_ONLY",
-      "platform_support": ["windows", "linux", "macos"],
-      "test_evidence": "not_proven",
+      "platform_support": [
+        "windows",
+        "linux",
+        "macos"
+      ],
+      "test_evidence": "TestContractPath::test_platform_invocation_through_contract; TestPlatformConformance; TestMetaEnumeration",
       "status": "PASS"
     },
     {
@@ -250,11 +330,17 @@
         "type": "object",
         "additionalProperties": false,
         "properties": {
-          "goal": {"type": "string"}
+          "goal": {
+            "type": "string"
+          }
         }
       },
-      "output_schema": {"type": "object"},
-      "permissions": ["platform.execute"],
+      "output_schema": {
+        "type": "object"
+      },
+      "permissions": [
+        "platform.execute"
+      ],
       "risk_level": "LOW",
       "workspace_scope": "SOURCE_WORKSPACE",
       "contract_path": "CapabilityRegistry -> ToolContract -> ToolRegistry -> Tool",
@@ -264,8 +350,12 @@
       "typed_evidence": true,
       "evidence_capability_identity": true,
       "direct_execute_bypass": "AUTHORIZED_INTERNAL_BACKEND_ONLY",
-      "platform_support": ["windows", "linux", "macos"],
-      "test_evidence": "not_proven",
+      "platform_support": [
+        "windows",
+        "linux",
+        "macos"
+      ],
+      "test_evidence": "TestContractPath; TestEvidence; TestPlatformConformance; TestMetaEnumeration",
       "status": "PASS"
     },
     {
@@ -281,14 +371,30 @@
         "type": "object",
         "additionalProperties": false,
         "properties": {
-          "argv": {"type": "array", "items": {"type": "string"}, "minItems": 1},
-          "cwd": {"type": "string"},
-          "timeout_seconds": {"type": "number"}
+          "argv": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1
+          },
+          "cwd": {
+            "type": "string"
+          },
+          "timeout_seconds": {
+            "type": "number"
+          }
         },
-        "required": ["argv"]
+        "required": [
+          "argv"
+        ]
       },
-      "output_schema": {"type": "object"},
-      "permissions": ["process.execute"],
+      "output_schema": {
+        "type": "object"
+      },
+      "permissions": [
+        "process.execute"
+      ],
       "risk_level": "LOW",
       "workspace_scope": "SOURCE_WORKSPACE",
       "contract_path": "CapabilityRegistry -> ToolContract -> ToolRegistry -> Tool",
@@ -298,8 +404,12 @@
       "typed_evidence": true,
       "evidence_capability_identity": true,
       "direct_execute_bypass": "AUTHORIZED_INTERNAL_BACKEND_ONLY",
-      "platform_support": ["windows", "linux", "macos"],
-      "test_evidence": "not_proven",
+      "platform_support": [
+        "windows",
+        "linux",
+        "macos"
+      ],
+      "test_evidence": "TestDiscoveryBinding; TestMetaEnumeration",
       "status": "PASS"
     },
     {
@@ -315,24 +425,55 @@
         "type": "object",
         "additionalProperties": false,
         "properties": {
-          "path": {"type": "string"},
-          "max_diff_bytes": {"type": "integer"}
+          "path": {
+            "type": "string"
+          },
+          "max_diff_bytes": {
+            "type": "integer"
+          }
         }
       },
       "output_schema": {
         "type": "object",
         "additionalProperties": false,
         "properties": {
-          "changed_files": {"type": "array", "items": {"type": "string"}},
-          "diff": {"type": "string"},
-          "files_changed": {"type": "integer", "minimum": 0},
-          "lines_added": {"type": "integer", "minimum": 0},
-          "lines_removed": {"type": "integer", "minimum": 0},
-          "truncated": {"type": "boolean"}
+          "changed_files": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "diff": {
+            "type": "string"
+          },
+          "files_changed": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "lines_added": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "lines_removed": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "truncated": {
+            "type": "boolean"
+          }
         },
-        "required": ["changed_files", "diff", "files_changed", "lines_added", "lines_removed", "truncated"]
+        "required": [
+          "changed_files",
+          "diff",
+          "files_changed",
+          "lines_added",
+          "lines_removed",
+          "truncated"
+        ]
       },
-      "permissions": ["workspace.read"],
+      "permissions": [
+        "workspace.read"
+      ],
       "risk_level": "LOW",
       "workspace_scope": "SOURCE_WORKSPACE",
       "contract_path": "CapabilityRegistry -> ToolContract -> ToolRegistry -> Tool",
@@ -342,8 +483,12 @@
       "typed_evidence": true,
       "evidence_capability_identity": true,
       "direct_execute_bypass": "AUTHORIZED_INTERNAL_BACKEND_ONLY",
-      "platform_support": ["windows", "linux", "macos"],
-      "test_evidence": "not_proven",
+      "platform_support": [
+        "windows",
+        "linux",
+        "macos"
+      ],
+      "test_evidence": "TestDiscoveryBinding; TestMetaEnumeration",
       "status": "PASS"
     },
     {
@@ -359,30 +504,89 @@
         "type": "object",
         "additionalProperties": false,
         "properties": {
-          "path": {"type": "string"},
-          "old_text": {"type": "string"},
-          "new_text": {"type": "string"}
+          "path": {
+            "type": "string"
+          },
+          "old_text": {
+            "type": "string"
+          },
+          "new_text": {
+            "type": "string"
+          }
         },
-        "required": ["path", "old_text", "new_text"]
+        "required": [
+          "path",
+          "old_text",
+          "new_text"
+        ]
       },
       "output_schema": {
         "type": "object",
         "additionalProperties": false,
         "properties": {
-          "path": {"type": "string"},
-          "replacements": {"type": "integer", "minimum": 1},
-          "before_sha256": {"type": "string", "minLength": 64, "maxLength": 64},
-          "after_sha256": {"type": "string", "minLength": 64, "maxLength": 64},
-          "bytes_before": {"type": "integer", "minimum": 0},
-          "bytes_after": {"type": "integer", "minimum": 0},
-          "match_mode": {"type": "string"},
-          "candidate_count": {"type": "integer", "minimum": 0},
-          "matched_start_line": {"type": ["integer", "null"], "minimum": 1},
-          "matched_end_line": {"type": ["integer", "null"], "minimum": 1}
+          "path": {
+            "type": "string"
+          },
+          "replacements": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "before_sha256": {
+            "type": "string",
+            "minLength": 64,
+            "maxLength": 64
+          },
+          "after_sha256": {
+            "type": "string",
+            "minLength": 64,
+            "maxLength": 64
+          },
+          "bytes_before": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "bytes_after": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "match_mode": {
+            "type": "string"
+          },
+          "candidate_count": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "matched_start_line": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 1
+          },
+          "matched_end_line": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 1
+          }
         },
-        "required": ["path", "replacements", "before_sha256", "after_sha256", "bytes_before", "bytes_after", "match_mode", "candidate_count", "matched_start_line", "matched_end_line"]
+        "required": [
+          "path",
+          "replacements",
+          "before_sha256",
+          "after_sha256",
+          "bytes_before",
+          "bytes_after",
+          "match_mode",
+          "candidate_count",
+          "matched_start_line",
+          "matched_end_line"
+        ]
       },
-      "permissions": ["workspace.write"],
+      "permissions": [
+        "workspace.write"
+      ],
       "risk_level": "MEDIUM",
       "workspace_scope": "SOURCE_WORKSPACE",
       "contract_path": "CapabilityRegistry -> ToolContract -> ToolRegistry -> Tool",
@@ -392,8 +596,12 @@
       "typed_evidence": true,
       "evidence_capability_identity": true,
       "direct_execute_bypass": "AUTHORIZED_INTERNAL_BACKEND_ONLY",
-      "platform_support": ["windows", "linux", "macos"],
-      "test_evidence": "not_proven",
+      "platform_support": [
+        "windows",
+        "linux",
+        "macos"
+      ],
+      "test_evidence": "TestDiscoveryBinding; TestMetaEnumeration",
       "status": "PASS"
     },
     {
@@ -409,16 +617,43 @@
         "type": "object",
         "additionalProperties": false,
         "properties": {
-          "path": {"type": "string"},
-          "start_line": {"type": "integer", "minimum": 1},
-          "end_line": {"type": "integer", "minimum": 1},
-          "new_lines": {"type": "array", "items": {"type": "string"}},
-          "expected_sha256": {"type": "string", "minLength": 64, "maxLength": 64}
+          "path": {
+            "type": "string"
+          },
+          "start_line": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "end_line": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "new_lines": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "expected_sha256": {
+            "type": "string",
+            "minLength": 64,
+            "maxLength": 64
+          }
         },
-        "required": ["path", "start_line", "end_line", "new_lines", "expected_sha256"]
+        "required": [
+          "path",
+          "start_line",
+          "end_line",
+          "new_lines",
+          "expected_sha256"
+        ]
       },
-      "output_schema": {"type": "object"},
-      "permissions": ["workspace.write"],
+      "output_schema": {
+        "type": "object"
+      },
+      "permissions": [
+        "workspace.write"
+      ],
       "risk_level": "MEDIUM",
       "workspace_scope": "SOURCE_WORKSPACE",
       "contract_path": "CapabilityRegistry -> ToolContract -> ToolRegistry -> Tool",
@@ -428,8 +663,12 @@
       "typed_evidence": true,
       "evidence_capability_identity": true,
       "direct_execute_bypass": "AUTHORIZED_INTERNAL_BACKEND_ONLY",
-      "platform_support": ["windows", "linux", "macos"],
-      "test_evidence": "not_proven",
+      "platform_support": [
+        "windows",
+        "linux",
+        "macos"
+      ],
+      "test_evidence": "TestDiscoveryBinding; TestMetaEnumeration",
       "status": "PASS"
     },
     {
@@ -445,35 +684,69 @@
         "type": "object",
         "additionalProperties": false,
         "properties": {
-          "path": {"type": "string"},
-          "recursive": {"type": "boolean"},
-          "max_entries": {"type": "integer"}
+          "path": {
+            "type": "string"
+          },
+          "recursive": {
+            "type": "boolean"
+          },
+          "max_entries": {
+            "type": "integer"
+          }
         }
       },
       "output_schema": {
         "type": "object",
         "additionalProperties": false,
         "properties": {
-          "path": {"type": "string"},
+          "path": {
+            "type": "string"
+          },
           "entries": {
             "type": "array",
             "items": {
               "type": "object",
               "additionalProperties": false,
               "properties": {
-                "path": {"type": "string"},
-                "type": {"type": "string", "enum": ["file", "directory"]},
-                "size": {"type": "integer", "minimum": 0},
-                "relative_path": {"type": "string"}
+                "path": {
+                  "type": "string"
+                },
+                "type": {
+                  "type": "string",
+                  "enum": [
+                    "file",
+                    "directory"
+                  ]
+                },
+                "size": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "relative_path": {
+                  "type": "string"
+                }
               },
-              "required": ["path", "type", "size", "relative_path"]
+              "required": [
+                "path",
+                "type",
+                "size",
+                "relative_path"
+              ]
             }
           },
-          "truncated": {"type": "boolean"}
+          "truncated": {
+            "type": "boolean"
+          }
         },
-        "required": ["path", "entries", "truncated"]
+        "required": [
+          "path",
+          "entries",
+          "truncated"
+        ]
       },
-      "permissions": ["workspace.read"],
+      "permissions": [
+        "workspace.read"
+      ],
       "risk_level": "LOW",
       "workspace_scope": "SOURCE_WORKSPACE",
       "contract_path": "CapabilityRegistry -> ToolContract -> ToolRegistry -> Tool",
@@ -483,8 +756,12 @@
       "typed_evidence": true,
       "evidence_capability_identity": true,
       "direct_execute_bypass": "AUTHORIZED_INTERNAL_BACKEND_ONLY",
-      "platform_support": ["windows", "linux", "macos"],
-      "test_evidence": "not_proven",
+      "platform_support": [
+        "windows",
+        "linux",
+        "macos"
+      ],
+      "test_evidence": "TestDiscoveryBinding; TestMetaEnumeration",
       "status": "PASS"
     },
     {
@@ -500,30 +777,81 @@
         "type": "object",
         "additionalProperties": false,
         "properties": {
-          "path": {"type": "string"},
-          "start_line": {"type": "integer"},
-          "end_line": {"type": "integer"}
+          "path": {
+            "type": "string"
+          },
+          "start_line": {
+            "type": "integer"
+          },
+          "end_line": {
+            "type": "integer"
+          }
         },
-        "required": ["path"]
+        "required": [
+          "path"
+        ]
       },
       "output_schema": {
         "type": "object",
         "additionalProperties": false,
         "properties": {
-          "path": {"type": "string"},
-          "content": {"type": "string"},
-          "start_line": {"type": "integer", "minimum": 1},
-          "end_line": {"type": "integer", "minimum": 0},
-          "total_lines": {"type": "integer", "minimum": 0},
-          "truncated": {"type": "boolean"},
-          "sha256": {"type": "string", "minLength": 64, "maxLength": 64}
+          "path": {
+            "type": "string"
+          },
+          "content": {
+            "type": "string"
+          },
+          "start_line": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "end_line": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "total_lines": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "truncated": {
+            "type": "boolean"
+          },
+          "sha256": {
+            "type": "string",
+            "minLength": 64,
+            "maxLength": 64
+          }
         },
         "anyOf": [
-          {"required": ["path", "content", "start_line", "end_line", "total_lines", "truncated", "sha256"]},
-          {"required": ["path", "content", "total_lines", "truncated"], "properties": {"truncated": {"const": true}}}
+          {
+            "required": [
+              "path",
+              "content",
+              "start_line",
+              "end_line",
+              "total_lines",
+              "truncated",
+              "sha256"
+            ]
+          },
+          {
+            "required": [
+              "path",
+              "content",
+              "total_lines",
+              "truncated"
+            ],
+            "properties": {
+              "truncated": {
+                "const": true
+              }
+            }
+          }
         ]
       },
-      "permissions": ["workspace.read"],
+      "permissions": [
+        "workspace.read"
+      ],
       "risk_level": "LOW",
       "workspace_scope": "SOURCE_WORKSPACE",
       "contract_path": "CapabilityRegistry -> ToolContract -> ToolRegistry -> Tool",
@@ -533,8 +861,12 @@
       "typed_evidence": true,
       "evidence_capability_identity": true,
       "direct_execute_bypass": "AUTHORIZED_INTERNAL_BACKEND_ONLY",
-      "platform_support": ["windows", "linux", "macos"],
-      "test_evidence": "not_proven",
+      "platform_support": [
+        "windows",
+        "linux",
+        "macos"
+      ],
+      "test_evidence": "TestInvalidInput; TestMissingBackend; TestMetaEnumeration",
       "status": "PASS"
     },
     {
@@ -550,12 +882,20 @@
         "type": "object",
         "additionalProperties": false,
         "properties": {
-          "path": {"type": "string"}
+          "path": {
+            "type": "string"
+          }
         },
-        "required": ["path"]
+        "required": [
+          "path"
+        ]
       },
-      "output_schema": {"type": "object"},
-      "permissions": ["workspace.write"],
+      "output_schema": {
+        "type": "object"
+      },
+      "permissions": [
+        "workspace.write"
+      ],
       "risk_level": "MEDIUM",
       "workspace_scope": "SOURCE_WORKSPACE",
       "contract_path": "CapabilityRegistry -> ToolContract -> ToolRegistry -> Tool",
@@ -565,8 +905,12 @@
       "typed_evidence": true,
       "evidence_capability_identity": true,
       "direct_execute_bypass": "AUTHORIZED_INTERNAL_BACKEND_ONLY",
-      "platform_support": ["windows", "linux", "macos"],
-      "test_evidence": "not_proven",
+      "platform_support": [
+        "windows",
+        "linux",
+        "macos"
+      ],
+      "test_evidence": "TestDiscoveryBinding; TestMetaEnumeration",
       "status": "PASS"
     },
     {
@@ -582,16 +926,32 @@
         "type": "object",
         "additionalProperties": false,
         "properties": {
-          "query": {"type": "string"},
-          "path": {"type": "string"},
-          "glob": {"type": "string"},
-          "max_matches": {"type": "integer"},
-          "context_lines": {"type": "integer"}
+          "query": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "glob": {
+            "type": "string"
+          },
+          "max_matches": {
+            "type": "integer"
+          },
+          "context_lines": {
+            "type": "integer"
+          }
         },
-        "required": ["query"]
+        "required": [
+          "query"
+        ]
       },
-      "output_schema": {"type": "object"},
-      "permissions": ["workspace.read"],
+      "output_schema": {
+        "type": "object"
+      },
+      "permissions": [
+        "workspace.read"
+      ],
       "risk_level": "LOW",
       "workspace_scope": "SOURCE_WORKSPACE",
       "contract_path": "CapabilityRegistry -> ToolContract -> ToolRegistry -> Tool",
@@ -601,8 +961,12 @@
       "typed_evidence": true,
       "evidence_capability_identity": true,
       "direct_execute_bypass": "AUTHORIZED_INTERNAL_BACKEND_ONLY",
-      "platform_support": ["windows", "linux", "macos"],
-      "test_evidence": "not_proven",
+      "platform_support": [
+        "windows",
+        "linux",
+        "macos"
+      ],
+      "test_evidence": "TestDiscoveryBinding; TestMetaEnumeration",
       "status": "PASS"
     }
   ],
@@ -624,14 +988,18 @@
       "produces_capabilities": 0
     },
     "mcp": {
-      "discovery": "MCPManager.discover_tools() -> list[MCPToolInfo]",
+      "discovery": "MCPManager.discover(server_name) -> list[MCPToolInfo]",
       "conversion": "mcp_tool_to_capability(info) -> CapabilityDefinition",
       "id_pattern": "info.name (from MCPToolInfo.name)",
       "output_schema": "generic {'type': 'object'}",
       "collision_check": "merge_capability_definitions() raises ValueError on core ID collision"
     },
     "platform": {
-      "capabilities": ["platform.prepare", "platform.delegate", "platform.finalize"],
+      "capabilities": [
+        "platform.prepare",
+        "platform.delegate",
+        "platform.finalize"
+      ],
       "explicit_definitions": true,
       "agent_visible": true,
       "crosses_tool_contract": true,
