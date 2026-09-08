@@ -1,42 +1,52 @@
 # Phase 2 Closeout Report
 
-**Branch:** `phase2-closeout-harness-v1`
-**Base:** `df00459`
-**Final HEAD:** `a3b1d89`
+**Schema:** `p25-closeout-v2`
+**Base SHA:** `df00459`
+**Tested HEAD:** `2a88eaf`
+**Python:** `3.11.11`
+**Platform:** `Windows-10-10.0.26200-SP0`
+**Execution-derived:** `True`
+**Manually synthesized:** `False`
+**Reproducible:** `True`
+**Real builtin backend path:** `YES`
+**Real platform backend path:** `YES`
 **Decision:** PASS
 
 ## Summary
 
 | Metric | Count |
-|---|---|
-| Scenarios | 16 |
-| Passed | 16 |
-| Failed | 0 |
-| Capability Requests | 16 |
-| Contract Accepted | 14 |
-| Contract Rejected | 2 |
-| Backend Executions | 13 |
-| Typed Evidence | 13 |
+|---|---:|
+| Scenario IDs | 7 |
+| Execution records | 19 |
+| PASS records | 19 |
+| FAIL records | 0 |
+| Contract accepted | 14 |
+| Contract rejected | 5 |
+| Backend executions | 13 |
+| Typed evidence records | 13 |
 
-## Scenarios
+## Execution Evidence
 
-| Scenario | Capability | Contract Validated | Backend Exec | Tool Success | Evidence ID | Result |
-|---|---|---|---|---|---|---|
-| S1_BUILTIN_SUCCESS | workspace.read | True | True | True | workspace.read | PASS |
-| S1_BUILTIN_SUCCESS | workspace.list | True | True | True | workspace.list | PASS |
-| S1_BUILTIN_SUCCESS | workspace.edit | True | True | True | workspace.edit | PASS |
-| S1_BUILTIN_SUCCESS | workspace.diff | True | True | True | workspace.diff | PASS |
-| S1_BUILTIN_SUCCESS | test.run | True | True | True | test.run | PASS |
-| S1_BUILTIN_SUCCESS | git.status | True | True | True | git.status | PASS |
-| S1_BUILTIN_SUCCESS | git.diff | True | True | True | git.diff | PASS |
-| S1_BUILTIN_SUCCESS | environment.inspect | True | True | True | environment.inspect | PASS |
-| S2_INVALID_REQUEST_FAIL_CLOSED | workspace.read,test.run,<empty>,git.status | False | False | False | N/A | PASS |
-| S3_MISSING_BACKEND | workspace.read | False | False | False | N/A | PASS |
-| S4_MCP_LOCAL | mcp.odys-fake.echo | True | True | True | mcp.odys-fake.echo | PASS |
-| S5_SKILL_READINESS | workspace.read,mcp.odys-fake.echo | True | False | False | N/A | PASS |
-| S6_PLATFORM | platform.prepare | True | True | True | platform.prepare | PASS |
-| S6_PLATFORM | platform.delegate | True | True | True | platform.delegate | PASS |
-| S6_PLATFORM | platform.finalize | True | True | True | platform.finalize | PASS |
-| S7_TOOL_SUCCESS_NOT_COMPLETION | workspace.read | True | True | True | workspace.read | PASS |
+| Scenario | Seq | Capability | Definition source | Backend | Contract | Executed | Status | Error | Evidence capability | Evidence type | Evidence source | Result |
+|---|---:|---|---|---|---|---|---|---|---|---|---|---|
+| S1_BUILTIN_SUCCESS | 1 | workspace.list | odys-runtime | WorkspaceListTool | True | True | SUCCESS |  | workspace.list | TOOL_EXECUTION | odys-tool-contract-v1 | PASS |
+| S1_BUILTIN_SUCCESS | 2 | workspace.read | odys-runtime | WorkspaceReadTool | True | True | SUCCESS |  | workspace.read | TOOL_EXECUTION | odys-tool-contract-v1 | PASS |
+| S1_BUILTIN_SUCCESS | 3 | workspace.edit | odys-runtime | WorkspaceEditTool | True | True | SUCCESS |  | workspace.edit | TOOL_EXECUTION | odys-tool-contract-v1 | PASS |
+| S1_BUILTIN_SUCCESS | 4 | workspace.diff | odys-runtime | WorkspaceDiffTool | True | True | SUCCESS |  | workspace.diff | TOOL_EXECUTION | odys-tool-contract-v1 | PASS |
+| S1_BUILTIN_SUCCESS | 5 | test.run | odys-runtime | _RoutingCliBackend | True | True | SUCCESS |  | test.run | TOOL_EXECUTION | odys-tool-contract-v1 | PASS |
+| S1_BUILTIN_SUCCESS | 6 | git.status | odys-runtime | _RoutingCliBackend | True | True | SUCCESS |  | git.status | TOOL_EXECUTION | odys-tool-contract-v1 | PASS |
+| S1_BUILTIN_SUCCESS | 7 | git.diff | odys-runtime | _RoutingCliBackend | True | True | SUCCESS |  | git.diff | TOOL_EXECUTION | odys-tool-contract-v1 | PASS |
+| S1_BUILTIN_SUCCESS | 8 | environment.inspect | odys-runtime | _RoutingCliBackend | True | True | SUCCESS |  | environment.inspect | TOOL_EXECUTION | odys-tool-contract-v1 | PASS |
+| S2_INVALID_REQUEST_FAIL_CLOSED | 1 | workspace.read | odys-runtime | WorkspaceReadTool | False | False | FAILURE | INVALID_ARGUMENT |  |  |  | PASS |
+| S2_INVALID_REQUEST_FAIL_CLOSED | 2 | test.run | odys-runtime | _RoutingCliBackend | False | False | FAILURE | INVALID_ARGUMENT |  |  |  | PASS |
+| S2_INVALID_REQUEST_FAIL_CLOSED | 3 |  | unknown | none | False | False | FAILURE | INVALID_ARGUMENT |  |  |  | PASS |
+| S2_INVALID_REQUEST_FAIL_CLOSED | 4 | git.status | odys-runtime | _RoutingCliBackend | False | False | FAILURE | INVALID_ARGUMENT |  |  |  | PASS |
+| S3_MISSING_BACKEND | 1 | workspace.read | odys-runtime | none | False | False | FAILURE | CAPABILITY_UNAVAILABLE |  |  |  | PASS |
+| S4_MCP_LOCAL | 1 | mcp.odys-fake.echo | mcp:odys-fake | MCPToolAdapter | True | True | SUCCESS |  | mcp.odys-fake.echo | TOOL_EXECUTION | odys-tool-contract-v1 | PASS |
+| S5_SKILL_READINESS | 1 | workspace.read,mcp.odys-fake.echo | odys-runtime;mcp:odys-fake | none (readiness-only) | True | False | NOT_EXECUTED |  |  |  |  | PASS |
+| S6_PLATFORM | 1 | platform.prepare | odys-runtime | _KernelTool | True | True | SUCCESS |  | platform.prepare | TOOL_EXECUTION | odys-tool-contract-v1 | PASS |
+| S6_PLATFORM | 2 | platform.delegate | odys-runtime | _DelegationTool | True | True | SUCCESS |  | platform.delegate | TOOL_EXECUTION | odys-tool-contract-v1 | PASS |
+| S6_PLATFORM | 3 | platform.finalize | odys-runtime | _KernelTool | True | True | SUCCESS |  | platform.finalize | TOOL_EXECUTION | odys-tool-contract-v1 | PASS |
+| S7_TOOL_SUCCESS_NOT_COMPLETION | 1 | workspace.read | odys-runtime | WorkspaceReadTool | True | True | SUCCESS |  | workspace.read | TOOL_EXECUTION | odys-tool-contract-v1 | PASS |
 
 Artifact: `artifacts/phase2/p25-closeout.json`
