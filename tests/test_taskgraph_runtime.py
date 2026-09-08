@@ -36,7 +36,7 @@ def test_dependency_graph_independent_branch_continues(db):
     defs=[make_test_capability_definition(name, output_schema={}) for name in "abcd"]
     cap_reg, contract = make_test_capability_registry(reg, defs)
     result=asyncio.run(PlanExecutionService(db,FixedPlanner(plan),reg,capability_registry=cap_reg,tool_contract=contract).execute_goal(goal)); states={s.id:s.status for s in result.steps}
-    assert result.status==PlanStatus.FAILED and states["a"]==PlanStepStatus.COMPLETED and states["b"]==PlanStepStatus.FAILED and states["d"]==PlanStepStatus.BLOCKED and states["c"]==PlanStepStatus.COMPLETED
+    assert result.status==PlanStatus.FAILED and states["a"]==PlanStepStatus.VERIFIED and states["b"]==PlanStepStatus.FAILED and states["d"]==PlanStepStatus.BLOCKED and states["c"]==PlanStepStatus.VERIFIED
 
 def test_dependency_approval_resume_same_plan(db):
     project=Project(name="graph-approval"); ProjectRepository(db).create(project); goal=Goal(project_id=project.id,objective="graph")
@@ -49,8 +49,8 @@ def test_dependency_approval_resume_same_plan(db):
     for name,gated in (("a",False),("b",True),("c",False),("d",False)): reg.register(FakeTool(CapabilitySpec(name=name,description=name,side_effect=gated,requires_human_approval=gated),counted(name)))
     defs=[make_test_capability_definition(name, output_schema={}, side_effect=(name=="b"), requires_human_approval=(name=="b")) for name in "abcd"]
     cap_reg, contract = make_test_capability_registry(reg, defs)
-    svc=PlanExecutionService(db,FixedPlanner(plan),reg,capability_registry=cap_reg,tool_contract=contract); waiting=asyncio.run(svc.execute_goal(goal)); assert waiting.status==PlanStatus.WAITING_FOR_HUMAN_APPROVAL and waiting.steps[2].status==PlanStepStatus.COMPLETED
-    resumed=asyncio.run(svc.resume_after_approval(waiting.id,goal,"b")); assert resumed.id==waiting.id and resumed.status==PlanStatus.COMPLETED and resumed.steps[0].status==PlanStepStatus.COMPLETED and counts=={"a":1,"b":1,"c":1,"d":1}
+    svc=PlanExecutionService(db,FixedPlanner(plan),reg,capability_registry=cap_reg,tool_contract=contract); waiting=asyncio.run(svc.execute_goal(goal)); assert waiting.status==PlanStatus.WAITING_FOR_HUMAN_APPROVAL and waiting.steps[2].status==PlanStepStatus.VERIFIED
+    resumed=asyncio.run(svc.resume_after_approval(waiting.id,goal,"b")); assert resumed.id==waiting.id and resumed.status==PlanStatus.COMPLETED and resumed.steps[0].status==PlanStepStatus.VERIFIED and counts=={"a":1,"b":1,"c":1,"d":1}
 
 def test_true_diamond_order_and_context_persistence(db):
     project=Project(name="diamond-context"); ProjectRepository(db).create(project); goal=Goal(project_id=project.id,objective="diamond")

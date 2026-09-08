@@ -9,7 +9,11 @@ from typing import Any
 from lhas.domain.enums import EventType
 from lhas.persistence.event_store import EventStore
 from lhas.persistence.planning_repositories import PlanRepository, PlanVersionConflict
-from lhas.planning.models import Goal, Plan, PlanStatus, PlanStepStatus, compute_step_semantic_fingerprint
+from lhas.planning.models import (
+    Goal, Plan, PlanStatus, PlanStepStatus,
+    _TERMINAL_VERIFIED_STATUSES,
+    compute_step_semantic_fingerprint,
+)
 
 
 @dataclass(frozen=True)
@@ -51,7 +55,7 @@ class MacroReplanService:
         planner_context.update({
             "replan_signals": [item.model_dump(mode="json") if hasattr(item, "model_dump") else dict(item) for item in signals[-20:]],
             "current_plan": plan.model_dump(mode="json"),
-            "completed_nodes": [step.id for step in plan.steps if step.status is PlanStepStatus.COMPLETED],
+            "completed_nodes": [step.id for step in plan.steps if step.status in _TERMINAL_VERIFIED_STATUSES],
         })
         proposal = await self.planner.create_plan(goal=goal, capabilities=context.get("capabilities", []) if context else [], context=planner_context)
         if not proposal.steps:
@@ -60,12 +64,12 @@ class MacroReplanService:
         completed_strategy = [
             (step.capability, json.dumps(step.inputs, sort_keys=True, ensure_ascii=False))
             for step in plan.steps
-            if step.status is PlanStepStatus.COMPLETED
+            if step.status in _TERMINAL_VERIFIED_STATUSES
         ]
         current_strategy = [
             (step.capability, json.dumps(step.inputs, sort_keys=True, ensure_ascii=False))
             for step in plan.steps
-            if step.status not in {PlanStepStatus.COMPLETED, PlanStepStatus.STALE}
+            if step.status not in _TERMINAL_VERIFIED_STATUSES | {PlanStepStatus.STALE}
         ]
         proposed_strategy = [
             (step.capability, json.dumps(step.inputs, sort_keys=True, ensure_ascii=False))
@@ -83,11 +87,11 @@ class MacroReplanService:
         old_by_fingerprint = {}
         old_by_id = {step.id: step for step in plan.steps}
         for step in plan.steps:
-            if step.status is PlanStepStatus.COMPLETED:
+            if step.status in _TERMINAL_VERIFIED_STATUSES:
                 old_by_fingerprint.setdefault(compute_step_semantic_fingerprint(step, old_by_id), step)
         invalidated = []
         for old in plan.steps:
-            if old.status not in {PlanStepStatus.COMPLETED, PlanStepStatus.STALE}:
+            if old.status not in _TERMINAL_VERIFIED_STATUSES | {PlanStepStatus.STALE}:
                 old.status = PlanStepStatus.STALE
                 invalidated.append(old.id)
         preserved_ids = set()
@@ -98,20 +102,20 @@ class MacroReplanService:
             if completed is not None:
                 id_remap[step.id] = completed.id
                 step.id = completed.id
-                step.status = PlanStepStatus.COMPLETED
+                step.status = PlanStepStatus.VERIFIED
                 step.output = completed.output
                 step.task_id = completed.task_id
                 step.execution_context = completed.execution_context
                 preserved_ids.add(completed.id)
         for old in plan.steps:
-            if old.status is PlanStepStatus.COMPLETED and old.id not in preserved_ids:
+            if old.status in _TERMINAL_VERIFIED_STATUSES and old.id not in preserved_ids:
                 old.status = PlanStepStatus.STALE
                 invalidated.append(old.id)
         for step in proposal.steps:
             step.depends_on = [id_remap.get(item, item) for item in step.depends_on]
         # Retain completed and stale nodes in the canonical graph for audit;
         # only the revised pending graph is executable.
-        retained = [item for item in plan.steps if item.status in {PlanStepStatus.COMPLETED, PlanStepStatus.STALE}]
+        retained = [item for item in plan.steps if item.status in _TERMINAL_VERIFIED_STATUSES | {PlanStepStatus.STALE}]
         plan.steps = retained + [item for item in proposal.steps if item.id not in preserved_ids]
         by_id = {step.id: step for step in plan.steps}
         for step in plan.steps:

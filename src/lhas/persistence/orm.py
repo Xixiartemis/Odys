@@ -82,6 +82,14 @@ class PlanStepRow(Base):
     output: Mapped[str | None] = _json_col()
     execution_context: Mapped[str | None] = _json_col()
     semantic_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # Phase 3 — Typed TaskGraph authority fields
+    preconditions: Mapped[str | None] = _json_col()
+    expected_effects: Mapped[str | None] = _json_col()
+    evidence: Mapped[str | None] = _json_col()
+    risk_class: Mapped[str | None] = mapped_column(String(32), nullable=True, default="LOW")
+    budget: Mapped[str | None] = _json_col()
+    checkpoint_policy: Mapped[str | None] = mapped_column(String(32), nullable=True, default="ON_FAILURE")
+    recovery_policy: Mapped[str | None] = mapped_column(String(64), nullable=True, default="RETRY_WITH_FAILURE_CONTEXT")
 
 
 class RunRow(Base):

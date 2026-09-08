@@ -10,7 +10,10 @@ from lhas.persistence.planning_repositories import GoalRepository, PlanRepositor
 from lhas.native.persistence import ReplanSignalRepository
 from lhas.native.models import ReplanSignal
 from lhas.orchestrator_v2 import RecoveringOrchestrator
-from lhas.planning.models import Goal, Plan, PlanStatus, PlanStepStatus
+from lhas.planning.models import (
+    Goal, Plan, PlanStatus, PlanStepStatus,
+    evaluate_step_eligibility, transition_step,
+)
 from lhas.planning.scheduler import TaskGraphScheduler, build_step_dependency_context
 from lhas.planning.planner import Planner
 from lhas.planning.replan import MacroReplanService
@@ -61,11 +64,21 @@ class _TaskGraphAgentExecutor:
         self.bound_plan_version = str(plan.version)
         self.bound_step_id = step.id
     async def execute(self, request):
+        # INVARIANT 3 — STALE PLAN AUTHORITY: reject if plan version changed
         if self.db is not None:
             current = PlanRepository(self.db).get(self.bound_plan_id)
             if current is None or str(current.version) != self.bound_plan_version or not any(item.id == self.bound_step_id for item in current.steps):
+                EventStore(self.db).append(
+                    EventType.PLAN_STALE_REJECTED,
+                    payload={
+                        "plan_id": self.bound_plan_id,
+                        "bound_version": self.bound_plan_version,
+                        "step_id": self.bound_step_id,
+                        "current_version": str(current.version) if current else None,
+                    },
+                )
                 return ExecutionResult(status=ExecutionStatus.FAILURE, error_type="STALE_PLAN", error_message="plan version is no longer authoritative")
-        completed=[item.id for item in self.plan.steps if item.status == PlanStepStatus.COMPLETED]
+        completed=[item.id for item in self.plan.steps if item.status in {PlanStepStatus.COMPLETED, PlanStepStatus.VERIFIED}]
         pending=[item.id for item in self.plan.steps if item.id != self.step.id and item.status in {PlanStepStatus.PENDING,PlanStepStatus.READY,PlanStepStatus.RUNNING}]
         context={**request.context,"taskgraph":{"plan_id":self.plan.id,"active_node":self.step.id,"completed_nodes":completed,"pending_nodes":pending,"depends_on":list(self.step.depends_on)}}
         return await self.executor.execute(request.model_copy(update={"context":context}))
@@ -165,8 +178,8 @@ class PlanExecutionService:
             plan = plans.get(plan.id) or plan
             restart_authoritative_schedule = False
             for step in list(plan.steps):
-                if step.status in {PlanStepStatus.COMPLETED, PlanStepStatus.STALE}:
-                    if step.status is PlanStepStatus.COMPLETED:
+                if step.status in {PlanStepStatus.COMPLETED, PlanStepStatus.VERIFIED, PlanStepStatus.STALE}:
+                    if step.status in {PlanStepStatus.COMPLETED, PlanStepStatus.VERIFIED}:
                         execution_context["steps"][step.id] = step.execution_context.get("steps", {}).get(step.id, {"capability": step.capability, "output": step.output, "artifacts": {}, "usage": {}})
                     continue
                 spec = self.registry.resolve(step.capability).capability
@@ -204,11 +217,18 @@ class PlanExecutionService:
                 execution_context["steps"][step.id] = record
                 execution_context[step.capability] = record
                 step.execution_context = dict(execution_context)
-                step.status = PlanStepStatus.COMPLETED; plans.update(plan); self._emit(EventType.PLAN_STEP_COMPLETED, {"plan_id": plan.id, "step_id": step.id, "run_id": run.id, "output": step.output})
+
+                # Phase 3: CLAIMED_COMPLETE → VERIFIED transition with provenance
+                events = EventStore(self.db)
+                transition_step(step, PlanStepStatus.CLAIMED_COMPLETE, "run_completed", events, plan_id=plan.id, extra_payload={"run_id": run.id})
+                self._emit(EventType.PLAN_STEP_COMPLETED, {"plan_id": plan.id, "step_id": step.id, "run_id": run.id, "output": step.output})
+                transition_step(step, PlanStepStatus.VERIFIED, "completion_authority_accepted", events, plan_id=plan.id, extra_payload={"run_id": run.id})
+
+                plans.update(plan)
             if restart_authoritative_schedule:
                 continue
             plan = plans.get(plan.id) or plan
-            if all(step.status in {PlanStepStatus.COMPLETED, PlanStepStatus.STALE} for step in plan.steps) and all(step.status is PlanStepStatus.COMPLETED for step in plan.steps if step.status is not PlanStepStatus.STALE):
+            if all(step.status in {PlanStepStatus.COMPLETED, PlanStepStatus.VERIFIED, PlanStepStatus.STALE} for step in plan.steps) and all(step.status in {PlanStepStatus.COMPLETED, PlanStepStatus.VERIFIED} for step in plan.steps if step.status is not PlanStepStatus.STALE):
                 plan.status = PlanStatus.COMPLETED; plans.update(plan); self._emit(EventType.PLAN_COMPLETED, {"plan_id": plan.id}); return plan
             plan.status = PlanStatus.FAILED; plans.update(plan); self._emit(EventType.PLAN_FAILED, {"plan_id": plan.id}); return plan
 
@@ -222,7 +242,7 @@ class PlanExecutionService:
         for s in plan.steps:
             if s.id in approved_step_ids and s.status == PlanStepStatus.WAITING_FOR_HUMAN_APPROVAL:
                 s.status = PlanStepStatus.PENDING
-            if s.status == PlanStepStatus.COMPLETED:
+            if s.status in {PlanStepStatus.COMPLETED, PlanStepStatus.VERIFIED}:
                 execution_context["steps"][s.id]=s.execution_context.get("steps",{}).get(s.id,{"capability":s.capability,"output":s.output,"artifacts":{},"usage":{}})
         plans.update(plan)
         while True:
@@ -231,7 +251,7 @@ class PlanExecutionService:
             restart_authoritative_schedule = False
             for step in schedule.blocked_steps:
                 step.status=PlanStepStatus.BLOCKED
-                blockers=[d for d in step.depends_on if next(x for x in plan.steps if x.id==d).status in {PlanStepStatus.FAILED,PlanStepStatus.BLOCKED}]
+                blockers=[d for d in step.depends_on if next(x for x in plan.steps if x.id==d).status in {PlanStepStatus.FAILED,PlanStepStatus.BLOCKED,PlanStepStatus.CLASSIFIED_FAILURE}]
                 self._emit(EventType.PLAN_STEP_BLOCKED,{"plan_id":plan.id,"step_id":step.id,"blocked_by_step_ids":blockers})
             if schedule.blocked_steps: plans.update(plan)
             for step in list(schedule.ready_steps):
@@ -263,7 +283,14 @@ class PlanExecutionService:
                 attempts=AttemptRepository(self.db).list_for_run(run.id); raw=json.loads(attempts[-1].executor_result or "{}") if attempts and attempts[-1].executor_result else {}
                 rec={"capability":step.capability,"output":step.output,"artifacts":raw.get("artifacts",{}),"usage":raw.get("usage",{})}; execution_context["steps"][step.id]=rec
                 persisted_context=build_step_dependency_context(plan,step,execution_context); persisted_context["steps"][step.id]=rec; step.execution_context=persisted_context
-                step.status=PlanStepStatus.COMPLETED; self._emit(EventType.PLAN_STEP_COMPLETED,{"plan_id":plan.id,"step_id":step.id,"run_id":run.id}); plans.update(plan)
+
+                # Phase 3: CLAIMED_COMPLETE → VERIFIED transition with provenance
+                events = EventStore(self.db)
+                transition_step(step, PlanStepStatus.CLAIMED_COMPLETE, "run_completed", events, plan_id=plan.id, extra_payload={"run_id": run.id})
+                self._emit(EventType.PLAN_STEP_COMPLETED,{"plan_id":plan.id,"step_id":step.id,"run_id":run.id})
+                transition_step(step, PlanStepStatus.VERIFIED, "completion_authority_accepted", events, plan_id=plan.id, extra_payload={"run_id": run.id})
+
+                plans.update(plan)
             if restart_authoritative_schedule:
                 continue
             schedule=scheduler.calculate(plan)
@@ -272,6 +299,6 @@ class PlanExecutionService:
             if schedule.ready_steps:
                 continue
             if any(s.status==PlanStepStatus.WAITING_FOR_HUMAN_APPROVAL for s in plan.steps): plan.status=PlanStatus.WAITING_FOR_HUMAN_APPROVAL; plans.update(plan); return plan
-            if all(s.status in {PlanStepStatus.COMPLETED, PlanStepStatus.STALE} for s in plan.steps): plan.status=PlanStatus.COMPLETED; plans.update(plan); self._emit(EventType.PLAN_COMPLETED,{"plan_id":plan.id}); return plan
+            if all(s.status in {PlanStepStatus.COMPLETED, PlanStepStatus.VERIFIED, PlanStepStatus.STALE} for s in plan.steps): plan.status=PlanStatus.COMPLETED; plans.update(plan); self._emit(EventType.PLAN_COMPLETED,{"plan_id":plan.id}); return plan
             if not schedule.ready_steps and not schedule.pending_steps:
                 plan.status=PlanStatus.FAILED; plans.update(plan); self._emit(EventType.PLAN_FAILED,{"plan_id":plan.id}); return plan

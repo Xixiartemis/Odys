@@ -2,7 +2,7 @@ from sqlalchemy import select, update as sa_update
 from lhas.domain.models import json_dumps, json_loads
 from lhas.persistence.database import Database
 from lhas.persistence.orm import GoalRow, PlanRow, PlanStepRow
-from lhas.planning.models import Goal, Plan, PlanStep
+from lhas.planning.models import Goal, Plan, PlanStep, StepPrecondition
 
 
 class PlanVersionConflict(RuntimeError):
@@ -29,12 +29,56 @@ def _step_inputs(step):
     return inputs
 
 
+def _step_row_kwargs(step, plan_id, position):
+    """Build PlanStepRow kwargs including Phase 3 authority fields."""
+    return dict(
+        id=step.id, plan_id=plan_id, position=position,
+        title=step.title, objective=step.objective, capability=step.capability,
+        depends_on=json_dumps(step.depends_on), inputs=json_dumps(_step_inputs(step)),
+        expected_output=step.expected_output, success_criteria=json_dumps(step.success_criteria),
+        status=step.status.value, task_id=step.task_id, output=json_dumps(step.output),
+        execution_context=json_dumps(step.execution_context),
+        semantic_fingerprint=step.semantic_fingerprint,
+        preconditions=json_dumps([pc.model_dump(mode="json") for pc in step.preconditions]),
+        expected_effects=json_dumps(step.expected_effects),
+        evidence=json_dumps(step.evidence),
+        risk_class=step.risk_class,
+        budget=json_dumps(step.budget),
+        checkpoint_policy=step.checkpoint_policy,
+        recovery_policy=step.recovery_policy,
+    )
+
+
+def _update_step_row(row, step, plan_id, position):
+    """Update an existing PlanStepRow with Phase 3 authority fields."""
+    row.position = position
+    row.title = step.title
+    row.objective = step.objective
+    row.capability = step.capability
+    row.depends_on = json_dumps(step.depends_on)
+    row.inputs = json_dumps(_step_inputs(step))
+    row.expected_output = step.expected_output
+    row.success_criteria = json_dumps(step.success_criteria)
+    row.status = step.status.value
+    row.task_id = step.task_id
+    row.output = json_dumps(step.output)
+    row.execution_context = json_dumps(step.execution_context)
+    row.semantic_fingerprint = step.semantic_fingerprint
+    row.preconditions = json_dumps([pc.model_dump(mode="json") for pc in step.preconditions])
+    row.expected_effects = json_dumps(step.expected_effects)
+    row.evidence = json_dumps(step.evidence)
+    row.risk_class = step.risk_class
+    row.budget = json_dumps(step.budget)
+    row.checkpoint_policy = step.checkpoint_policy
+    row.recovery_policy = step.recovery_policy
+
+
 class PlanRepository:
     def __init__(self, db): self.db=db
     def create(self,p):
         with self.db.session() as s:
             s.add(PlanRow(id=p.id,goal_id=p.goal_id,version=p.version,mode=p.mode.value,status=p.status.value,created_at=p.created_at,metadata_json=json_dumps({**p.metadata, "replan_count": p.replan_count}),invalidated_step_ids=json_dumps(p.invalidated_step_ids)))
-            for i,x in enumerate(p.steps): s.add(PlanStepRow(id=x.id,plan_id=p.id,position=i,title=x.title,objective=x.objective,capability=x.capability,depends_on=json_dumps(x.depends_on),inputs=json_dumps(_step_inputs(x)),expected_output=x.expected_output,success_criteria=json_dumps(x.success_criteria),status=x.status.value,task_id=x.task_id,output=json_dumps(x.output),execution_context=json_dumps(x.execution_context),semantic_fingerprint=x.semantic_fingerprint))
+            for i,x in enumerate(p.steps): s.add(PlanStepRow(**_step_row_kwargs(x, p.id, i)))
         return p
     def update(self,p):
         with self.db.session() as s:
@@ -42,9 +86,9 @@ class PlanRepository:
             for x in p.steps:
                 q=s.get(PlanStepRow,x.id)
                 if q is None:
-                    q=PlanStepRow(id=x.id,plan_id=p.id,position=p.steps.index(x),title=x.title,objective=x.objective,capability=x.capability,depends_on=json_dumps(x.depends_on),inputs=json_dumps(_step_inputs(x)),expected_output=x.expected_output,success_criteria=json_dumps(x.success_criteria),status=x.status.value,task_id=x.task_id,output=json_dumps(x.output),execution_context=json_dumps(x.execution_context),semantic_fingerprint=x.semantic_fingerprint); s.add(q)
+                    q=PlanStepRow(**_step_row_kwargs(x, p.id, p.steps.index(x))); s.add(q)
                 else:
-                    q.position=p.steps.index(x); q.title=x.title; q.objective=x.objective; q.capability=x.capability; q.depends_on=json_dumps(x.depends_on); q.inputs=json_dumps(_step_inputs(x)); q.expected_output=x.expected_output; q.success_criteria=json_dumps(x.success_criteria); q.status=x.status.value; q.task_id=x.task_id; q.output=json_dumps(x.output); q.execution_context=json_dumps(x.execution_context); q.semantic_fingerprint=x.semantic_fingerprint
+                    _update_step_row(q, x, p.id, p.steps.index(x))
         return p
     def update_if_version(self, p, *, expected_version: str):
         """Commit an authoritative replan only if its base is still current."""
@@ -64,9 +108,9 @@ class PlanRepository:
             for x in p.steps:
                 q=s.get(PlanStepRow,x.id)
                 if q is None:
-                    q=PlanStepRow(id=x.id,plan_id=p.id,position=p.steps.index(x),title=x.title,objective=x.objective,capability=x.capability,depends_on=json_dumps(x.depends_on),inputs=json_dumps(_step_inputs(x)),expected_output=x.expected_output,success_criteria=json_dumps(x.success_criteria),status=x.status.value,task_id=x.task_id,output=json_dumps(x.output),execution_context=json_dumps(x.execution_context),semantic_fingerprint=x.semantic_fingerprint); s.add(q)
+                    q=PlanStepRow(**_step_row_kwargs(x, p.id, p.steps.index(x))); s.add(q)
                 else:
-                    q.position=p.steps.index(x); q.title=x.title; q.objective=x.objective; q.capability=x.capability; q.depends_on=json_dumps(x.depends_on); q.inputs=json_dumps(_step_inputs(x)); q.expected_output=x.expected_output; q.success_criteria=json_dumps(x.success_criteria); q.status=x.status.value; q.task_id=x.task_id; q.output=json_dumps(x.output); q.execution_context=json_dumps(x.execution_context); q.semantic_fingerprint=x.semantic_fingerprint
+                    _update_step_row(q, x, p.id, p.steps.index(x))
         return p
     def get(self, plan_id):
         with self.db.session() as s:
@@ -77,6 +121,27 @@ class PlanRepository:
             for x in rows:
                 inputs=json_loads(x.inputs) or {}
                 agent_fields=inputs.pop("_agent_platform", {})
-                steps.append(PlanStep(id=x.id,title=x.title,objective=x.objective,capability=x.capability,depends_on=json_loads(x.depends_on) or [],inputs=inputs,expected_output=x.expected_output or "",success_criteria=json_loads(x.success_criteria) or [],status=x.status,task_id=x.task_id,output=json_loads(x.output),execution_context=json_loads(x.execution_context) or {},suggested_role=agent_fields.get("suggested_role","WORKER"),required_capabilities=agent_fields.get("required_capabilities",[]),optional_skill_refs=agent_fields.get("optional_skill_refs",[]),semantic_fingerprint=x.semantic_fingerprint))
+                # Deserialize Phase 3 preconditions
+                raw_pcs = json_loads(x.preconditions) or []
+                preconditions = [StepPrecondition(**pc) for pc in raw_pcs]
+                steps.append(PlanStep(
+                    id=x.id,title=x.title,objective=x.objective,capability=x.capability,
+                    depends_on=json_loads(x.depends_on) or [],inputs=inputs,
+                    expected_output=x.expected_output or "",
+                    success_criteria=json_loads(x.success_criteria) or [],
+                    status=x.status,task_id=x.task_id,output=json_loads(x.output),
+                    execution_context=json_loads(x.execution_context) or {},
+                    suggested_role=agent_fields.get("suggested_role","WORKER"),
+                    required_capabilities=agent_fields.get("required_capabilities",[]),
+                    optional_skill_refs=agent_fields.get("optional_skill_refs",[]),
+                    semantic_fingerprint=x.semantic_fingerprint,
+                    preconditions=preconditions,
+                    expected_effects=json_loads(x.expected_effects) or {},
+                    evidence=json_loads(x.evidence) or {},
+                    risk_class=x.risk_class or "LOW",
+                    budget=json_loads(x.budget) or {},
+                    checkpoint_policy=x.checkpoint_policy or "ON_FAILURE",
+                    recovery_policy=x.recovery_policy or "RETRY_WITH_FAILURE_CONTEXT",
+                ))
             metadata=json_loads(r.metadata_json) or {}
             return Plan(id=r.id,goal_id=r.goal_id,version=r.version,mode=r.mode,status=r.status,steps=steps,metadata=metadata,invalidated_step_ids=json_loads(r.invalidated_step_ids) or [],replan_count=int(metadata.get("replan_count", 0)),created_at=r.created_at)

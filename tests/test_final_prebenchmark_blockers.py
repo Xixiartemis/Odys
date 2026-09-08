@@ -181,7 +181,7 @@ def test_w3_validator_rejection_flows_through_plan_execution(db):
     cap_reg, contract = make_test_capability_registry(tools_reg, cap_defs)
     finished = asyncio.run(PlanExecutionService(db, planner, tools_reg, agent_executor_factory=agent_factory, capability_registry=cap_reg, tool_contract=contract).execute_goal(goal))
     assert finished.status is PlanStatus.COMPLETED
-    assert {step.capability for step in finished.steps if step.status is PlanStepStatus.COMPLETED} >= {"a", "d", "e"}
+    assert {step.capability for step in finished.steps if step.status is PlanStepStatus.VERIFIED} >= {"a", "d", "e"}
     assert "c" not in executed and executed == ["a", "b", "d", "e"]
     failed_b_task = next(task for task in TaskRepository(db).list() if task.objective == "b")
     run = RunRepository(db).list_for_task(failed_b_task.id)[0]
