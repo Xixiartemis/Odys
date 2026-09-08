@@ -3,7 +3,7 @@
   "phase": "P25_CLOSEOUT",
   "base_sha": "df00459",
   "base_commit": "df00459",
-  "tested_git_sha": "2a88eaf",
+  "tested_git_sha": "77dac66",
   "python_version": "3.11.11",
   "platform": "Windows-10-10.0.26200-SP0",
   "artifact_execution_derived": true,
