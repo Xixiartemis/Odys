@@ -229,7 +229,10 @@ async def _run_builtin_capture(root: Path):
         elif capability == "git.diff":
             assert result.output["exit_code"] == 0 and "after" in result.output["stdout"]
         else:
-            assert result.output["exit_code"] == 0 and "(3, 11)" in result.output["stdout"]
+            expected_version = str((sys.version_info.major, sys.version_info.minor))
+            assert result.output["exit_code"] == 0
+            assert expected_version in result.output["stdout"]
+            assert host_platform.system() in result.output["stdout"]
         records.append(record)
     return records
 
