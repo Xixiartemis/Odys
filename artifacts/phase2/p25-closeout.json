@@ -1,0 +1,163 @@
+{
+  "phase": "P25_CLOSEOUT",
+  "branch": "phase2-closeout-harness-v1",
+  "base_commit": "df00459",
+  "tested_git_sha": "a3b1d89",
+  "summary": {
+    "total_scenarios": 16,
+    "passed": 16,
+    "failed": 0,
+    "capability_requests": 16,
+    "contract_accepted": 14,
+    "contract_rejected": 2,
+    "backend_executions": 13,
+    "typed_evidence_count": 13
+  },
+  "scenarios": [
+    {
+      "scenario_id": "S1_BUILTIN_SUCCESS",
+      "capability_id": "workspace.read",
+      "contract_validated": true,
+      "backend_executed": true,
+      "tool_success": true,
+      "evidence_id": "workspace.read",
+      "result": "PASS"
+    },
+    {
+      "scenario_id": "S1_BUILTIN_SUCCESS",
+      "capability_id": "workspace.list",
+      "contract_validated": true,
+      "backend_executed": true,
+      "tool_success": true,
+      "evidence_id": "workspace.list",
+      "result": "PASS"
+    },
+    {
+      "scenario_id": "S1_BUILTIN_SUCCESS",
+      "capability_id": "workspace.edit",
+      "contract_validated": true,
+      "backend_executed": true,
+      "tool_success": true,
+      "evidence_id": "workspace.edit",
+      "result": "PASS"
+    },
+    {
+      "scenario_id": "S1_BUILTIN_SUCCESS",
+      "capability_id": "workspace.diff",
+      "contract_validated": true,
+      "backend_executed": true,
+      "tool_success": true,
+      "evidence_id": "workspace.diff",
+      "result": "PASS"
+    },
+    {
+      "scenario_id": "S1_BUILTIN_SUCCESS",
+      "capability_id": "test.run",
+      "contract_validated": true,
+      "backend_executed": true,
+      "tool_success": true,
+      "evidence_id": "test.run",
+      "result": "PASS"
+    },
+    {
+      "scenario_id": "S1_BUILTIN_SUCCESS",
+      "capability_id": "git.status",
+      "contract_validated": true,
+      "backend_executed": true,
+      "tool_success": true,
+      "evidence_id": "git.status",
+      "result": "PASS"
+    },
+    {
+      "scenario_id": "S1_BUILTIN_SUCCESS",
+      "capability_id": "git.diff",
+      "contract_validated": true,
+      "backend_executed": true,
+      "tool_success": true,
+      "evidence_id": "git.diff",
+      "result": "PASS"
+    },
+    {
+      "scenario_id": "S1_BUILTIN_SUCCESS",
+      "capability_id": "environment.inspect",
+      "contract_validated": true,
+      "backend_executed": true,
+      "tool_success": true,
+      "evidence_id": "environment.inspect",
+      "result": "PASS"
+    },
+    {
+      "scenario_id": "S2_INVALID_REQUEST_FAIL_CLOSED",
+      "capability_id": "workspace.read,test.run,<empty>,git.status",
+      "contract_validated": false,
+      "backend_executed": false,
+      "tool_success": false,
+      "evidence_id": "N/A",
+      "result": "PASS"
+    },
+    {
+      "scenario_id": "S3_MISSING_BACKEND",
+      "capability_id": "workspace.read",
+      "contract_validated": false,
+      "backend_executed": false,
+      "tool_success": false,
+      "evidence_id": "N/A",
+      "result": "PASS"
+    },
+    {
+      "scenario_id": "S4_MCP_LOCAL",
+      "capability_id": "mcp.odys-fake.echo",
+      "contract_validated": true,
+      "backend_executed": true,
+      "tool_success": true,
+      "evidence_id": "mcp.odys-fake.echo",
+      "result": "PASS"
+    },
+    {
+      "scenario_id": "S5_SKILL_READINESS",
+      "capability_id": "workspace.read,mcp.odys-fake.echo",
+      "contract_validated": true,
+      "backend_executed": false,
+      "tool_success": false,
+      "evidence_id": "N/A",
+      "result": "PASS"
+    },
+    {
+      "scenario_id": "S6_PLATFORM",
+      "capability_id": "platform.prepare",
+      "contract_validated": true,
+      "backend_executed": true,
+      "tool_success": true,
+      "evidence_id": "platform.prepare",
+      "result": "PASS"
+    },
+    {
+      "scenario_id": "S6_PLATFORM",
+      "capability_id": "platform.delegate",
+      "contract_validated": true,
+      "backend_executed": true,
+      "tool_success": true,
+      "evidence_id": "platform.delegate",
+      "result": "PASS"
+    },
+    {
+      "scenario_id": "S6_PLATFORM",
+      "capability_id": "platform.finalize",
+      "contract_validated": true,
+      "backend_executed": true,
+      "tool_success": true,
+      "evidence_id": "platform.finalize",
+      "result": "PASS"
+    },
+    {
+      "scenario_id": "S7_TOOL_SUCCESS_NOT_COMPLETION",
+      "capability_id": "workspace.read",
+      "contract_validated": true,
+      "backend_executed": true,
+      "tool_success": true,
+      "evidence_id": "workspace.read",
+      "result": "PASS"
+    }
+  ],
+  "decision": "PASS"
+}
