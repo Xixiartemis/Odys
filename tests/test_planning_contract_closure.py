@@ -589,7 +589,7 @@ def test_tool_success_does_not_bypass_completion_authority(tmp_path):
     # Plan should complete via the planning service's completion logic,
     # not just because the tool returned SUCCESS
     assert plan.status == PlanStatus.COMPLETED
-    assert plan.steps[0].status.value == "COMPLETED"
+    assert plan.steps[0].status.value == "VERIFIED"
 
     # Verify planning events were emitted (not bypassed)
     event_types = [e.event_type for e in EventStore(db).list_all()]
