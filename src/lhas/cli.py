@@ -29,6 +29,8 @@ from lhas.planning.models import Goal, CapabilitySpec
 from lhas.planning.planner import DeterministicPlanner
 from lhas.planning.service import PlanExecutionService
 from lhas.persistence.planning_repositories import GoalRepository, PlanRepository
+from lhas.tools.invocation import build_contract_for_registry
+from lhas.capability_registry import CapabilityDefinition, RuntimePlatform
 from lhas.persistence.phaseb_repos import FailureReportRepository, RecoveryActionRepository
 from lhas.cli_runtime import (
     CliConfigurationError,
@@ -145,19 +147,66 @@ def memory_search(query: str) -> None:
 def mcp_list() -> None:
     console.print("No persistent MCP servers configured. Offline acceptance uses stdio server 'offline'.")
 
+
+def _d2_live_capability_definitions() -> tuple[CapabilityDefinition, ...]:
+    """Explicit semantic capability definitions for the D2 live pipeline.
+
+    These are the production-equivalent of the test helper
+    ``make_test_capability_definition`` — they declare semantic intent
+    without inspecting the backend tool implementation.
+    """
+    def _d2_cap(cap_id: str, description: str, category: str,
+                input_schema: dict, output_schema: dict, *,
+                risk_level: str = "LOW", timeout_seconds: float = 30.0,
+                retryable: bool = True, side_effect: bool = False) -> CapabilityDefinition:
+        return CapabilityDefinition(
+            id=cap_id, name=cap_id, description=description,
+            category=category, version="v1",
+            input_schema=input_schema, output_schema=output_schema,
+            platforms=(RuntimePlatform.WINDOWS, RuntimePlatform.LINUX, RuntimePlatform.MACOS),
+            permissions=("platform.read",),
+            risk_level=risk_level, workspace_scope="SOURCE_WORKSPACE",
+            timeout_seconds=timeout_seconds, retryable=retryable,
+            preferred_tool=cap_id, source="d2-live-cli",
+            evidence_type="DETERMINISTIC_TOOL_RESULT",
+        )
+    _PERMISSIVE = {"type": "object"}
+    return (
+        _d2_cap("document.resume.read", "Read PDF, DOCX, TXT or Markdown resume", "document",
+                {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}, _PERMISSIVE),
+        _d2_cap("web.search", "Search web through configured provider", "network",
+                _PERMISSIVE, _PERMISSIVE, risk_level="MEDIUM"),
+        _d2_cap("web.fetch", "Fetch bounded HTTP content", "network",
+                _PERMISSIVE, _PERMISSIVE, risk_level="MEDIUM"),
+        _d2_cap("job.parse", "Parse fetched job content", "analysis",
+                _PERMISSIVE, _PERMISSIVE),
+        _d2_cap("job.match", "Match parsed job to resume", "analysis",
+                _PERMISSIVE, _PERMISSIVE),
+        _d2_cap("job.rank", "Rank job candidates", "analysis",
+                _PERMISSIVE, _PERMISSIVE),
+        _d2_cap("artifact.write", "Write shortlist artifacts", "output",
+                _PERMISSIVE, _PERMISSIVE, side_effect=True, risk_level="MEDIUM"),
+    )
+
 @goal_app.command("run")
 def goal_run(goal: str = typer.Option(...,"--goal"), file: Path = typer.Option(...,"--file"), live: bool = typer.Option(False,"--live"), output_dir: Path = typer.Option(Path("artifacts"),"--output-dir")):
     """Run the D2 smoke pipeline; real network requires --live."""
     if not live: raise typer.BadParameter("real web capabilities require explicit --live")
     db=_open_db(); projects=ProjectRepository(db); project=projects.get_by_name("D2-LIVE") or projects.create(Project(name="D2-LIVE"))
     registry=build_live_registry(); names=["document.resume.read","web.search","web.fetch","job.parse","job.match","job.rank","artifact.write"]
+    # A1/A2: Build explicit capability_registry + tool_contract from the live
+    # registry, not the implicit fallback inside PlanExecutionService.
+    cap_reg, contract = build_contract_for_registry(registry, definitions=_d2_live_capability_definitions())
+    # workflow_verifier: explicit None (fail-closed to WAITING_FOR_VERIFICATION)
     g=Goal(project_id=project.id,objective=goal,allowed_capabilities=names,metadata={"plan_steps":names,"resume_path":str(file),"query":goal,"output_dir":str(output_dir)})
     print(f"GOAL {g.id}: {goal}")
-    plan=asyncio.run(PlanExecutionService(db,DeterministicPlanner(),registry).execute_goal(g,experiment_id=None,context={"live":True}))
+    plan=asyncio.run(PlanExecutionService(db,DeterministicPlanner(),registry,tool_contract=contract,capability_registry=cap_reg,workflow_verifier=None).execute_goal(g,experiment_id=None,context={"live":True}))
     print(f"PLAN {plan.id} {plan.status.value}")
     for s in plan.steps:
         print(f"STEP {s.capability} {s.status.value} task={s.task_id}")
-        if s.capability == "artifact.write" and s.status.value == "COMPLETED" and isinstance(s.output,dict) and s.output.get("artifact_path"):
+        # A3: Accept WAITING_FOR_VERIFICATION and VERIFIED as valid terminal
+        # states alongside COMPLETED for the artifact output check.
+        if s.capability == "artifact.write" and s.status.value in {"COMPLETED","VERIFIED","WAITING_FOR_VERIFICATION"} and isinstance(s.output,dict) and s.output.get("artifact_path"):
             print(f"ARTIFACT {s.output['artifact_path']}")
     db.close()
 
