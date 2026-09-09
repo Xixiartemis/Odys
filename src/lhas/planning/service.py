@@ -13,7 +13,7 @@ from lhas.orchestrator_v2 import RecoveringOrchestrator
 from lhas.persistence.phaseb_repos import FailureReportRepository
 from lhas.planning.models import (
     Goal, Plan, PlanStatus, PlanStepStatus, StepFailureProvenance,
-    compute_repair_scope_hint,
+    RepairScope, compute_repair_scope_hint, compute_repair_scope, invalidate_affected_subgraph,
     evaluate_step_eligibility, transition_step,
 )
 from lhas.planning.scheduler import TaskGraphScheduler, build_step_dependency_context
@@ -415,10 +415,24 @@ class PlanExecutionService:
                     transition_step(step, PlanStepStatus.FAILED, "run_failed", events, plan_id=plan.id)
                     self._emit(EventType.PLAN_STEP_FAILED,{"plan_id":plan.id,"step_id":step.id,"run_id":run.id})
                     self._create_step_failure_provenance(step, plan, run.id)
-                    self._record_step_replan_signal(step, run.id)
-                    if await self._maybe_replan(goal, plan, run.id, context):
-                        restart_authoritative_schedule = True; break
-                    plans.update(plan); continue
+                    # P3.3: compute repair scope for the failed step
+                    scope, affected_ids = compute_repair_scope(step, plan)
+                    if scope == RepairScope.AFFECTED_SUBGRAPH:
+                        invalidated = invalidate_affected_subgraph(plan, affected_ids, events)
+                        plan.invalidated_step_ids.extend(sid for sid in invalidated if sid not in plan.invalidated_step_ids)
+                        self._emit(EventType.PLAN_STEP_BLOCKED, {"plan_id":plan.id,"step_id":step.id,"repair_scope":"AFFECTED_SUBGRAPH","invalidated_step_ids":sorted(invalidated)})
+                        plans.update(plan); continue
+                    elif scope == RepairScope.MACRO_REPLAN:
+                        self._record_step_replan_signal(step, run.id)
+                        if await self._maybe_replan(goal, plan, run.id, context):
+                            restart_authoritative_schedule = True; break
+                        plans.update(plan); continue
+                    else:
+                        # LOCAL scope: current behavior
+                        self._record_step_replan_signal(step, run.id)
+                        if await self._maybe_replan(goal, plan, run.id, context):
+                            restart_authoritative_schedule = True; break
+                        plans.update(plan); continue
                 if await self._maybe_replan(goal, plan, run.id, context):
                     restart_authoritative_schedule = True
                     break
