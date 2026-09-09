@@ -105,6 +105,14 @@ class PlanExecutionService:
             return _TaskGraphAgentExecutor(self.agent_executor_factory(step),plan,step,self.db)
         return _ToolExecutor(self.registry,step,self.db,context,self.tool_contract)
     def _emit(self, typ, payload): EventStore(self.db).append(typ, payload=payload)
+    @property
+    def _evidence_provenance(self) -> str:
+        """Evidence provenance for execution results produced by this service.
+
+        TOOL_CONTRACT_EVIDENCE: execution went through ToolContract (trusted).
+        AGENT_CLAIM: execution was by agent executor (untrusted for verification).
+        """
+        return "AGENT_CLAIM" if self.agent_executor_factory is not None else "TOOL_CONTRACT_EVIDENCE"
     def _planner_capabilities(self):
         """Return tool specs for plan creation.
 
@@ -246,7 +254,7 @@ class PlanExecutionService:
                     except json.JSONDecodeError: pass
                 attempts = AttemptRepository(self.db).list_for_run(run.id)
                 raw = json.loads(attempts[-1].executor_result or "{}") if attempts and attempts[-1].executor_result else {}
-                record = {"capability": step.capability, "output": step.output, "artifacts": raw.get("artifacts", {}), "usage": raw.get("usage", {})}
+                record = {"capability": step.capability, "output": step.output, "artifacts": raw.get("artifacts", {}), "usage": raw.get("usage", {}), "provenance": self._evidence_provenance}
                 execution_context["steps"][step.id] = record
                 execution_context[step.capability] = record
                 step.execution_context = dict(execution_context)
@@ -360,7 +368,7 @@ class PlanExecutionService:
                     try: step.output=json.loads(step.output)
                     except json.JSONDecodeError: pass
                 attempts=AttemptRepository(self.db).list_for_run(run.id); raw=json.loads(attempts[-1].executor_result or "{}") if attempts and attempts[-1].executor_result else {}
-                rec={"capability":step.capability,"output":step.output,"artifacts":raw.get("artifacts",{}),"usage":raw.get("usage",{})}; execution_context["steps"][step.id]=rec
+                rec={"capability":step.capability,"output":step.output,"artifacts":raw.get("artifacts",{}),"usage":raw.get("usage",{}),"provenance":self._evidence_provenance}; execution_context["steps"][step.id]=rec
                 persisted_context=build_step_dependency_context(plan,step,execution_context); persisted_context["steps"][step.id]=rec; step.execution_context=persisted_context
 
                 # P3.1: run success → CLAIMED_COMPLETE

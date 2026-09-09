@@ -79,16 +79,26 @@ class WorkflowVerifier:
         return attempts[-1].id
 
     def _get_trusted_evidence(self, step: Any) -> dict[str, Any]:
-        """Extract trusted evidence from execution_context (tool contract output).
+        """Extract trusted evidence from execution_context with explicit provenance.
 
-        Returns a dict of trusted key-value pairs from the tool's actual
-        execution result. Does NOT include step.output (AGENT_CLAIM).
+        Only returns evidence with provenance="TOOL_CONTRACT_EVIDENCE".
+        Records with provenance="AGENT_CLAIM" or without explicit provenance
+        are NOT trusted for verification.
+
+        Returns a dict of trusted key-value pairs.
         """
         step_record = (
             step.execution_context.get("steps", {}).get(step.id, {})
             if step.execution_context
             else {}
         )
+
+        # PROVENANCE GATE: only trust TOOL_CONTRACT_EVIDENCE
+        provenance = step_record.get("provenance", "")
+        if provenance != "TOOL_CONTRACT_EVIDENCE":
+            # Not trusted — either AGENT_CLAIM or no explicit provenance
+            return {}
+
         # Trusted: artifacts produced by tool execution
         artifacts = (
             step_record.get("artifacts", {})

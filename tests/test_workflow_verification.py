@@ -23,6 +23,7 @@ from lhas.planning.models import (
     Goal,
     Plan,
     PlanMode,
+    PlanStatus,
     PlanStep,
     PlanStepStatus,
 )
@@ -316,7 +317,7 @@ class TestWorkflowVerifierUnit:
         step = PlanStep(
             title="test", objective="test", capability="cap",
             output="irrelevant agent text", success_criteria=["exit_code:0"],
-            execution_context={"steps": {"s1": {"output": {"exit_code": 0}, "artifacts": {}}}},
+            execution_context={"steps": {"s1": {"output": {"exit_code": 0}, "artifacts": {}, "provenance": "TOOL_CONTRACT_EVIDENCE"}}},
             id="s1",
         )
         _create_execution_chain(db, step)
@@ -332,7 +333,7 @@ class TestWorkflowVerifierUnit:
         step = PlanStep(
             title="test", objective="test", capability="cap",
             output="agent says done", success_criteria=["exit_code:0"],
-            execution_context={"steps": {"s1": {"output": {"exit_code": 1}, "artifacts": {}}}},
+            execution_context={"steps": {"s1": {"output": {"exit_code": 1}, "artifacts": {}, "provenance": "TOOL_CONTRACT_EVIDENCE"}}},
             id="s1",
         )
         _create_execution_chain(db, step)
@@ -355,6 +356,7 @@ class TestWorkflowVerifierUnit:
                     "s1": {
                         "output": {},
                         "artifacts": {"artifact_url": "https://example.com"},
+                        "provenance": "TOOL_CONTRACT_EVIDENCE",
                     }
                 }
             },
@@ -379,6 +381,7 @@ class TestWorkflowVerifierUnit:
                     "s1": {
                         "output": {"exit_code": 1},
                         "artifacts": {},
+                        "provenance": "TOOL_CONTRACT_EVIDENCE",
                     }
                 }
             },
@@ -418,7 +421,7 @@ class TestWorkflowVerifierUnit:
             title="test", objective="test", capability="cap",
             output="agent text",
             success_criteria=["exit_code:0"],
-            execution_context={"steps": {"s1": {"output": {"exit_code": 0}, "artifacts": {}}}},
+            execution_context={"steps": {"s1": {"output": {"exit_code": 0}, "artifacts": {}, "provenance": "TOOL_CONTRACT_EVIDENCE"}}},
             id="s1",
         )
         task, run, attempt = _create_execution_chain(db, step)
@@ -476,4 +479,121 @@ class TestPlatformDefaultVerifier:
             db, DeterministicPlanner(), reg,
             workflow_verifier=custom,
         )
-        assert svc.workflow_verifier is custom
+
+
+# ===========================================================================
+# Evidence Provenance — adversarial production-path tests
+# ===========================================================================
+
+
+class TestEvidenceProvenance:
+    """Prove that agent JSON claims cannot satisfy verification.
+
+    These tests exercise the REAL production PlanExecutionService path,
+    not direct WorkflowVerifier calls with handcrafted execution_context.
+    """
+
+    def test_agent_json_claim_cannot_verify(self, tmp_path):
+        """NEGATIVE: agent executor returns {"exit_code": 0}, criterion exit_code:0
+        → NOT VERIFIED (AGENT_CLAIM, zero trusted evidence).
+
+        This test uses agent_executor_factory to exercise the real
+        _TaskGraphAgentExecutor path. The agent returns structured JSON
+        but it's AGENT_CLAIM, not TOOL_CONTRACT_EVIDENCE.
+        """
+        db = _make_db(tmp_path)
+        project = ProjectRepository(db).create(Project(name="agent-provenance"))
+        goal = Goal(project_id=project.id, objective="agent claim test")
+
+        from lhas.executors.protocol import ExecutionResult
+        from lhas.domain.enums import ExecutionStatus
+
+        class _AgentThatClaimsSuccess:
+            """Simulates an agent that claims exit_code:0."""
+            name = "AgentClaim"
+            async def execute(self, request):
+                return ExecutionResult(
+                    status=ExecutionStatus.SUCCESS,
+                    output='{"exit_code": 0}',
+                    artifacts={},
+                    usage={},
+                )
+            async def resume(self, request):
+                return await self.execute(request)
+            async def cancel(self, run_id):
+                return None
+            async def status(self, run_id):
+                return {}
+
+        def agent_factory(step):
+            return _AgentThatClaimsSuccess()
+
+        # Build service with agent_executor_factory and WorkflowVerifier
+        verifier = WorkflowVerifier(db)
+        spec = CapabilitySpec(name="agent.cap", description="agent cap")
+        reg = ToolRegistry()
+        reg.register(FakeTool(spec, lambda req: "dummy"))
+        defs = [make_test_capability_definition(spec.name)]
+        cap_reg, contract = make_test_capability_registry(reg, defs)
+
+        class _AgentPlanner:
+            async def create_plan(self, **kwargs):
+                return Plan(
+                    goal_id=goal.id,
+                    mode=PlanMode.LINEAR,
+                    steps=[PlanStep(
+                        title="agent-step", objective="agent claims success",
+                        capability="agent.cap", success_criteria=["exit_code:0"],
+                    )],
+                )
+
+        svc = PlanExecutionService(
+            db, _AgentPlanner(), reg,
+            agent_executor_factory=agent_factory,
+            capability_registry=cap_reg,
+            tool_contract=contract,
+            workflow_verifier=verifier,
+        )
+
+        result = asyncio.run(svc.execute_goal(goal))
+        a_step = result.steps[0]
+
+        # Agent returned {"exit_code": 0} but it's AGENT_CLAIM
+        # WorkflowVerifier should NOT accept it
+        assert a_step.status != PlanStepStatus.VERIFIED
+        assert a_step.status in {
+            PlanStepStatus.CLASSIFIED_FAILURE,
+            PlanStepStatus.WAITING_FOR_VERIFICATION,
+        }
+
+        # Verify provenance in execution_context
+        step_record = a_step.execution_context.get("steps", {}).get(a_step.id, {})
+        assert step_record.get("provenance") == "AGENT_CLAIM"
+
+    def test_tool_contract_evidence_can_verify(self, tmp_path):
+        """POSITIVE CONTROL: real ToolContract execution produces {"exit_code": 0},
+        criterion exit_code:0 → VERIFIED (TOOL_CONTRACT_EVIDENCE).
+        """
+        db = _make_db(tmp_path)
+        verifier = WorkflowVerifier(db)
+
+        def tool_handler(req):
+            return {"exit_code": 0}
+
+        planner = _SingleStepPlanner(success_criteria=["exit_code:0"])
+        svc, goal = _build_service(
+            db, planner, tool_handler,
+            capability_name="test.cap",
+            workflow_verifier=verifier,
+        )
+
+        result = asyncio.run(svc.execute_goal(goal))
+        a_step = result.steps[0]
+
+        # Tool returned {"exit_code": 0} through ToolContract → TOOL_CONTRACT_EVIDENCE
+        assert a_step.status == PlanStepStatus.VERIFIED
+        assert result.status == PlanStatus.COMPLETED
+
+        # Verify provenance in execution_context
+        step_record = a_step.execution_context.get("steps", {}).get(a_step.id, {})
+        assert step_record.get("provenance") == "TOOL_CONTRACT_EVIDENCE"
