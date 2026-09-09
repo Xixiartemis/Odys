@@ -245,22 +245,25 @@ def test_t4_stale_plan_rejected(db):
 def test_t5_precondition_blocks_at_dispatch(db):
     """T5: Precondition TRUE at scheduling, FALSE at dispatch → zero execution.
 
-    Uses a 'falsy' precondition on runtime.ready:
-    - At scheduling (empty context): runtime.ready=None → falsy → TRUE → step is ready
-    - At dispatch (actual context): runtime.ready=True → falsy → FALSE → step rejected
+    Uses runtime.ready == True precondition:
+    - At scheduling: runtime.* preconditions are DEFERRED (scheduler has no
+      runtime context). Step is schedulable.
+    - At dispatch: runtime.ready=False → precondition fails → step rejected.
 
-    This is a real dispatch-time TOCTOU test: the precondition's truth value
-    flips between scheduling and dispatch.
+    This is a real dispatch-time TOCTOU test using the scheduling phase's
+    deferred precondition semantics, not a falsy hack.
     """
-    pc = StepPrecondition(key="runtime.ready", operator="falsy", description="runtime must NOT be ready")
+    pc = StepPrecondition(key="runtime.ready", operator="eq", value=True, description="runtime must be ready")
     a = PlanStep(id="a", title="A", objective="do A", capability="cap_a")
     b = PlanStep(id="b", title="B", objective="do B", capability="cap_b",
                  depends_on=["a"], preconditions=[pc])
 
     service, goal, counts = _setup_service(db, [a, b], verifier=AcceptingVerifier())
 
-    # Pass context that sets runtime.ready=True (makes precondition FALSE)
-    result = asyncio.run(service.execute_goal(goal, context={"ready": True}))
+    # Pass context WITHOUT runtime.ready (or with ready=False)
+    # At scheduling: runtime.ready precondition is DEFERRED → b is schedulable
+    # At dispatch: runtime.ready is not True → precondition fails → b rejected
+    result = asyncio.run(service.execute_goal(goal, context={}))
 
     a_step = next(s for s in result.steps if s.id == "a")
     b_step = next(s for s in result.steps if s.id == "b")
@@ -269,8 +272,7 @@ def test_t5_precondition_blocks_at_dispatch(db):
     assert a_step.status == PlanStepStatus.VERIFIED
     assert counts.get("cap_a", 0) == 1
 
-    # b is rejected at dispatch time because runtime.ready=True makes falsy=False
-    # The dispatch-time recheck evaluates with actual context → precondition fails
+    # b is rejected at dispatch time: runtime.ready is not True
     assert b_step.status in {PlanStepStatus.BLOCKED, PlanStepStatus.PRECONDITION_FAILED}
     assert counts.get("cap_b", 0) == 0  # ZERO backend executions
 
@@ -438,7 +440,8 @@ def test_t10_duplicate_dispatch_prevented(db):
     assert counts["cap_a"] == 1  # executed exactly once
     assert result.steps[0].status == PlanStepStatus.VERIFIED
 
-    # Verify via scheduler that VERIFIED step is not in ready_steps
-    plan = PlanRepository(db).get(result.id)
-    schedule = TaskGraphScheduler().calculate(plan)
-    assert len(schedule.ready_steps) == 0  # no steps ready for re-dispatch
+    # Re-enter the SAME production plan via resume_plan_id
+    # The service should see a is VERIFIED and not re-dispatch
+    result2 = asyncio.run(service.execute_goal(goal, resume_plan_id=result.id))
+    assert counts["cap_a"] == 1  # still exactly 1 — no duplicate re-entry
+    assert result2.steps[0].status == PlanStepStatus.VERIFIED

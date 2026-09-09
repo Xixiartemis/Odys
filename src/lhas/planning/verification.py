@@ -6,6 +6,14 @@ ValidationResultRepository).
 
 Does NOT create a parallel validation framework — reuses existing models.
 Does NOT implement adaptive validation (Phase 5).
+
+EVIDENCE PROVENANCE:
+- TOOL_CONTRACT_EVIDENCE: output/artifacts from tool execution via ToolContract,
+  stored in execution_context by the service (trusted).
+- AGENT_CLAIM: step.output or any agent-produced text (untrusted).
+- Verification only succeeds with explicit acceptance contract (success_criteria
+  or expected_effects) satisfied by trusted evidence.
+- No acceptance contract → fail closed (NOT VERIFIED).
 """
 
 from __future__ import annotations
@@ -42,16 +50,15 @@ class WorkflowVerifier:
     Implements the ``.verify(step, plan, events)`` interface expected by the
     P3.1 verification seam in PlanExecutionService.
 
-    Delegates to existing ``ValidationResult`` / ``ValidationCheck`` models
-    and persists each verdict through ``ValidationResultRepository`` so the
-    result survives persistence/reload.
-
-    Verification criteria (V2 rule level):
-    1. Structural — step must have produced output.
-    2. Success criteria — each criterion is checked against STRUCTURED evidence
-       only (artifacts, execution result keys). Agent textual output alone is
-       NEVER sufficient. Unsupported criteria fail closed.
-    3. Expected effects — exact value match against structured execution context.
+    EVIDENCE PROVENANCE RULES:
+    1. No acceptance contract (no success_criteria AND no expected_effects)
+       → fail closed (NOT VERIFIED). Non-empty output alone is never sufficient.
+    2. Success criteria are checked against TRUSTED evidence only:
+       execution_context["steps"][step.id]["artifacts"] (tool contract evidence).
+    3. Expected effects are checked against TRUSTED evidence only:
+       execution_context["steps"][step.id]["artifacts"] or
+       execution_context["steps"][step.id]["output"] (tool contract output).
+    4. Agent output (step.output) is AGENT_CLAIM — never trusted for verification.
     """
 
     def __init__(self, db: Any):
@@ -65,13 +72,36 @@ class WorkflowVerifier:
         runs = RunRepository(self.db).list_for_task(step.task_id)
         if not runs:
             return None
-        # Prefer the most recent run
         run = runs[-1]
         attempts = AttemptRepository(self.db).list_for_run(run.id)
         if not attempts:
             return None
-        # Prefer the most recent attempt
         return attempts[-1].id
+
+    def _get_trusted_evidence(self, step: Any) -> dict[str, Any]:
+        """Extract trusted evidence from execution_context (tool contract output).
+
+        Returns a dict of trusted key-value pairs from the tool's actual
+        execution result. Does NOT include step.output (AGENT_CLAIM).
+        """
+        step_record = (
+            step.execution_context.get("steps", {}).get(step.id, {})
+            if step.execution_context
+            else {}
+        )
+        # Trusted: artifacts produced by tool execution
+        artifacts = (
+            step_record.get("artifacts", {})
+            if isinstance(step_record.get("artifacts"), dict)
+            else {}
+        )
+        # Trusted: structured output from tool contract execution
+        tool_output = (
+            step_record.get("output", {})
+            if isinstance(step_record.get("output"), dict)
+            else {}
+        )
+        return {**tool_output, **artifacts}
 
     def verify(
         self,
@@ -91,65 +121,56 @@ class WorkflowVerifier:
         """
         checks: list[ValidationCheck] = []
 
-        # --- 1. Structural: step must have produced output -----------------
-        output_text = str(step.output).strip() if step.output is not None else ""
-        has_output = bool(output_text)
+        # --- 0. GATE: No acceptance contract → fail closed -----------------
+        has_criteria = bool(step.success_criteria)
+        has_effects = bool(step.expected_effects)
+        if not has_criteria and not has_effects:
+            # No acceptance contract defined — agent output alone is never
+            # sufficient evidence. Fail closed.
+            checks.append(
+                ValidationCheck(
+                    name="acceptance_contract_present",
+                    passed=False,
+                    detail="no success_criteria or expected_effects defined — cannot verify without explicit acceptance contract",
+                )
+            )
+            return self._build_and_persist(
+                step, checks, passed=False,
+                reason="NO_ACCEPTANCE_CONTRACT: verification requires explicit success_criteria or expected_effects",
+            )
+
+        # --- 1. Collect trusted evidence (tool contract output) ------------
+        trusted = self._get_trusted_evidence(step)
+        has_trusted = bool(trusted)
+
         checks.append(
             ValidationCheck(
-                name="step_output_non_empty",
-                passed=has_output,
-                detail=None if has_output else "step produced no output",
+                name="trusted_evidence_present",
+                passed=has_trusted,
+                detail=None if has_trusted else "no trusted evidence in execution_context",
             )
         )
 
-        # --- 2. Success-criteria verification against STRUCTURED evidence ----
-        # Agent textual output alone is NEVER sufficient evidence.
-        # Only structured artifacts / execution result keys may verify criteria.
-        # Build structured evidence set from execution context AND step.output
-        step_record = (
-            step.execution_context.get("steps", {}).get(step.id, {})
-            if step.execution_context
-            else {}
-        )
-        structured_output = (
-            step_record.get("output", {})
-            if isinstance(step_record.get("output"), dict)
-            else {}
-        )
-        # Also consider step.output if it's a dict (direct structured output)
-        if not structured_output and isinstance(step.output, dict):
-            structured_output = step.output
-        structured_artifacts = (
-            step_record.get("artifacts", {})
-            if isinstance(step_record.get("artifacts"), dict)
-            else {}
-        )
-        structured_evidence_keys = set(structured_output.keys()) | set(structured_artifacts.keys())
-        structured_evidence = {**structured_output, **structured_artifacts}
-
-        if step.success_criteria:
+        # --- 2. Success-criteria verification against trusted evidence -----
+        if has_criteria:
             for criterion in step.success_criteria:
                 criterion_lower = criterion.lower()
                 criterion_met = False
-                detail = f"criterion not independently verified: {criterion}"
+                detail = f"criterion not verified by trusted evidence: {criterion}"
 
-                # Check against structured evidence keys only
-                # Match criterion name to a key in structured evidence
-                for ekey in structured_evidence_keys:
-                    if ekey.lower() == criterion_lower or criterion_lower.startswith(ekey.lower()):
-                        # Key found — check value if criterion implies a value
-                        if ":" in criterion:
-                            # criterion like "exit_code:0" — check value
-                            _, expected_val = criterion.split(":", 1)
-                            observed = structured_evidence.get(ekey)
-                            if str(observed) == expected_val:
+                if has_trusted:
+                    for ekey in trusted:
+                        if ekey.lower() == criterion_lower or criterion_lower.startswith(ekey.lower()):
+                            if ":" in criterion:
+                                _, expected_val = criterion.split(":", 1)
+                                observed = trusted.get(ekey)
+                                if str(observed) == expected_val:
+                                    criterion_met = True
+                                    detail = None
+                            else:
                                 criterion_met = True
                                 detail = None
-                        else:
-                            # Key exists in structured evidence — accept
-                            criterion_met = True
-                            detail = None
-                        break
+                            break
 
                 checks.append(
                     ValidationCheck(
@@ -159,15 +180,14 @@ class WorkflowVerifier:
                     )
                 )
 
-        # --- 3. Expected-effects verification against execution context ----
-        # Uses structured_evidence already built in section 2
-        if step.expected_effects:
+        # --- 3. Expected-effects verification against trusted evidence -----
+        if has_effects:
             for key, expected_value in step.expected_effects.items():
-                if key not in structured_evidence:
+                if key not in trusted:
                     effect_ok = False
-                    detail = f"expected effect '{key}' not found in structured evidence"
+                    detail = f"expected effect '{key}' not found in trusted evidence"
                 else:
-                    observed = structured_evidence[key]
+                    observed = trusted[key]
                     effect_ok = observed == expected_value
                     detail = (
                         None if effect_ok
@@ -183,16 +203,24 @@ class WorkflowVerifier:
 
         # --- Build verdict --------------------------------------------------
         passed = all(c.passed for c in checks)
-        evidence = "; ".join(
-            f"{c.name}: {'ok' if c.passed else 'FAIL - ' + (c.detail or '')}"
-            for c in checks
-        )
+        return self._build_and_persist(step, checks, passed=passed)
 
-        # --- Persist for durability -----------------------------------------
-        # BLOCKER 2: resolve real Attempt.id, fail closed if unresolvable
+    def _build_and_persist(
+        self,
+        step: Any,
+        checks: list[ValidationCheck],
+        passed: bool,
+        reason: str | None = None,
+    ) -> VerificationResult:
+        """Build verdict, persist ValidationResult, return VerificationResult."""
+        if reason is None:
+            reason = "; ".join(
+                f"{c.name}: {'ok' if c.passed else 'FAIL - ' + (c.detail or '')}"
+                for c in checks
+            )
+
         attempt_id = self._resolve_attempt_id(step)
         if attempt_id is None:
-            # Cannot resolve producing attempt — fail closed
             return VerificationResult(
                 accepted=False,
                 reason="NO_PRODUCING_ATTEMPT: cannot resolve Attempt.id from step.task_id",
@@ -204,12 +232,12 @@ class WorkflowVerifier:
             passed=passed,
             level=ValidationLevel.V2_RULE,
             checks=checks,
-            evidence=evidence,
+            evidence=reason,
         )
         self.validations.create(validation)
 
         return VerificationResult(
             accepted=passed,
-            reason=evidence,
+            reason=reason,
             validation=validation,
         )

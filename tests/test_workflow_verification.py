@@ -235,11 +235,11 @@ class TestVerificationStrictness:
         assert v.passed is False
 
     def test_output_without_all_criteria_fails_check_detail(self, tmp_path):
-        """Unsupported criteria all fail closed."""
+        """Criteria not verified by trusted evidence → all fail closed."""
         db = _make_db(tmp_path)
         planner = _SingleStepPlanner(success_criteria=["alpha", "beta", "gamma"])
         verifier = WorkflowVerifier(db)
-        # All criteria are unsupported → all fail closed
+        # Agent text output — no trusted evidence for any criterion
         svc, goal = _build_service(db, planner, lambda req: "alpha found", workflow_verifier=verifier)
 
         plan = asyncio.run(svc.execute_goal(goal))
@@ -252,12 +252,10 @@ class TestVerificationStrictness:
         assert len(validations) >= 1
         v = validations[-1]
         assert v.passed is False
-        output_check = next(c for c in v.checks if c.name == "step_output_non_empty")
-        assert output_check.passed is True
-        # All unsupported criteria fail closed
+        # All criteria fail because no trusted evidence matches
         for cname in ["criterion:alpha", "criterion:beta", "criterion:gamma"]:
             check = next(c for c in v.checks if c.name == cname)
-            assert check.passed is False, f"{cname} should fail closed (unsupported)"
+            assert check.passed is False, f"{cname} should fail (no trusted evidence)"
 
     def test_matching_criteria_is_accept(self, tmp_path):
         """All structured criteria satisfied → ACCEPT and VERIFIED."""
@@ -295,7 +293,7 @@ class TestWorkflowVerifierUnit:
         assert r.validation is None
 
     def test_no_criteria_nonempty_output_accepts(self, tmp_path):
-        """No success_criteria + non-empty output → accept."""
+        """No acceptance contract → fail closed (NOT VERIFIED)."""
         db = _make_db(tmp_path)
         verifier = WorkflowVerifier(db)
 
@@ -306,18 +304,20 @@ class TestWorkflowVerifierUnit:
         _create_execution_chain(db, step)
         events = EventStore(db)
         result = verifier.verify(step, type("Plan", (), {"id": "p1"})(), events)
-        assert result.accepted is True
-        assert result.validation is not None
-        assert result.validation.passed is True
+        # No success_criteria AND no expected_effects → fail closed
+        assert result.accepted is False
+        assert "NO_ACCEPTANCE_CONTRACT" in result.reason
 
     def test_criteria_match_accepts(self, tmp_path):
-        """Structured criterion satisfied → accept."""
+        """Trusted evidence satisfies criterion → accept."""
         db = _make_db(tmp_path)
         verifier = WorkflowVerifier(db)
 
         step = PlanStep(
             title="test", objective="test", capability="cap",
-            output={"exit_code": 0}, success_criteria=["exit_code:0"],
+            output="irrelevant agent text", success_criteria=["exit_code:0"],
+            execution_context={"steps": {"s1": {"output": {"exit_code": 0}, "artifacts": {}}}},
+            id="s1",
         )
         _create_execution_chain(db, step)
         events = EventStore(db)
@@ -325,19 +325,21 @@ class TestWorkflowVerifierUnit:
         assert result.accepted is True
 
     def test_criteria_mismatch_rejects(self, tmp_path):
-        """Supported criterion NOT satisfied → reject."""
+        """Trusted evidence does NOT satisfy criterion → reject."""
         db = _make_db(tmp_path)
         verifier = WorkflowVerifier(db)
 
         step = PlanStep(
             title="test", objective="test", capability="cap",
-            output="Error: something went wrong. Traceback...", success_criteria=["no errors"],
+            output="agent says done", success_criteria=["exit_code:0"],
+            execution_context={"steps": {"s1": {"output": {"exit_code": 1}, "artifacts": {}}}},
+            id="s1",
         )
         _create_execution_chain(db, step)
         events = EventStore(db)
         result = verifier.verify(step, type("Plan", (), {"id": "p1"})(), events)
         assert result.accepted is False
-        assert "not independently verified" in result.reason
+        assert "not verified" in result.reason
 
     def test_expected_effects_verified(self, tmp_path):
         """Expected effects checked against execution context VALUES."""
@@ -414,8 +416,10 @@ class TestWorkflowVerifierUnit:
 
         step = PlanStep(
             title="test", objective="test", capability="cap",
-            output={"exit_code": 0},
+            output="agent text",
             success_criteria=["exit_code:0"],
+            execution_context={"steps": {"s1": {"output": {"exit_code": 0}, "artifacts": {}}}},
+            id="s1",
         )
         task, run, attempt = _create_execution_chain(db, step)
         events = EventStore(db)

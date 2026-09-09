@@ -41,7 +41,7 @@ class TaskGraphScheduler:
                 continue
 
             # BLOCKER A: delegate to single eligibility authority
-            eligible, reason = evaluate_step_eligibility(step, by_id)
+            eligible, reason = evaluate_step_eligibility(step, by_id, evaluation_phase="SCHEDULING")
 
             if eligible:
                 ready.append(step)
