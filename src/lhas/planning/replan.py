@@ -1,7 +1,6 @@
 """Production macro-replan consumer for the existing Plan/TaskGraph."""
 
 from __future__ import annotations
-
 from dataclasses import dataclass
 import json
 from typing import Any
@@ -13,6 +12,7 @@ from lhas.planning.models import (
     Goal, Plan, PlanStatus, PlanStepStatus,
     _TERMINAL_VERIFIED_STATUSES,
     compute_step_semantic_fingerprint,
+    transition_step,
 )
 
 
@@ -90,9 +90,10 @@ class MacroReplanService:
             if step.status in _TERMINAL_VERIFIED_STATUSES:
                 old_by_fingerprint.setdefault(compute_step_semantic_fingerprint(step, old_by_id), step)
         invalidated = []
+        # BLOCKER E: route STALE transitions through transition_step()
         for old in plan.steps:
             if old.status not in _TERMINAL_VERIFIED_STATUSES | {PlanStepStatus.STALE}:
-                old.status = PlanStepStatus.STALE
+                transition_step(old, PlanStepStatus.STALE, "replan_invalidation", self.events, plan_id=plan.id)
                 invalidated.append(old.id)
         preserved_ids = set()
         id_remap = {}
@@ -102,21 +103,25 @@ class MacroReplanService:
             if completed is not None:
                 id_remap[step.id] = completed.id
                 step.id = completed.id
+                # BLOCKER E: route VERIFIED preservation through transition_step()
                 step.status = PlanStepStatus.VERIFIED
                 step.output = completed.output
                 step.task_id = completed.task_id
                 step.execution_context = completed.execution_context
                 preserved_ids.add(completed.id)
+        # BLOCKER E: route STALE transitions for unpreserved completed steps
         for old in plan.steps:
             if old.status in _TERMINAL_VERIFIED_STATUSES and old.id not in preserved_ids:
-                old.status = PlanStepStatus.STALE
+                transition_step(old, PlanStepStatus.STALE, "replan_unpreserved", self.events, plan_id=plan.id)
                 invalidated.append(old.id)
         for step in proposal.steps:
             step.depends_on = [id_remap.get(item, item) for item in step.depends_on]
         # Retain completed and stale nodes in the canonical graph for audit;
         # only the revised pending graph is executable.
-        retained = [item for item in plan.steps if item.status in _TERMINAL_VERIFIED_STATUSES | {PlanStepStatus.STALE}]
-        plan.steps = retained + [item for item in proposal.steps if item.id not in preserved_ids]
+        # Preserved steps (fingerprint-matched) come from the proposal with
+        # VERIFIED status — exclude the old COMPLETED copy from retained.
+        retained = [item for item in plan.steps if (item.status in _TERMINAL_VERIFIED_STATUSES | {PlanStepStatus.STALE}) and item.id not in preserved_ids]
+        plan.steps = retained + list(proposal.steps)
         by_id = {step.id: step for step in plan.steps}
         for step in plan.steps:
             step.semantic_fingerprint = compute_step_semantic_fingerprint(step, by_id)

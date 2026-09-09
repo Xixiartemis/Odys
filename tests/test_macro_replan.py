@@ -39,7 +39,7 @@ def test_macro_replan_preserves_completed_work_and_changes_version(db):
     assert result.accepted is True
     assert plan.version == "P-0.1-r1"
     assert plan.replan_count == 1
-    assert next(step for step in plan.steps if step.id == "early").status is PlanStepStatus.COMPLETED
+    assert next(step for step in plan.steps if step.id == "early").status is PlanStepStatus.VERIFIED
     assert next(step for step in plan.steps if step.id == "assumption").status is PlanStepStatus.STALE
     assert next(step for step in plan.steps if step.id == "alternate").status is PlanStepStatus.PENDING
     assert TaskGraphScheduler().calculate(plan).ready_steps[0].id == "alternate"

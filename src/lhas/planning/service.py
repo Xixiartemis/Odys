@@ -87,8 +87,11 @@ class _TaskGraphAgentExecutor:
     async def status(self, run_id): return await self.executor.status(run_id)
 
 class PlanExecutionService:
-    def __init__(self, db: Database, planner: Planner, registry: ToolRegistry, agent_executor_factory=None, tool_contract=None, capability_registry=None):
+    def __init__(self, db: Database, planner: Planner, registry: ToolRegistry, agent_executor_factory=None, tool_contract=None, capability_registry=None, workflow_verifier=None):
         self.db, self.planner, self.registry, self.agent_executor_factory = db, planner, registry, agent_executor_factory
+        # P3.1 verification seam: explicit verifier only, default=None (fail-closed)
+        # No auto-verify, no implicit accept-all, no compatibility flag
+        self.workflow_verifier = workflow_verifier
         # If no explicit tool_contract provided, build one from default_capabilities()
         # (NOT from ToolRegistry — that would be reverse synthesis)
         if tool_contract is None and capability_registry is None:
@@ -174,28 +177,45 @@ class PlanExecutionService:
         self._emit(EventType.PLAN_STARTED, {"plan_id": plan.id})
         task_repo = TaskRepository(self.db)
         execution_context = {"runtime": {**dict(context or {}), "goal_id": goal.id}, "steps": {}}
+        events = EventStore(self.db)
         while True:
             plan = plans.get(plan.id) or plan
             restart_authoritative_schedule = False
             for step in list(plan.steps):
-                if step.status in {PlanStepStatus.COMPLETED, PlanStepStatus.VERIFIED, PlanStepStatus.STALE}:
-                    if step.status in {PlanStepStatus.COMPLETED, PlanStepStatus.VERIFIED}:
+                if step.status in {PlanStepStatus.CLAIMED_COMPLETE, PlanStepStatus.COMPLETED, PlanStepStatus.VERIFIED, PlanStepStatus.STALE, PlanStepStatus.BLOCKED, PlanStepStatus.CLASSIFIED_FAILURE, PlanStepStatus.FAILED, PlanStepStatus.PRECONDITION_FAILED}:
+                    if step.status in {PlanStepStatus.CLAIMED_COMPLETE, PlanStepStatus.COMPLETED, PlanStepStatus.VERIFIED}:
                         execution_context["steps"][step.id] = step.execution_context.get("steps", {}).get(step.id, {"capability": step.capability, "output": step.output, "artifacts": {}, "usage": {}})
+                    continue
+                # BLOCKER B: dispatch-time eligibility check (dependency + precondition)
+                by_id = {s.id: s for s in plan.steps}
+                eligible, reason = evaluate_step_eligibility(step, by_id)
+                if not eligible:
+                    if "not_verified" in reason or "not_all_deps" in reason:
+                        transition_step(step, PlanStepStatus.BLOCKED, reason, events, plan_id=plan.id)
+                    elif "precondition" in reason.lower():
+                        transition_step(step, PlanStepStatus.PRECONDITION_FAILED, reason, events, plan_id=plan.id)
+                    elif "stale" in reason.lower():
+                        transition_step(step, PlanStepStatus.STALE, reason, events, plan_id=plan.id)
+                    else:
+                        transition_step(step, PlanStepStatus.BLOCKED, reason, events, plan_id=plan.id)
+                    plans.update(plan)
                     continue
                 spec = self.registry.resolve(step.capability).capability
                 if step.id not in (approved_step_ids or set()) and (spec.requires_human_approval or (goal.requires_human_approval and spec.side_effect)):
-                    step.status = PlanStepStatus.WAITING_FOR_HUMAN_APPROVAL; plan.status = PlanStatus.WAITING_FOR_HUMAN_APPROVAL
+                    transition_step(step, PlanStepStatus.WAITING_FOR_HUMAN_APPROVAL, "human_approval_required", events, plan_id=plan.id)
+                    plan.status = PlanStatus.WAITING_FOR_HUMAN_APPROVAL
                     self._emit(EventType.HUMAN_APPROVAL_REQUIRED, {"plan_id": plan.id, "step_id": step.id, "capability": step.capability})
                     plans.update(plan); return plan
                 step.execution_context = dict(execution_context)
                 task = Task(project_id=goal.project_id, title=step.title, objective=step.objective, constraints=goal.constraints, acceptance_criteria=step.success_criteria, max_attempts=2)
-                task_repo.create(task); step.task_id = task.id; step.status = PlanStepStatus.RUNNING
+                task_repo.create(task); step.task_id = task.id
+                transition_step(step, PlanStepStatus.RUNNING, "dispatch", events, plan_id=plan.id)
                 self._emit(EventType.PLAN_STEP_STARTED, {"plan_id": plan.id, "step_id": step.id, "task_id": task.id})
                 plans.update(plan)
                 orch = RecoveringOrchestrator(self.db, executor_factory=lambda s=step,p=plan: self._step_executor(p,s,execution_context), executor_type="TaskGraphAgentExecutor" if self.agent_executor_factory else "ToolRegistryExecutor", provider="native-kernel" if self.agent_executor_factory else "tool-registry", model="provider-adapter" if self.agent_executor_factory else "deterministic", harness_version=HARNESS_VERSION, dataset_version="PLANNING-V0.1", experiment_id=experiment_id)
                 run = await orch.execute_task(task.id)
                 if run.status.value != "COMPLETED":
-                    step.status = PlanStepStatus.FAILED
+                    transition_step(step, PlanStepStatus.FAILED, "run_failed", events, plan_id=plan.id)
                     self._emit(EventType.PLAN_STEP_FAILED, {"plan_id": plan.id, "step_id": step.id, "run_id": run.id})
                     self._record_step_replan_signal(step, run.id)
                     if await self._maybe_replan(goal, plan, run.id, context or {}):
@@ -218,18 +238,31 @@ class PlanExecutionService:
                 execution_context[step.capability] = record
                 step.execution_context = dict(execution_context)
 
-                # Phase 3: CLAIMED_COMPLETE → VERIFIED transition with provenance
-                events = EventStore(self.db)
+                # P3.1: run success → CLAIMED_COMPLETE
                 transition_step(step, PlanStepStatus.CLAIMED_COMPLETE, "run_completed", events, plan_id=plan.id, extra_payload={"run_id": run.id})
                 self._emit(EventType.PLAN_STEP_COMPLETED, {"plan_id": plan.id, "step_id": step.id, "run_id": run.id, "output": step.output})
-                transition_step(step, PlanStepStatus.VERIFIED, "completion_authority_accepted", events, plan_id=plan.id, extra_payload={"run_id": run.id})
+
+                # Verification seam: explicit verifier only, default fail-closed
+                if self.workflow_verifier is not None:
+                    vresult = self.workflow_verifier.verify(step, plan, events)
+                    if vresult.accepted:
+                        transition_step(step, PlanStepStatus.VERIFIED, "verification_accepted", events, plan_id=plan.id)
+                    else:
+                        transition_step(step, PlanStepStatus.CLASSIFIED_FAILURE, "verification_rejected", events, plan_id=plan.id)
+                else:
+                    # No verifier configured → WAITING_FOR_VERIFICATION (fail-closed)
+                    transition_step(step, PlanStepStatus.WAITING_FOR_VERIFICATION, "no_verifier_configured", events, plan_id=plan.id)
 
                 plans.update(plan)
             if restart_authoritative_schedule:
                 continue
             plan = plans.get(plan.id) or plan
-            if all(step.status in {PlanStepStatus.COMPLETED, PlanStepStatus.VERIFIED, PlanStepStatus.STALE} for step in plan.steps) and all(step.status in {PlanStepStatus.COMPLETED, PlanStepStatus.VERIFIED} for step in plan.steps if step.status is not PlanStepStatus.STALE):
+            # Plan is complete when all non-stale steps are CLAIMED_COMPLETE or VERIFIED
+            if all(step.status in {PlanStepStatus.CLAIMED_COMPLETE, PlanStepStatus.COMPLETED, PlanStepStatus.VERIFIED, PlanStepStatus.STALE} for step in plan.steps) and all(step.status in {PlanStepStatus.CLAIMED_COMPLETE, PlanStepStatus.COMPLETED, PlanStepStatus.VERIFIED} for step in plan.steps if step.status is not PlanStepStatus.STALE):
                 plan.status = PlanStatus.COMPLETED; plans.update(plan); self._emit(EventType.PLAN_COMPLETED, {"plan_id": plan.id}); return plan
+            # Check if any step is waiting for verification (not a failure)
+            if any(s.status == PlanStepStatus.WAITING_FOR_VERIFICATION for s in plan.steps):
+                plan.status = PlanStatus.WAITING_FOR_VERIFICATION; plans.update(plan); return plan
             plan.status = PlanStatus.FAILED; plans.update(plan); self._emit(EventType.PLAN_FAILED, {"plan_id": plan.id}); return plan
 
     async def resume_after_approval(self, plan_id: str, goal: Goal, step_id: str, *, context: dict[str, Any] | None = None, experiment_id: str | None = None) -> Plan:
@@ -238,10 +271,11 @@ class PlanExecutionService:
 
     async def _execute_dependency_plan(self, goal, plan, *, context, experiment_id, approved_step_ids):
         plans=PlanRepository(self.db); tasks=TaskRepository(self.db); scheduler=TaskGraphScheduler()
+        events=EventStore(self.db)
         execution_context={"runtime":{**context,"goal_id":goal.id},"steps":{}}
         for s in plan.steps:
             if s.id in approved_step_ids and s.status == PlanStepStatus.WAITING_FOR_HUMAN_APPROVAL:
-                s.status = PlanStepStatus.PENDING
+                transition_step(s, PlanStepStatus.PENDING, "human_approval_granted", events, plan_id=plan.id)
             if s.status in {PlanStepStatus.COMPLETED, PlanStepStatus.VERIFIED}:
                 execution_context["steps"][s.id]=s.execution_context.get("steps",{}).get(s.id,{"capability":s.capability,"output":s.output,"artifacts":{},"usage":{}})
         plans.update(plan)
@@ -250,7 +284,7 @@ class PlanExecutionService:
             schedule=scheduler.calculate(plan)
             restart_authoritative_schedule = False
             for step in schedule.blocked_steps:
-                step.status=PlanStepStatus.BLOCKED
+                transition_step(step, PlanStepStatus.BLOCKED, "dependency_failed", events, plan_id=plan.id)
                 blockers=[d for d in step.depends_on if next(x for x in plan.steps if x.id==d).status in {PlanStepStatus.FAILED,PlanStepStatus.BLOCKED,PlanStepStatus.CLASSIFIED_FAILURE}]
                 self._emit(EventType.PLAN_STEP_BLOCKED,{"plan_id":plan.id,"step_id":step.id,"blocked_by_step_ids":blockers})
             if schedule.blocked_steps: plans.update(plan)
@@ -258,16 +292,36 @@ class PlanExecutionService:
                 self._emit(EventType.PLAN_STEP_READY,{"plan_id":plan.id,"step_id":step.id})
                 spec=self.registry.resolve(step.capability).capability
                 if step.id not in approved_step_ids and (spec.requires_human_approval or (goal.requires_human_approval and spec.side_effect)):
-                    step.status=PlanStepStatus.WAITING_FOR_HUMAN_APPROVAL; plan.status=PlanStatus.WAITING_FOR_HUMAN_APPROVAL
+                    transition_step(step, PlanStepStatus.WAITING_FOR_HUMAN_APPROVAL, "human_approval_required", events, plan_id=plan.id)
+                    plan.status=PlanStatus.WAITING_FOR_HUMAN_APPROVAL
                     self._emit(EventType.HUMAN_APPROVAL_REQUIRED,{"plan_id":plan.id,"step_id":step.id,"capability":step.capability}); plans.update(plan); continue
-                step.status=PlanStepStatus.RUNNING; step.execution_context=build_step_dependency_context(plan,step,execution_context)
+
+                # BLOCKER B: dispatch-time precondition re-evaluation
+                # Reload authoritative plan from DB and re-check eligibility
+                # with current execution context BEFORE any side effects.
+                current_plan = plans.get(plan.id) or plan
+                by_id = {s.id: s for s in current_plan.steps}
+                step_in_plan = by_id.get(step.id)
+                if step_in_plan is not None:
+                    dispatch_context = {"runtime": {**context, "goal_id": goal.id}, "steps": execution_context.get("steps", {})}
+                    eligible, reason = evaluate_step_eligibility(step_in_plan, by_id, execution_context=dispatch_context, event_store=events, plan_id=plan.id)
+                    if not eligible:
+                        if "precondition" in reason:
+                            transition_step(step, PlanStepStatus.PRECONDITION_FAILED, "dispatch_precondition_failed", events, plan_id=plan.id)
+                        # No side effects — skip this step
+                        plans.update(plan)
+                        continue
+
+                transition_step(step, PlanStepStatus.RUNNING, "dispatch", events, plan_id=plan.id)
+                step.execution_context=build_step_dependency_context(plan,step,execution_context)
                 task=Task(project_id=goal.project_id,title=step.title,objective=step.objective,constraints=goal.constraints,acceptance_criteria=step.success_criteria,max_attempts=2); tasks.create(task); step.task_id=task.id
                 self._emit(EventType.PLAN_STEP_STARTED,{"plan_id":plan.id,"step_id":step.id,"task_id":task.id})
                 plans.update(plan)
                 orch=RecoveringOrchestrator(self.db,executor_factory=lambda s=step,p=plan: self._step_executor(p,s,step.execution_context),executor_type="TaskGraphAgentExecutor" if self.agent_executor_factory else "ToolRegistryExecutor",provider="native-kernel" if self.agent_executor_factory else "tool-registry",model="provider-adapter" if self.agent_executor_factory else "deterministic",harness_version=HARNESS_VERSION,dataset_version="PLANNING-V0.1",experiment_id=experiment_id)
                 run=await orch.execute_task(task.id)
                 if run.status.value != "COMPLETED":
-                    step.status=PlanStepStatus.FAILED; self._emit(EventType.PLAN_STEP_FAILED,{"plan_id":plan.id,"step_id":step.id,"run_id":run.id})
+                    transition_step(step, PlanStepStatus.FAILED, "run_failed", events, plan_id=plan.id)
+                    self._emit(EventType.PLAN_STEP_FAILED,{"plan_id":plan.id,"step_id":step.id,"run_id":run.id})
                     self._record_step_replan_signal(step, run.id)
                     if await self._maybe_replan(goal, plan, run.id, context):
                         restart_authoritative_schedule = True; break
@@ -284,21 +338,41 @@ class PlanExecutionService:
                 rec={"capability":step.capability,"output":step.output,"artifacts":raw.get("artifacts",{}),"usage":raw.get("usage",{})}; execution_context["steps"][step.id]=rec
                 persisted_context=build_step_dependency_context(plan,step,execution_context); persisted_context["steps"][step.id]=rec; step.execution_context=persisted_context
 
-                # Phase 3: CLAIMED_COMPLETE → VERIFIED transition with provenance
-                events = EventStore(self.db)
+                # P3.1: run success → CLAIMED_COMPLETE
                 transition_step(step, PlanStepStatus.CLAIMED_COMPLETE, "run_completed", events, plan_id=plan.id, extra_payload={"run_id": run.id})
                 self._emit(EventType.PLAN_STEP_COMPLETED,{"plan_id":plan.id,"step_id":step.id,"run_id":run.id})
-                transition_step(step, PlanStepStatus.VERIFIED, "completion_authority_accepted", events, plan_id=plan.id, extra_payload={"run_id": run.id})
+
+                # Verification seam: explicit verifier only, default fail-closed
+                if self.workflow_verifier is not None:
+                    vresult = self.workflow_verifier.verify(step, plan, events)
+                    if vresult.accepted:
+                        transition_step(step, PlanStepStatus.VERIFIED, "verification_accepted", events, plan_id=plan.id)
+                    else:
+                        transition_step(step, PlanStepStatus.CLASSIFIED_FAILURE, "verification_rejected", events, plan_id=plan.id)
+                else:
+                    transition_step(step, PlanStepStatus.WAITING_FOR_VERIFICATION, "no_verifier_configured", events, plan_id=plan.id)
 
                 plans.update(plan)
             if restart_authoritative_schedule:
                 continue
             schedule=scheduler.calculate(plan)
+            if not schedule.ready_steps:
+                # No steps can be dispatched — check if we can terminate
+                if any(s.status==PlanStepStatus.WAITING_FOR_HUMAN_APPROVAL for s in plan.steps):
+                    plan.status=PlanStatus.WAITING_FOR_HUMAN_APPROVAL; plans.update(plan); return plan
+                if any(s.status==PlanStepStatus.WAITING_FOR_VERIFICATION for s in plan.steps):
+                    plan.status=PlanStatus.WAITING_FOR_VERIFICATION; plans.update(plan); return plan
+                if schedule.blocked_steps or schedule.pending_steps:
+                    # Transition blocked steps to BLOCKED before returning
+                    for step in schedule.blocked_steps:
+                        transition_step(step, PlanStepStatus.BLOCKED, "dependency_failed", events, plan_id=plan.id)
+                    plan.status=PlanStatus.FAILED; plans.update(plan); self._emit(EventType.PLAN_FAILED,{"plan_id":plan.id}); return plan
             if schedule.blocked_steps:
                 continue
             if schedule.ready_steps:
                 continue
             if any(s.status==PlanStepStatus.WAITING_FOR_HUMAN_APPROVAL for s in plan.steps): plan.status=PlanStatus.WAITING_FOR_HUMAN_APPROVAL; plans.update(plan); return plan
-            if all(s.status in {PlanStepStatus.COMPLETED, PlanStepStatus.VERIFIED, PlanStepStatus.STALE} for s in plan.steps): plan.status=PlanStatus.COMPLETED; plans.update(plan); self._emit(EventType.PLAN_COMPLETED,{"plan_id":plan.id}); return plan
+            # Plan is complete when all non-stale steps are CLAIMED_COMPLETE or VERIFIED
+            if all(s.status in {PlanStepStatus.CLAIMED_COMPLETE, PlanStepStatus.COMPLETED, PlanStepStatus.VERIFIED, PlanStepStatus.STALE} for s in plan.steps): plan.status=PlanStatus.COMPLETED; plans.update(plan); self._emit(EventType.PLAN_COMPLETED,{"plan_id":plan.id}); return plan
             if not schedule.ready_steps and not schedule.pending_steps:
                 plan.status=PlanStatus.FAILED; plans.update(plan); self._emit(EventType.PLAN_FAILED,{"plan_id":plan.id}); return plan
