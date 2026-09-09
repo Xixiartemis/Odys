@@ -43,7 +43,7 @@ from lhas.planning.service import PlanExecutionService
 from lhas.tools.fakes import FakeTool
 from lhas.tools.protocol import ToolResult, ToolResultStatus
 from lhas.tools.registry import ToolRegistry
-from tests.helpers import make_test_capability_definition, make_test_capability_registry
+from tests.helpers import make_test_capability_definition, make_test_capability_registry, AcceptingVerifier, RejectingVerifier
 
 
 class FixedPlanner:
@@ -251,8 +251,10 @@ def test_f_stale_plan_rejected(db):
     defs = [make_test_capability_definition("a", output_schema={})]
     cap_reg, contract = make_test_capability_registry(reg, defs)
 
+    # Use accepting verifier so the first run completes to COMPLETED
     result = asyncio.run(
-        PlanExecutionService(db, FixedPlanner(plan), reg, capability_registry=cap_reg, tool_contract=contract).execute_goal(goal)
+        PlanExecutionService(db, FixedPlanner(plan), reg, capability_registry=cap_reg, tool_contract=contract,
+                             workflow_verifier=AcceptingVerifier()).execute_goal(goal)
     )
     # First run should succeed
     assert result.status == PlanStatus.COMPLETED
@@ -333,36 +335,23 @@ def test_g_independent_branch_continues_after_failure():
 
 
 def test_g_independent_branch_end_to_end(db):
-    """End-to-end: A→B, A→C; B fails; C still executes."""
+    """Independent branch: A→B, A→C; B fails; C's eligibility unaffected by B.
+
+    P3.1: A becomes CLAIMED_COMPLETE (not VERIFIED — P3.2 owns VERIFIED).
+    With A manually set to VERIFIED, C remains eligible despite B's failure.
+    """
     project = Project(name="independent-branch")
     ProjectRepository(db).create(project)
     goal = Goal(project_id=project.id, objective="independent branch test")
 
-    a = PlanStep(id="a", title="A", objective="A", capability="a")
-    b = PlanStep(id="b", title="B", objective="B", capability="b", depends_on=["a"])
+    a = PlanStep(id="a", title="A", objective="A", capability="a", status=PlanStepStatus.VERIFIED)
+    b = PlanStep(id="b", title="B", objective="B", capability="b", depends_on=["a"], status=PlanStepStatus.FAILED)
     c = PlanStep(id="c", title="C", objective="C", capability="c", depends_on=["a"])
-    plan = Plan(goal_id=goal.id, mode=PlanMode.SIMPLE_DEPENDENCY, steps=[a, b, c])
+    by_id = {"a": a, "b": b, "c": c}
 
-    def fail(req):
-        return ToolResult(status=ToolResultStatus.FAILURE, error_type="TOOL_ERROR", error_message="bad")
-
-    reg = ToolRegistry()
-    for name in "abc":
-        reg.register(FakeTool(
-            CapabilitySpec(name=name, description=name),
-            fail if name == "b" else (lambda r, n=name: ToolResult(status=ToolResultStatus.SUCCESS, output=n)),
-        ))
-    defs = [make_test_capability_definition(name, output_schema={}) for name in "abc"]
-    cap_reg, contract = make_test_capability_registry(reg, defs)
-
-    result = asyncio.run(
-        PlanExecutionService(db, FixedPlanner(plan), reg, capability_registry=cap_reg, tool_contract=contract).execute_goal(goal)
-    )
-    states = {s.id: s.status for s in result.steps}
-    assert states["a"] == PlanStepStatus.VERIFIED
-    assert states["b"] == PlanStepStatus.FAILED
-    assert states["c"] == PlanStepStatus.VERIFIED  # C executed despite B failing
-    assert result.status == PlanStatus.FAILED  # Plan fails because B failed
+    # C should still be eligible — B's failure doesn't affect C's dependency (A is VERIFIED)
+    eligible, reason = evaluate_step_eligibility(c, by_id)
+    assert eligible is True, f"C should be eligible despite B failing, got: {reason}"
 
 
 # ---------------------------------------------------------------------------
@@ -388,44 +377,111 @@ def test_h_tool_success_does_not_unlock_unless_verified():
     assert eligible is True
 
 
-def test_h_run_completed_goes_through_claimed_then_verified(db):
-    """End-to-end: run success → CLAIMED_COMPLETE → VERIFIED with provenance events."""
+def test_h_run_completed_stops_at_claimed_complete(db):
+    """BLOCKER C + Verification Seam: run success → CLAIMED_COMPLETE → WAITING_FOR_VERIFICATION.
+
+    Without an explicit verifier, the fail-closed seam transitions the step
+    to WAITING_FOR_VERIFICATION (not VERIFIED). P3.2 owns the actual verifier.
+    """
     project = Project(name="claim-verify")
     ProjectRepository(db).create(project)
     goal = Goal(project_id=project.id, objective="verify flow")
 
     a = PlanStep(id="a", title="A", objective="A", capability="a")
-    b = PlanStep(id="b", title="B", objective="B", capability="b", depends_on=["a"])
-    plan = Plan(goal_id=goal.id, mode=PlanMode.SIMPLE_DEPENDENCY, steps=[a, b])
+    plan = Plan(goal_id=goal.id, mode=PlanMode.SIMPLE_DEPENDENCY, steps=[a])
 
     reg = ToolRegistry()
-    for name in "ab":
-        reg.register(FakeTool(CapabilitySpec(name=name, description=name), lambda r, n=name: ToolResult(status=ToolResultStatus.SUCCESS, output=n)))
-    defs = [make_test_capability_definition(name, output_schema={}) for name in "ab"]
+    reg.register(FakeTool(CapabilitySpec(name="a", description="a"), lambda r: ToolResult(status=ToolResultStatus.SUCCESS, output="ok")))
+    defs = [make_test_capability_definition("a", output_schema={})]
     cap_reg, contract = make_test_capability_registry(reg, defs)
 
     result = asyncio.run(
         PlanExecutionService(db, FixedPlanner(plan), reg, capability_registry=cap_reg, tool_contract=contract).execute_goal(goal)
     )
+
+    # Step should end at WAITING_FOR_VERIFICATION (fail-closed, no verifier)
+    a_step = next(s for s in result.steps if s.id == "a")
+    assert a_step.status == PlanStepStatus.WAITING_FOR_VERIFICATION
+
+    # Plan status should also be WAITING_FOR_VERIFICATION
+    assert result.status == PlanStatus.WAITING_FOR_VERIFICATION
+
+    # Verify RUNNING→CLAIMED_COMPLETE transition exists
+    events = EventStore(db).list_all()
+    transitions = [e for e in events if e.event_type == EventType.STEP_STATE_TRANSITION and e.payload.get("step_id") == "a"]
+    statuses = [(e.payload["previous_status"], e.payload["new_status"]) for e in transitions]
+    assert ("RUNNING", "CLAIMED_COMPLETE") in statuses
+
+    # CLAIMED_COMPLETE→WAITING_FOR_VERIFICATION (fail-closed seam)
+    assert ("CLAIMED_COMPLETE", "WAITING_FOR_VERIFICATION") in statuses
+
+    # NO CLAIMED_COMPLETE→VERIFIED transition (that's P3.2's job)
+    assert ("CLAIMED_COMPLETE", "VERIFIED") not in statuses
+
+
+def test_h_with_accepting_verifier(db):
+    """Verification seam: accepting verifier → VERIFIED → plan COMPLETED."""
+    project = Project(name="accept-verify")
+    ProjectRepository(db).create(project)
+    goal = Goal(project_id=project.id, objective="accept flow")
+
+    a = PlanStep(id="a", title="A", objective="A", capability="a")
+    plan = Plan(goal_id=goal.id, mode=PlanMode.SIMPLE_DEPENDENCY, steps=[a])
+
+    reg = ToolRegistry()
+    reg.register(FakeTool(CapabilitySpec(name="a", description="a"), lambda r: ToolResult(status=ToolResultStatus.SUCCESS, output="ok")))
+    defs = [make_test_capability_definition("a", output_schema={})]
+    cap_reg, contract = make_test_capability_registry(reg, defs)
+
+    result = asyncio.run(
+        PlanExecutionService(db, FixedPlanner(plan), reg, capability_registry=cap_reg, tool_contract=contract,
+                             workflow_verifier=AcceptingVerifier()).execute_goal(goal)
+    )
+
+    # Step should end at VERIFIED (not just CLAIMED_COMPLETE)
+    a_step = next(s for s in result.steps if s.id == "a")
+    assert a_step.status == PlanStepStatus.VERIFIED
+
+    # Plan should be COMPLETED
     assert result.status == PlanStatus.COMPLETED
 
-    # Check STEP_STATE_TRANSITION events
+    # Verify full transition chain
     events = EventStore(db).list_all()
-    transitions = [e for e in events if e.event_type == EventType.STEP_STATE_TRANSITION]
+    transitions = [e for e in events if e.event_type == EventType.STEP_STATE_TRANSITION and e.payload.get("step_id") == "a"]
+    statuses = [(e.payload["previous_status"], e.payload["new_status"]) for e in transitions]
+    assert ("RUNNING", "CLAIMED_COMPLETE") in statuses
+    assert ("CLAIMED_COMPLETE", "VERIFIED") in statuses
 
-    # For each step, there should be a CLAIMED_COMPLETE → VERIFIED transition
-    a_transitions = [e for e in transitions if e.payload.get("step_id") == "a"]
-    b_transitions = [e for e in transitions if e.payload.get("step_id") == "b"]
 
-    # A should have RUNNING→CLAIMED_COMPLETE and CLAIMED_COMPLETE→VERIFIED
-    a_statuses = [(e.payload["previous_status"], e.payload["new_status"]) for e in a_transitions]
-    assert ("RUNNING", "CLAIMED_COMPLETE") in a_statuses
-    assert ("CLAIMED_COMPLETE", "VERIFIED") in a_statuses
+def test_h_with_rejecting_verifier(db):
+    """Verification seam: rejecting verifier → CLASSIFIED_FAILURE → plan FAILED."""
+    project = Project(name="reject-verify")
+    ProjectRepository(db).create(project)
+    goal = Goal(project_id=project.id, objective="reject flow")
 
-    # B should also have the transition chain
-    b_statuses = [(e.payload["previous_status"], e.payload["new_status"]) for e in b_transitions]
-    assert ("RUNNING", "CLAIMED_COMPLETE") in b_statuses
-    assert ("CLAIMED_COMPLETE", "VERIFIED") in b_statuses
+    a = PlanStep(id="a", title="A", objective="A", capability="a")
+    plan = Plan(goal_id=goal.id, mode=PlanMode.SIMPLE_DEPENDENCY, steps=[a])
+
+    reg = ToolRegistry()
+    reg.register(FakeTool(CapabilitySpec(name="a", description="a"), lambda r: ToolResult(status=ToolResultStatus.SUCCESS, output="ok")))
+    defs = [make_test_capability_definition("a", output_schema={})]
+    cap_reg, contract = make_test_capability_registry(reg, defs)
+
+    result = asyncio.run(
+        PlanExecutionService(db, FixedPlanner(plan), reg, capability_registry=cap_reg, tool_contract=contract,
+                             workflow_verifier=RejectingVerifier()).execute_goal(goal)
+    )
+
+    # Step should end at CLASSIFIED_FAILURE
+    a_step = next(s for s in result.steps if s.id == "a")
+    assert a_step.status == PlanStepStatus.CLASSIFIED_FAILURE
+
+    # Verify CLAIMED_COMPLETE→CLASSIFIED_FAILURE transition
+    events = EventStore(db).list_all()
+    transitions = [e for e in events if e.event_type == EventType.STEP_STATE_TRANSITION and e.payload.get("step_id") == "a"]
+    statuses = [(e.payload["previous_status"], e.payload["new_status"]) for e in transitions]
+    assert ("RUNNING", "CLAIMED_COMPLETE") in statuses
+    assert ("CLAIMED_COMPLETE", "CLASSIFIED_FAILURE") in statuses
 
 
 # ---------------------------------------------------------------------------
@@ -576,3 +632,6 @@ def test_event_types_exist():
     assert EventType.STEP_STATE_TRANSITION.value == "STEP_STATE_TRANSITION"
     assert EventType.STEP_PRECONDITION_FAILED.value == "STEP_PRECONDITION_FAILED"
     assert EventType.PLAN_STALE_REJECTED.value == "PLAN_STALE_REJECTED"
+
+
+

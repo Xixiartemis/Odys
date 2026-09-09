@@ -16,7 +16,7 @@ from lhas.tools.fakes import FakeTool
 from lhas.tools.protocol import ToolResult
 from lhas.domain.models import Project
 from lhas.persistence.repositories import ProjectRepository
-from tests.helpers import make_test_capability_definition, make_test_capability_registry
+from tests.helpers import make_test_capability_definition, make_test_capability_registry, AcceptingVerifier
 
 def req(cap,args): return ToolRequest(tool_call_id="c",task_id="t",run_id="r",attempt_id="a",capability=cap,arguments=args)
 
@@ -110,7 +110,7 @@ def test_semantic_pipeline_e2e(db,tmp_path,monkeypatch):
     cap_defs=[make_test_capability_definition(n,input_schema=_PERMISSIVE_SCHEMA,output_schema=_PERMISSIVE_SCHEMA) for n in names]
     cap_reg,contract=make_test_capability_registry(registry,cap_defs)
     goal=Goal(project_id=project.id,objective="find roles",allowed_capabilities=names,metadata={"plan_steps":names,"resume_path":str(resume),"query":"AI agent"})
-    plan=asyncio.run(PlanExecutionService(db,DeterministicPlanner(),registry,capability_registry=cap_reg,tool_contract=contract).execute_goal(goal,context={"live":True}))
+    plan=asyncio.run(PlanExecutionService(db,DeterministicPlanner(),registry,capability_registry=cap_reg,tool_contract=contract,workflow_verifier=AcceptingVerifier()).execute_goal(goal,context={"live":True}))
     assert plan.status.value == "COMPLETED"
     fetch=next(s for s in plan.steps if s.capability=="web.fetch"); assert len(fetch.output["results"])>=2
     parsed=next(s for s in plan.steps if s.capability=="job.parse"); assert len(parsed.output["jobs"])==2
@@ -146,7 +146,7 @@ def test_all_fetch_failed_plan_recovery(db):
     _PS={"type": "object"}; cap_defs=[make_test_capability_definition("web.search",input_schema=_PS,output_schema=_PS),make_test_capability_definition("web.fetch",input_schema=_PS,output_schema=_PS)]
     cap_reg,contract=make_test_capability_registry(reg,cap_defs)
     goal=Goal(project_id=project.id,objective="x",allowed_capabilities=["web.search","web.fetch"],metadata={"plan_steps":["web.search","web.fetch"]})
-    plan=asyncio.run(PlanExecutionService(db,DeterministicPlanner(),reg,capability_registry=cap_reg,tool_contract=contract).execute_goal(goal)); assert plan.status.value=="FAILED" and plan.steps[1].status.value=="FAILED"
+    plan=asyncio.run(PlanExecutionService(db,DeterministicPlanner(),reg,capability_registry=cap_reg,tool_contract=contract,workflow_verifier=AcceptingVerifier()).execute_goal(goal)); assert plan.status.value=="FAILED" and plan.steps[1].status.value=="FAILED"
 
 def test_real_webfetch_all_failed_recovery(db,monkeypatch):
     from lhas.domain.models import Project
@@ -164,7 +164,7 @@ def test_real_webfetch_all_failed_recovery(db,monkeypatch):
     _PS={"type": "object"}; cap_defs=[make_test_capability_definition("web.search",input_schema=_PS,output_schema=_PS),make_test_capability_definition("web.fetch",input_schema=_PS,output_schema=_PS)]
     cap_reg,contract=make_test_capability_registry(reg,cap_defs)
     goal=Goal(project_id=project.id,objective="x",allowed_capabilities=["web.search","web.fetch"],metadata={"plan_steps":["web.search","web.fetch"]})
-    plan=asyncio.run(PlanExecutionService(db,DeterministicPlanner(),reg,capability_registry=cap_reg,tool_contract=contract).execute_goal(goal)); assert plan.status.value=="FAILED"
+    plan=asyncio.run(PlanExecutionService(db,DeterministicPlanner(),reg,capability_registry=cap_reg,tool_contract=contract,workflow_verifier=AcceptingVerifier()).execute_goal(goal)); assert plan.status.value=="FAILED"
     run=RunRepository(db).list_for_task(plan.steps[1].task_id)[0]; attempts=AttemptRepository(db).list_for_run(run.id)
     assert len(attempts)==2 and FailureReportRepository(db).list_for_attempt(attempts[0].id) and RecoveryActionRepository(db).list_for_attempt(attempts[0].id)
 

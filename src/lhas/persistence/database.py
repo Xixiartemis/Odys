@@ -6,7 +6,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator, Optional
 
-from sqlalchemy import Engine, create_engine
+from sqlalchemy import Engine, create_engine, inspect, text
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -35,6 +35,46 @@ def create_db_engine(db_path: str | Path) -> Engine:
     )
 
 
+# Columns added in Phase 3.1 for plan_steps table.
+# Maps column_name -> (column_type_sql, default_value_or_None)
+_P31_NEW_COLUMNS: dict[str, tuple[str, str | None]] = {
+    "preconditions": ("TEXT", None),
+    "expected_effects": ("TEXT", None),
+    "evidence": ("TEXT", None),
+    "risk_class": ("TEXT", "'LOW'"),
+    "budget": ("TEXT", None),
+    "checkpoint_policy": ("TEXT", "'ON_FAILURE'"),
+    "recovery_policy": ("TEXT", "'RETRY_WITH_FAILURE_CONTEXT'"),
+    "semantic_fingerprint": ("TEXT", None),
+}
+
+
+def _migrate_plan_step_columns(engine: Engine) -> None:
+    """Add missing columns to plan_steps for P3.1 schema upgrade.
+
+    SQLite ALTER TABLE ADD COLUMN is safe — it adds the column with a NULL
+    default. For columns with explicit defaults, we UPDATE NULLs after.
+    """
+    inspector = inspect(engine)
+    existing_tables = inspector.get_table_names()
+    if "plan_steps" not in existing_tables:
+        return  # fresh DB, create_all will handle it
+
+    existing_cols = {col["name"] for col in inspector.get_columns("plan_steps")}
+
+    with engine.begin() as conn:
+        for col_name, (col_type, default) in _P31_NEW_COLUMNS.items():
+            if col_name not in existing_cols:
+                if default is not None:
+                    conn.execute(text(
+                        f"ALTER TABLE plan_steps ADD COLUMN {col_name} {col_type} DEFAULT {default}"
+                    ))
+                else:
+                    conn.execute(text(
+                        f"ALTER TABLE plan_steps ADD COLUMN {col_name} {col_type}"
+                    ))
+
+
 class Database:
     """Owns the engine + session factory; exposes init and a session scope."""
 
@@ -45,6 +85,10 @@ class Database:
     def init_db(self) -> None:
         # Import ORM classes so metadata is populated before create_all.
         from lhas.persistence import orm  # noqa: F401
+
+        # BLOCKER F: migrate existing DBs before create_all.
+        # create_all() only creates NEW tables; it does not add missing columns.
+        _migrate_plan_step_columns(self.engine)
 
         Base.metadata.create_all(self.engine)
 

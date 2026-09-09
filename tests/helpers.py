@@ -101,3 +101,25 @@ def make_test_capability_registry(
     cap_reg = CapabilityRegistry(registry, definitions=all_defs)
     contract = ToolContract(cap_reg, registry)
     return cap_reg, contract
+
+
+# ---------------------------------------------------------------------------
+# P3.1 Verification seam test doubles
+# ---------------------------------------------------------------------------
+
+class _VerificationResult:
+    def __init__(self, accepted: bool, reason: str = ""):
+        self.accepted = accepted
+        self.reason = reason
+
+
+class AcceptingVerifier:
+    """Test-only verifier that always accepts (CLAIMED_COMPLETE → VERIFIED)."""
+    def verify(self, step, plan, events):
+        return _VerificationResult(True, "test_accept")
+
+
+class RejectingVerifier:
+    """Test-only verifier that always rejects (CLAIMED_COMPLETE → CLASSIFIED_FAILURE)."""
+    def verify(self, step, plan, events):
+        return _VerificationResult(False, "test_reject")

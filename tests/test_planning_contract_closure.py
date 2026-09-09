@@ -25,6 +25,7 @@ from lhas.persistence.event_store import EventStore
 from lhas.persistence.repositories import ProjectRepository
 from lhas.planning.models import CapabilitySpec, Goal, PlanMode, PlanStatus, PlanStep, Plan
 from lhas.planning.service import PlanExecutionService, _ToolExecutor
+from tests.helpers import AcceptingVerifier
 from lhas.tools.contract import ToolContract, ToolErrorCode
 from lhas.tools.fakes import FakeTool
 from lhas.tools.invocation import build_contract_for_registry, invoke_via_contract
@@ -160,7 +161,7 @@ def test_platform_prepare_through_contract(tmp_path):
         allowed_capabilities=["platform.prepare"],
         metadata={"plan_steps": ["platform.prepare"]},
     )
-    svc = PlanExecutionService(db, _DeterministicPlanner(), reg, tool_contract=contract, capability_registry=cap_reg)
+    svc = PlanExecutionService(db, _DeterministicPlanner(), reg, tool_contract=contract, capability_registry=cap_reg, workflow_verifier=AcceptingVerifier())
     plan = asyncio.run(svc.execute_goal(goal))
 
     assert plan.status == PlanStatus.COMPLETED
@@ -192,7 +193,7 @@ def test_platform_delegate_through_contract(tmp_path):
         allowed_capabilities=["platform.delegate"],
         metadata={"plan_steps": ["platform.delegate"]},
     )
-    svc = PlanExecutionService(db, _DeterministicPlanner(), reg, tool_contract=contract, capability_registry=cap_reg)
+    svc = PlanExecutionService(db, _DeterministicPlanner(), reg, tool_contract=contract, capability_registry=cap_reg, workflow_verifier=AcceptingVerifier())
     plan = asyncio.run(svc.execute_goal(goal))
 
     assert plan.status == PlanStatus.COMPLETED
@@ -224,7 +225,7 @@ def test_platform_finalize_through_contract(tmp_path):
         allowed_capabilities=["platform.finalize"],
         metadata={"plan_steps": ["platform.finalize"]},
     )
-    svc = PlanExecutionService(db, _DeterministicPlanner(), reg, tool_contract=contract, capability_registry=cap_reg)
+    svc = PlanExecutionService(db, _DeterministicPlanner(), reg, tool_contract=contract, capability_registry=cap_reg, workflow_verifier=AcceptingVerifier())
     plan = asyncio.run(svc.execute_goal(goal))
 
     assert plan.status == PlanStatus.COMPLETED
@@ -267,7 +268,7 @@ def test_invalid_arguments_no_backend_execute(tmp_path):
             )
             return Plan(goal_id=goal.id, mode=PlanMode.LINEAR, status="READY", steps=[step], version="P-1.0")
 
-    svc = PlanExecutionService(db, _BadInputPlanner(), reg, tool_contract=contract, capability_registry=cap_reg)
+    svc = PlanExecutionService(db, _BadInputPlanner(), reg, tool_contract=contract, capability_registry=cap_reg, workflow_verifier=AcceptingVerifier())
     plan = asyncio.run(svc.execute_goal(goal))
 
     assert plan.status == PlanStatus.FAILED
@@ -297,7 +298,7 @@ def test_output_schema_mismatch_observes_failure(tmp_path):
         allowed_capabilities=["workspace.read"],
         metadata={"plan_steps": ["workspace.read"]},
     )
-    svc = PlanExecutionService(db, _DeterministicPlanner(), reg, tool_contract=contract, capability_registry=cap_reg)
+    svc = PlanExecutionService(db, _DeterministicPlanner(), reg, tool_contract=contract, capability_registry=cap_reg, workflow_verifier=AcceptingVerifier())
     plan = asyncio.run(svc.execute_goal(goal))
 
     assert plan.status == PlanStatus.FAILED
@@ -323,7 +324,7 @@ def test_evidence_identity_survives_planning_execution(tmp_path):
         allowed_capabilities=["platform.prepare"],
         metadata={"plan_steps": ["platform.prepare"]},
     )
-    svc = PlanExecutionService(db, _DeterministicPlanner(), reg, tool_contract=contract, capability_registry=cap_reg)
+    svc = PlanExecutionService(db, _DeterministicPlanner(), reg, tool_contract=contract, capability_registry=cap_reg, workflow_verifier=AcceptingVerifier())
     plan = asyncio.run(svc.execute_goal(goal))
 
     assert plan.status == PlanStatus.COMPLETED
@@ -362,7 +363,7 @@ def test_command_not_allowed_preserved(tmp_path):
         allowed_capabilities=["platform.prepare"],
         metadata={"plan_steps": ["platform.prepare"]},
     )
-    svc = PlanExecutionService(db, _DeterministicPlanner(), reg, tool_contract=contract, capability_registry=cap_reg)
+    svc = PlanExecutionService(db, _DeterministicPlanner(), reg, tool_contract=contract, capability_registry=cap_reg, workflow_verifier=AcceptingVerifier())
     plan = asyncio.run(svc.execute_goal(goal))
 
     assert plan.status == PlanStatus.FAILED
@@ -435,6 +436,7 @@ def test_capability_spec_only_tool_not_planner_visible(tmp_path):
     svc = PlanExecutionService(
         db, _CapturingPlanner(), reg,
         tool_contract=contract, capability_registry=cap_reg,
+        workflow_verifier=AcceptingVerifier(),
     )
     plan = asyncio.run(svc.execute_goal(goal))
 
@@ -475,6 +477,7 @@ def test_explicit_definition_projection_visible(tmp_path):
     svc = PlanExecutionService(
         db, _CapturingPlanner(), reg,
         tool_contract=contract, capability_registry=cap_reg,
+        workflow_verifier=AcceptingVerifier(),
     )
     goal = Goal(
         project_id=project.id, objective="test visibility",
@@ -524,7 +527,7 @@ def test_no_direct_tool_execute_bypass(tmp_path):
         allowed_capabilities=["platform.prepare"],
         metadata={"plan_steps": ["platform.prepare"]},
     )
-    svc = PlanExecutionService(db, _DeterministicPlanner(), reg, tool_contract=contract, capability_registry=cap_reg)
+    svc = PlanExecutionService(db, _DeterministicPlanner(), reg, tool_contract=contract, capability_registry=cap_reg, workflow_verifier=AcceptingVerifier())
     plan = asyncio.run(svc.execute_goal(goal))
 
     assert plan.status == PlanStatus.COMPLETED
@@ -583,7 +586,7 @@ def test_tool_success_does_not_bypass_completion_authority(tmp_path):
         allowed_capabilities=["platform.prepare"],
         metadata={"plan_steps": ["platform.prepare"]},
     )
-    svc = PlanExecutionService(db, _DeterministicPlanner(), reg, tool_contract=contract, capability_registry=cap_reg)
+    svc = PlanExecutionService(db, _DeterministicPlanner(), reg, tool_contract=contract, capability_registry=cap_reg, workflow_verifier=AcceptingVerifier())
     plan = asyncio.run(svc.execute_goal(goal))
 
     # Plan should complete via the planning service's completion logic,

@@ -23,7 +23,7 @@ from lhas.platform_models import Delegation
 from lhas.tools.fakes import FakeTool
 from lhas.tools.protocol import ToolResult, ToolResultStatus
 from lhas.tools.registry import ToolRegistry
-from tests.helpers import PassingCommandValidator, make_test_capability_definition, make_test_capability_registry
+from tests.helpers import AcceptingVerifier, PassingCommandValidator, make_test_capability_definition, make_test_capability_registry
 
 
 class _ReplanPlanner:
@@ -76,7 +76,7 @@ def test_w1_invalid_assumption_replans_to_new_route(db):
     goal = _goal(db, "w1-invalid-assumption")
     tools_reg, cap_defs = _tools(log)
     cap_reg, contract = make_test_capability_registry(tools_reg, cap_defs)
-    plan = asyncio.run(PlanExecutionService(db, planner, tools_reg, capability_registry=cap_reg, tool_contract=contract).execute_goal(goal))
+    plan = asyncio.run(PlanExecutionService(db, planner, tools_reg, capability_registry=cap_reg, tool_contract=contract, workflow_verifier=AcceptingVerifier()).execute_goal(goal))
     assert planner.calls == [False, True]
     assert log[:1] == ["a"] and log.count("b") == 2
     assert log[-2:] == ["d", "e"]
@@ -125,7 +125,7 @@ def test_w2_repeated_dead_end_replans_materially_different_path(db):
     planner = DeadEndPlanner()
     goal = _goal(db, "w2-dead-end")
     goal.allowed_capabilities = ["probe", "stale-original", "alternate", "verify"]
-    plan = asyncio.run(PlanExecutionService(db, planner, registry, capability_registry=cap_reg, tool_contract=contract).execute_goal(goal))
+    plan = asyncio.run(PlanExecutionService(db, planner, registry, capability_registry=cap_reg, tool_contract=contract, workflow_verifier=AcceptingVerifier()).execute_goal(goal))
     assert log == ["probe", "probe", "alternate", "verify"]
     assert "stale-original" not in log
     assert planner.calls == [False, True]
@@ -179,7 +179,7 @@ def test_w3_validator_rejection_flows_through_plan_execution(db):
     planner = _ReplanPlanner()
     tools_reg, cap_defs = _tools([])
     cap_reg, contract = make_test_capability_registry(tools_reg, cap_defs)
-    finished = asyncio.run(PlanExecutionService(db, planner, tools_reg, agent_executor_factory=agent_factory, capability_registry=cap_reg, tool_contract=contract).execute_goal(goal))
+    finished = asyncio.run(PlanExecutionService(db, planner, tools_reg, agent_executor_factory=agent_factory, capability_registry=cap_reg, tool_contract=contract, workflow_verifier=AcceptingVerifier()).execute_goal(goal))
     assert finished.status is PlanStatus.COMPLETED
     assert {step.capability for step in finished.steps if step.status is PlanStepStatus.VERIFIED} >= {"a", "d", "e"}
     assert "c" not in executed and executed == ["a", "b", "d", "e"]
@@ -254,7 +254,7 @@ def test_w4_durable_child_failure_flows_through_parent_plan_execution(db):
         native = NativeAgentExecutor(kernel, allowed_capabilities=[], allowed_side_effect_capabilities=[], max_turns=1)
         return FailedChildThenNative(native) if step.capability == "b" else native
 
-    finished = asyncio.run(PlanExecutionService(db, planner, tools_reg, agent_executor_factory=agent_factory, capability_registry=cap_reg, tool_contract=contract).execute_goal(goal))
+    finished = asyncio.run(PlanExecutionService(db, planner, tools_reg, agent_executor_factory=agent_factory, capability_registry=cap_reg, tool_contract=contract, workflow_verifier=AcceptingVerifier()).execute_goal(goal))
     assert finished.status is PlanStatus.COMPLETED
     assert "c" not in executed
     assert executed[:2] == ["a", "b"] and executed[-2:] == ["d", "e"]

@@ -23,6 +23,7 @@ from lhas.persistence.repositories import AttemptRepository, ProjectRepository, 
 from lhas.tools.protocol import ToolRequest, ToolResultStatus
 from lhas.tools.registry import ToolRegistry
 from lhas.validation import NeverPassValidator
+from tests.helpers import AcceptingVerifier
 
 
 def test_mcp_stdio_discovery_and_toolregistry_bridge():
@@ -56,7 +57,7 @@ def test_full_offline_agent_platform_vertical_slice(tmp_path):
     (tmp_path/"docs").mkdir(); (tmp_path/"README.md").write_text("Odys agent runtime architecture and durable delegation",encoding="utf-8"); (tmp_path/"docs"/"platform.md").write_text("Agent platform knowledge evidence",encoding="utf-8"); (tmp_path/"AGENTS.md").write_text("Use deterministic validation",encoding="utf-8"); (tmp_path/".odys.md").write_text("Keep the control plane authoritative",encoding="utf-8")
     db=Database(tmp_path/"platform.db")
     async def scenario():
-        platform=await OfflineAgentPlatform.create(db,tmp_path,memory_root=tmp_path/"memory")
+        platform=await OfflineAgentPlatform.create(db,tmp_path,memory_root=tmp_path/"memory",workflow_verifier=AcceptingVerifier())
         try:
             return await platform.root.handle("Implement the complete durable Agent Platform offline vertical slice",project_id=platform.project.id)
         finally:

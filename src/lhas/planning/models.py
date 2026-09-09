@@ -64,6 +64,7 @@ class PlanStatus(str, Enum):
     COMPLETED = "COMPLETED"
     FAILED = "FAILED"
     WAITING_FOR_HUMAN_APPROVAL = "WAITING_FOR_HUMAN_APPROVAL"
+    WAITING_FOR_VERIFICATION = "WAITING_FOR_VERIFICATION"
 
 
 class PlanStepStatus(str, Enum):
@@ -79,6 +80,7 @@ class PlanStepStatus(str, Enum):
     CLASSIFIED_FAILURE = "CLASSIFIED_FAILURE"
     PRECONDITION_FAILED = "PRECONDITION_FAILED"
     WAITING_FOR_HUMAN_APPROVAL = "WAITING_FOR_HUMAN_APPROVAL"
+    WAITING_FOR_VERIFICATION = "WAITING_FOR_VERIFICATION"
     STALE = "STALE"
 
 
@@ -209,7 +211,12 @@ class CapabilitySpec(BaseModel):
 # ---------------------------------------------------------------------------
 
 # Status sets used by eligibility logic (canonical, no duplication elsewhere)
+# _TERMINAL_VERIFIED_STATUSES: both VERIFIED and COMPLETED are "done" — used
+#   for skip-done and replan-preserves-work logic (read-compat / migration).
+# _DEPENDENCY_SATISFIED_STATUSES: ONLY VERIFIED satisfies a workflow dependency.
+#   COMPLETED is a legacy terminal state that must NOT unlock new work.
 _TERMINAL_VERIFIED_STATUSES = frozenset({PlanStepStatus.VERIFIED, PlanStepStatus.COMPLETED})
+_DEPENDENCY_SATISFIED_STATUSES = frozenset({PlanStepStatus.VERIFIED})
 _FAILED_OR_BLOCKED_STATUSES = frozenset({PlanStepStatus.FAILED, PlanStepStatus.BLOCKED, PlanStepStatus.CLASSIFIED_FAILURE})
 
 
@@ -300,17 +307,17 @@ def evaluate_step_eligibility(
         return False, f"already_{step.status.value.lower()}"
     if step.status in _TERMINAL_VERIFIED_STATUSES:
         return False, "already_completed"
-    if step.status in {PlanStepStatus.STALE, PlanStepStatus.CLASSIFIED_FAILURE, PlanStepStatus.PRECONDITION_FAILED}:
+    if step.status in _FAILED_OR_BLOCKED_STATUSES | {PlanStepStatus.STALE, PlanStepStatus.PRECONDITION_FAILED}:
         return False, f"not_eligible_{step.status.value.lower()}"
 
-    # INVARIANT 1 — DEPENDENCY AUTHORITY: all deps must be VERIFIED (or COMPLETED for backward compat)
+    # INVARIANT 1 — DEPENDENCY AUTHORITY: all deps must be VERIFIED (not legacy COMPLETED)
     for dep_id in step.depends_on:
         dep = by_id.get(dep_id)
         if dep is None:
             return False, f"missing_dependency_{dep_id}"
         if dep.status in _FAILED_OR_BLOCKED_STATUSES:
             return False, f"dependency_{dep_id}_failed"
-        if dep.status not in _TERMINAL_VERIFIED_STATUSES:
+        if dep.status not in _DEPENDENCY_SATISFIED_STATUSES:
             return False, f"dependency_{dep_id}_not_verified"
 
     # INVARIANT 2 — PRECONDITION AUTHORITY: evaluate against current state

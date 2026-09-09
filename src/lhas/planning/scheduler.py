@@ -1,12 +1,16 @@
-from dataclasses import dataclass
-from lhas.planning.models import Plan, PlanStepStatus, _TERMINAL_VERIFIED_STATUSES, _FAILED_OR_BLOCKED_STATUSES, evaluate_step_eligibility
+from dataclasses import dataclass, field
+from lhas.planning.models import (
+    Plan, PlanStep, PlanStepStatus,
+    _TERMINAL_VERIFIED_STATUSES, _FAILED_OR_BLOCKED_STATUSES,
+    evaluate_step_eligibility,
+)
 
 @dataclass(frozen=True)
 class Schedule:
-    ready_steps: list
-    blocked_steps: list
-    pending_steps: list
-    waiting_steps: list
+    ready_steps: list = field(default_factory=list)
+    blocked_steps: list = field(default_factory=list)
+    pending_steps: list = field(default_factory=list)
+    waiting_steps: list = field(default_factory=list)
 
 class TaskGraphScheduler:
     """Pure SIMPLE_DEPENDENCY scheduler; never executes tools or providers.
@@ -14,29 +18,39 @@ class TaskGraphScheduler:
     Phase 3: delegates eligibility to the centralized evaluate_step_eligibility()
     to maintain single-authority semantics. Scheduler remains a pure calculator.
     """
+
     def calculate(self, plan: Plan) -> Schedule:
         by_id = {s.id: s for s in plan.steps}
-        ready = []
-        blocked = []
-        pending = []
-        waiting = []
+        ready: list[PlanStep] = []
+        blocked: list[PlanStep] = []
+        pending: list[PlanStep] = []
+        waiting: list[PlanStep] = []
+
         for step in plan.steps:
+            # Terminal / done steps — skip (do not re-dispatch)
+            if step.status in _TERMINAL_VERIFIED_STATUSES | _FAILED_OR_BLOCKED_STATUSES | {PlanStepStatus.STALE}:
+                continue
+
+            # Waiting for human approval
             if step.status == PlanStepStatus.WAITING_FOR_HUMAN_APPROVAL:
                 waiting.append(step)
                 continue
-            if step.status in {
-                PlanStepStatus.COMPLETED, PlanStepStatus.VERIFIED,
-                PlanStepStatus.FAILED, PlanStepStatus.BLOCKED,
-                PlanStepStatus.STALE, PlanStepStatus.CLASSIFIED_FAILURE,
-            }:
+
+            # Already active (RUNNING, CLAIMED_COMPLETE, WAITING_FOR_VERIFICATION, etc.) — skip
+            if step.status in {PlanStepStatus.RUNNING, PlanStepStatus.CLAIMED_COMPLETE, PlanStepStatus.READY, PlanStepStatus.WAITING_FOR_VERIFICATION}:
                 continue
-            deps = [by_id[d] for d in step.depends_on]
-            if any(d.status in _FAILED_OR_BLOCKED_STATUSES for d in deps):
-                blocked.append(step)
-            elif all(d.status in _TERMINAL_VERIFIED_STATUSES for d in deps):
+
+            # BLOCKER A: delegate to single eligibility authority
+            eligible, reason = evaluate_step_eligibility(step, by_id)
+
+            if eligible:
                 ready.append(step)
+            elif any(token in reason for token in ("failed", "blocked")):
+                blocked.append(step)
             else:
+                # not_verified, precondition_failed, missing_dependency, etc.
                 pending.append(step)
+
         return Schedule(ready, blocked, pending, waiting)
 
 def build_step_dependency_context(plan, step, execution_context):
