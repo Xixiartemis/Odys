@@ -11,6 +11,7 @@ from typing import Any, Optional
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from lhas.domain.models import new_id
+from lhas.domain.enums import FailureClass, FailureType
 
 
 def _semantic_value(value: Any) -> Any:
@@ -50,6 +51,74 @@ def compute_step_semantic_fingerprint(step: "PlanStep", by_id: dict[str, "PlanSt
         "dependency_semantics": dependency_semantics,
     }
     return hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+class RepairScopeHint(str, Enum):
+    """Scope of repair needed after a step failure."""
+    LOCAL = "LOCAL"
+    AFFECTED_SUBGRAPH = "AFFECTED_SUBGRAPH"
+    MACRO_REPLAN = "MACRO_REPLAN"
+
+
+def compute_repair_scope_hint(
+    failure_class: FailureClass,
+    failure_type: FailureType,
+    has_downstream_deps: bool = False,
+) -> RepairScopeHint:
+    """Compute the repair scope hint from failure classification.
+
+    Rules:
+    - TOOL_FAILURE (TOOL_ERROR) with no downstream deps → LOCAL
+    - VALIDATION_FAILURE (data/validation failures) → LOCAL (re-verify)
+    - ASSUMPTION_INVALID (WRONG_ASSUMPTION) → AFFECTED_SUBGRAPH
+    - PROVIDER_FAILURE / RESOURCE_EXHAUSTED → MACRO_REPLAN
+    - Default → LOCAL
+    """
+    _MACRO_REPLAN_TYPES = frozenset({
+        FailureType.QUOTA_EXHAUSTED,
+        FailureType.BILLING_OR_CREDIT_EXHAUSTED,
+        FailureType.AUTH_INVALID,
+        FailureType.PROVIDER_UNAVAILABLE,
+        FailureType.PROVIDER_TIMEOUT,
+        FailureType.MALFORMED_PROVIDER_RESPONSE,
+        FailureType.UNKNOWN_PROVIDER_FAILURE,
+        FailureType.BUDGET_EXHAUSTED,
+        FailureType.NETWORK_ERROR,
+    })
+
+    _AFFECTED_SUBGRAPH_TYPES = frozenset({
+        FailureType.WRONG_ASSUMPTION,
+        FailureType.STALE_CONTEXT,
+        FailureType.CONTEXT_CONFLICT,
+    })
+
+    if failure_type in _MACRO_REPLAN_TYPES:
+        return RepairScopeHint.MACRO_REPLAN
+    if failure_type in _AFFECTED_SUBGRAPH_TYPES:
+        return RepairScopeHint.AFFECTED_SUBGRAPH
+    if failure_type == FailureType.TOOL_ERROR:
+        return RepairScopeHint.LOCAL
+    # VALIDATION_FAILURE and all other types → LOCAL
+    return RepairScopeHint.LOCAL
+
+
+class StepFailureProvenance(BaseModel):
+    """Durable provenance linking a step failure to its classification.
+
+    Stored in step.evidence['failure_provenance'] for persistence through
+    plan save/reload cycles.
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    step_id: str
+    plan_id: str
+    failure_class: FailureClass
+    failure_type: FailureType
+    failure_evidence: dict[str, Any] = Field(default_factory=dict)
+    attempt_id: str
+    run_id: str
+    repair_scope_hint: RepairScopeHint
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 class PlanMode(str, Enum):

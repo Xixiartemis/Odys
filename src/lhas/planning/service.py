@@ -10,8 +10,10 @@ from lhas.persistence.planning_repositories import GoalRepository, PlanRepositor
 from lhas.native.persistence import ReplanSignalRepository
 from lhas.native.models import ReplanSignal
 from lhas.orchestrator_v2 import RecoveringOrchestrator
+from lhas.persistence.phaseb_repos import FailureReportRepository
 from lhas.planning.models import (
-    Goal, Plan, PlanStatus, PlanStepStatus,
+    Goal, Plan, PlanStatus, PlanStepStatus, StepFailureProvenance,
+    compute_repair_scope_hint,
     evaluate_step_eligibility, transition_step,
 )
 from lhas.planning.scheduler import TaskGraphScheduler, build_step_dependency_context
@@ -129,6 +131,60 @@ class PlanExecutionService:
     def _resolve_capability_spec(self, capability_name: str):
         """Resolve the CapabilitySpec for a step, preferring CapabilityDefinition authority."""
         return self.registry.resolve(capability_name).capability
+    def _create_step_failure_provenance(self, step, plan, run_id: str) -> StepFailureProvenance | None:
+        """Create durable failure provenance linking step to failure classification."""
+        attempts = AttemptRepository(self.db).list_for_run(run_id)
+        if not attempts:
+            return None
+        failure_repo = FailureReportRepository(self.db)
+        reports = [
+            report
+            for attempt in attempts
+            for report in failure_repo.list_for_attempt(attempt.id)
+        ]
+        if not reports:
+            return None
+        # Use the latest failure report
+        report = reports[-1]
+        # Determine if any downstream steps depend on this step
+        by_id = {s.id: s for s in plan.steps}
+        has_downstream_deps = any(
+            step.id in s.depends_on
+            for s in plan.steps
+            if s.id != step.id
+        )
+        hint = compute_repair_scope_hint(
+            failure_class=report.failure_class,
+            failure_type=report.failure_type,
+            has_downstream_deps=has_downstream_deps,
+        )
+        provenance = StepFailureProvenance(
+            step_id=step.id,
+            plan_id=plan.id,
+            failure_class=report.failure_class,
+            failure_type=report.failure_type,
+            failure_evidence={
+                "summary": report.summary,
+                "evidence": report.evidence,
+                "confidence": report.confidence,
+                "suggested_recovery": report.suggested_recovery,
+            },
+            attempt_id=report.attempt_id,
+            run_id=run_id,
+            repair_scope_hint=hint,
+        )
+        step.evidence["failure_provenance"] = provenance.model_dump(mode="json")
+        self._emit(EventType.STEP_FAILURE_PROVENANCE, {
+            "plan_id": plan.id,
+            "step_id": step.id,
+            "run_id": run_id,
+            "attempt_id": report.attempt_id,
+            "failure_class": report.failure_class.value,
+            "failure_type": report.failure_type.value,
+            "repair_scope_hint": hint.value,
+        })
+        return provenance
+
     def _record_step_replan_signal(self, step, run_id: str) -> None:
         """Turn a durable step failure into the canonical replan input."""
         attempts = AttemptRepository(self.db).list_for_run(run_id)
@@ -141,6 +197,7 @@ class PlanExecutionService:
         if trigger is None:
             return
         run = RunRepository(self.db).get(run_id)
+        provenance_ref = step.evidence.get("failure_provenance")
         signal = ReplanSignal(
             task_id=run.task_id if run is not None else attempts[-1].run_id,
             run_id=run_id,
@@ -148,7 +205,8 @@ class PlanExecutionService:
             reason=trigger.reason,
             scope="TASKGRAPH_NODE",
             failed_node_id=step.id,
-            evidence={**trigger.evidence, "objective": step.objective},
+            evidence={**trigger.evidence, "objective": step.objective,
+                       "failure_provenance": provenance_ref},
         )
         signal_repo.create(signal)
         self._emit(EventType.REPLAN_SIGNAL_CREATED, {"signal_id": signal.id, "reason": signal.reason, "failed_node_id": step.id})
@@ -238,6 +296,7 @@ class PlanExecutionService:
                 if run.status.value != "COMPLETED":
                     transition_step(step, PlanStepStatus.FAILED, "run_failed", events, plan_id=plan.id)
                     self._emit(EventType.PLAN_STEP_FAILED, {"plan_id": plan.id, "step_id": step.id, "run_id": run.id})
+                    self._create_step_failure_provenance(step, plan, run.id)
                     self._record_step_replan_signal(step, run.id)
                     if await self._maybe_replan(goal, plan, run.id, context or {}):
                         restart_authoritative_schedule = True
@@ -355,6 +414,7 @@ class PlanExecutionService:
                 if run.status.value != "COMPLETED":
                     transition_step(step, PlanStepStatus.FAILED, "run_failed", events, plan_id=plan.id)
                     self._emit(EventType.PLAN_STEP_FAILED,{"plan_id":plan.id,"step_id":step.id,"run_id":run.id})
+                    self._create_step_failure_provenance(step, plan, run.id)
                     self._record_step_replan_signal(step, run.id)
                     if await self._maybe_replan(goal, plan, run.id, context):
                         restart_authoritative_schedule = True; break
