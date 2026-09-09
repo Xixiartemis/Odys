@@ -13,7 +13,7 @@ from lhas.orchestrator_v2 import RecoveringOrchestrator
 from lhas.persistence.phaseb_repos import FailureReportRepository
 from lhas.planning.models import (
     Goal, Plan, PlanStatus, PlanStepStatus, StepFailureProvenance,
-    RepairScope, compute_repair_scope_hint, compute_repair_scope, invalidate_affected_subgraph,
+    RepairScope, RepairScopeHint, compute_repair_scope_hint, compute_repair_scope, invalidate_affected_subgraph,
     evaluate_step_eligibility, transition_step,
 )
 from lhas.planning.scheduler import TaskGraphScheduler, build_step_dependency_context
@@ -185,6 +185,47 @@ class PlanExecutionService:
         })
         return provenance
 
+    def _create_verification_failure_provenance(self, step, plan, vresult) -> None:
+        """Create failure provenance for verification rejection.
+
+        Verification rejection is a VALIDATION_FAILURE — the step executed
+        successfully but didn't pass verification criteria.
+        """
+        from lhas.domain.enums import FailureClass, FailureType
+        # Resolve the attempt that produced the execution
+        attempt_id = None
+        runs = RunRepository(self.db).list_for_task(step.task_id) if step.task_id else []
+        if runs:
+            attempts = AttemptRepository(self.db).list_for_run(runs[-1].id)
+            if attempts:
+                attempt_id = attempts[-1].id
+
+        provenance = StepFailureProvenance(
+            step_id=step.id,
+            plan_id=plan.id,
+            failure_class=FailureClass.DATA,  # verification failure = data didn't meet criteria
+            failure_type=FailureType.TOOL_ERROR,  # closest match for verification failure
+            failure_evidence={
+                "verification_reason": vresult.reason if hasattr(vresult, 'reason') else str(vresult),
+                "checks": [
+                    {"name": c.name, "passed": c.passed, "detail": c.detail}
+                    for c in (vresult.validation.checks if hasattr(vresult, 'validation') and vresult.validation else [])
+                ],
+            },
+            attempt_id=attempt_id,
+            run_id=None,  # run already completed; this is a verification failure
+            repair_scope_hint=RepairScopeHint.LOCAL,  # default for validation failures
+        )
+        step.evidence["failure_provenance"] = provenance.model_dump(mode="json")
+        self._emit(EventType.STEP_FAILURE_PROVENANCE, {
+            "plan_id": plan.id,
+            "step_id": step.id,
+            "attempt_id": attempt_id,
+            "failure_class": FailureClass.DATA.value,
+            "failure_type": "VERIFICATION_REJECTED",
+            "repair_scope_hint": RepairScopeHint.LOCAL.value,
+        })
+
     def _record_step_replan_signal(self, step, run_id: str) -> None:
         """Turn a durable step failure into the canonical replan input."""
         attempts = AttemptRepository(self.db).list_for_run(run_id)
@@ -329,6 +370,8 @@ class PlanExecutionService:
                         transition_step(step, PlanStepStatus.VERIFIED, "verification_accepted", events, plan_id=plan.id)
                     else:
                         transition_step(step, PlanStepStatus.CLASSIFIED_FAILURE, "verification_rejected", events, plan_id=plan.id)
+                        # Create failure provenance for verification rejection
+                        self._create_verification_failure_provenance(step, plan, vresult)
                 else:
                     # No verifier configured → WAITING_FOR_VERIFICATION (fail-closed)
                     transition_step(step, PlanStepStatus.WAITING_FOR_VERIFICATION, "no_verifier_configured", events, plan_id=plan.id)
@@ -354,37 +397,6 @@ class PlanExecutionService:
     # Phase 3.3 — Repair execution
     # -----------------------------------------------------------------------
 
-    def _compute_repair_scope(self, plan: Plan, failed_step_id: str) -> set[str]:
-        """Compute the set of step IDs affected by a failure at failed_step_id.
-
-        Returns failed_step_id + all steps that transitively depend on it.
-        VERIFIED steps are excluded — they are never re-executed.
-        """
-        from lhas.planning.models import _TERMINAL_VERIFIED_STATUSES
-        by_id = {s.id: s for s in plan.steps}
-        # Build reverse dependency map: step_id → set of step_ids that depend on it
-        dependents: dict[str, set[str]] = {s.id: set() for s in plan.steps}
-        for step in plan.steps:
-            for dep_id in step.depends_on:
-                if dep_id in dependents:
-                    dependents[dep_id].add(step.id)
-        # BFS from failed_step_id through dependents
-        scope: set[str] = set()
-        queue = [failed_step_id]
-        while queue:
-            current = queue.pop(0)
-            if current in scope:
-                continue
-            # Never include VERIFIED steps in repair scope
-            step = by_id.get(current)
-            if step is not None and step.status in _TERMINAL_VERIFIED_STATUSES:
-                continue
-            scope.add(current)
-            for dependent_id in dependents.get(current, set()):
-                if dependent_id not in scope:
-                    queue.append(dependent_id)
-        return scope
-
     async def repair_after_failure(self, plan_id: str, failed_step_id: str, goal: Goal, *, context: dict[str, Any] | None = None, experiment_id: str | None = None) -> Plan:
         """Repair a plan after a step failure, preserving VERIFIED work.
 
@@ -408,8 +420,17 @@ class PlanExecutionService:
         if failed_step is None:
             raise KeyError(f"step not found: {failed_step_id}")
 
-        # Compute repair scope
-        repair_scope = self._compute_repair_scope(plan, failed_step_id)
+        # Compute repair scope using the canonical authority
+        provenance = failed_step.evidence.get("failure_provenance", {})
+        scope, affected_ids = compute_repair_scope(
+            failed_step, plan,
+            failure_class=provenance.get("failure_class"),
+            error_type=provenance.get("failure_type"),
+        )
+        # For LOCAL: only repair the failed step
+        # For AFFECTED_SUBGRAPH: repair failed step + dependents
+        # For MACRO_REPLAN: delegate to replan (not handled here)
+        repair_scope = affected_ids if affected_ids else {failed_step_id}
 
         # Check repair budget
         repair_count = failed_step.evidence.get("repair_attempt_count", 0)
@@ -423,11 +444,23 @@ class PlanExecutionService:
             })
             return plan
 
+        # Record original attempt ID for repair lineage before incrementing
+        original_attempt_id = failed_step.evidence.get("original_failure_attempt_id")
+        if original_attempt_id is None:
+            # First repair — capture the original failure attempt
+            runs = RunRepository(self.db).list_for_task(failed_step.task_id) if failed_step.task_id else []
+            if runs:
+                attempts = AttemptRepository(self.db).list_for_run(runs[-1].id)
+                if attempts:
+                    original_attempt_id = attempts[-1].id
+
         # Increment repair attempt count and chain provenance for each affected step
         for step in plan.steps:
             if step.id in repair_scope:
                 step.evidence["repair_attempt_count"] = step.evidence.get("repair_attempt_count", 0) + 1
                 step.evidence["repair_parent_step_id"] = failed_step_id
+                if original_attempt_id:
+                    step.evidence["original_failure_attempt_id"] = original_attempt_id
         plans.update(plan)
 
         # Execute repair
@@ -444,10 +477,16 @@ class PlanExecutionService:
         if repair_step_ids:
             self._emit(EventType.REPAIR_STARTED, {"plan_id": plan.id, "repair_step_ids": sorted(repair_step_ids)})
             _TERMINAL_REPAIRABLE = {PlanStepStatus.FAILED, PlanStepStatus.CLASSIFIED_FAILURE, PlanStepStatus.BLOCKED, PlanStepStatus.STALE, PlanStepStatus.PRECONDITION_FAILED}
+            # Reset repair targets to PENDING
             for s in plan.steps:
                 if s.id in repair_step_ids and s.status in _TERMINAL_REPAIRABLE:
                     transition_step(s, PlanStepStatus.PENDING, "repair_invalidation", events, plan_id=plan.id)
                     self._emit(EventType.REPAIR_STEP_INVALIDATED, {"plan_id": plan.id, "step_id": s.id})
+            # Also reset BLOCKED dependents of repaired steps
+            # (they were blocked because of the failure, now the failure is being repaired)
+            for s in plan.steps:
+                if s.status == PlanStepStatus.BLOCKED and any(dep in repair_step_ids for dep in s.depends_on):
+                    transition_step(s, PlanStepStatus.PENDING, "repair_unblock_dependent", events, plan_id=plan.id)
             plans.update(plan)
         for s in plan.steps:
             if s.id in approved_step_ids and s.status == PlanStepStatus.WAITING_FOR_HUMAN_APPROVAL:
@@ -510,8 +549,13 @@ class PlanExecutionService:
                     transition_step(step, PlanStepStatus.FAILED, "run_failed", events, plan_id=plan.id)
                     self._emit(EventType.PLAN_STEP_FAILED,{"plan_id":plan.id,"step_id":step.id,"run_id":run.id})
                     self._create_step_failure_provenance(step, plan, run.id)
-                    # P3.3: compute repair scope for the failed step
-                    scope, affected_ids = compute_repair_scope(step, plan)
+                    # P3.3: compute repair scope using the durable provenance
+                    provenance = step.evidence.get("failure_provenance", {})
+                    scope, affected_ids = compute_repair_scope(
+                        step, plan,
+                        failure_class=provenance.get("failure_class"),
+                        error_type=provenance.get("failure_type"),
+                    )
                     if scope == RepairScope.AFFECTED_SUBGRAPH:
                         # Exclude the failed step itself — it's already FAILED
                         dependent_ids = affected_ids - {step.id}
@@ -553,6 +597,8 @@ class PlanExecutionService:
                         transition_step(step, PlanStepStatus.VERIFIED, "verification_accepted", events, plan_id=plan.id)
                     else:
                         transition_step(step, PlanStepStatus.CLASSIFIED_FAILURE, "verification_rejected", events, plan_id=plan.id)
+                        # Create failure provenance for verification rejection
+                        self._create_verification_failure_provenance(step, plan, vresult)
                 else:
                     transition_step(step, PlanStepStatus.WAITING_FOR_VERIFICATION, "no_verifier_configured", events, plan_id=plan.id)
 

@@ -116,8 +116,8 @@ class StepFailureProvenance(BaseModel):
     failure_class: FailureClass
     failure_type: FailureType
     failure_evidence: dict[str, Any] = Field(default_factory=dict)
-    attempt_id: str
-    run_id: str
+    attempt_id: str | None = None
+    run_id: str | None = None
     repair_scope_hint: RepairScopeHint
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
