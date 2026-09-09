@@ -136,7 +136,13 @@ class _DelegationTool:
 
 class PlatformGoalService:
     def __init__(self,db,planner,registry,tool_contract=None,capability_registry=None,workflow_verifier=None):
-        self.db=db; self.planner=planner; self.registry=registry; self.tool_contract=tool_contract; self.capability_registry=capability_registry; self.workflow_verifier=workflow_verifier
+        self.db=db; self.planner=planner; self.registry=registry; self.tool_contract=tool_contract; self.capability_registry=capability_registry
+        # Default to WorkflowVerifier when no explicit verifier is provided
+        if workflow_verifier is None:
+            from lhas.planning.verification import WorkflowVerifier
+            self.workflow_verifier = WorkflowVerifier(db)
+        else:
+            self.workflow_verifier=workflow_verifier
     async def submit(self,objective:str,context:dict,project_id:str)->GoalSubmissionResult:
         goal=Goal(project_id=project_id,objective=objective,success_criteria=["all planned tasks pass validator"],allowed_capabilities=list(ScriptedPlatformPlanner.CAPABILITIES),metadata={"platform":"agent-foundation"})
         plan=await PlanExecutionService(self.db,self.planner,self.registry,tool_contract=self.tool_contract,capability_registry=self.capability_registry,workflow_verifier=self.workflow_verifier).execute_goal(goal,context=context)
