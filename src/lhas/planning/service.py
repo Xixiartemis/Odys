@@ -257,8 +257,9 @@ class PlanExecutionService:
             if restart_authoritative_schedule:
                 continue
             plan = plans.get(plan.id) or plan
-            # Plan is complete when all non-stale steps are CLAIMED_COMPLETE or VERIFIED
-            if all(step.status in {PlanStepStatus.CLAIMED_COMPLETE, PlanStepStatus.COMPLETED, PlanStepStatus.VERIFIED, PlanStepStatus.STALE} for step in plan.steps) and all(step.status in {PlanStepStatus.CLAIMED_COMPLETE, PlanStepStatus.COMPLETED, PlanStepStatus.VERIFIED} for step in plan.steps if step.status is not PlanStepStatus.STALE):
+            # Plan is complete when all non-stale steps are VERIFIED
+            # (CLAIMED_COMPLETE and legacy COMPLETED do NOT complete a plan)
+            if all(step.status in {PlanStepStatus.VERIFIED, PlanStepStatus.STALE} for step in plan.steps) and any(step.status == PlanStepStatus.VERIFIED for step in plan.steps):
                 plan.status = PlanStatus.COMPLETED; plans.update(plan); self._emit(EventType.PLAN_COMPLETED, {"plan_id": plan.id}); return plan
             # Check if any step is waiting for verification (not a failure)
             if any(s.status == PlanStepStatus.WAITING_FOR_VERIFICATION for s in plan.steps):
@@ -372,7 +373,7 @@ class PlanExecutionService:
             if schedule.ready_steps:
                 continue
             if any(s.status==PlanStepStatus.WAITING_FOR_HUMAN_APPROVAL for s in plan.steps): plan.status=PlanStatus.WAITING_FOR_HUMAN_APPROVAL; plans.update(plan); return plan
-            # Plan is complete when all non-stale steps are CLAIMED_COMPLETE or VERIFIED
-            if all(s.status in {PlanStepStatus.CLAIMED_COMPLETE, PlanStepStatus.COMPLETED, PlanStepStatus.VERIFIED, PlanStepStatus.STALE} for s in plan.steps): plan.status=PlanStatus.COMPLETED; plans.update(plan); self._emit(EventType.PLAN_COMPLETED,{"plan_id":plan.id}); return plan
+            # Plan is complete when all non-stale steps are VERIFIED
+            if all(s.status in {PlanStepStatus.VERIFIED, PlanStepStatus.STALE} for s in plan.steps) and any(s.status == PlanStepStatus.VERIFIED for s in plan.steps): plan.status=PlanStatus.COMPLETED; plans.update(plan); self._emit(EventType.PLAN_COMPLETED,{"plan_id":plan.id}); return plan
             if not schedule.ready_steps and not schedule.pending_steps:
                 plan.status=PlanStatus.FAILED; plans.update(plan); self._emit(EventType.PLAN_FAILED,{"plan_id":plan.id}); return plan

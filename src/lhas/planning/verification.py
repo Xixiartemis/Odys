@@ -14,6 +14,7 @@ from typing import Any
 
 from lhas.persistence.event_store import EventStore
 from lhas.persistence.phaseb_repos import ValidationResultRepository
+from lhas.persistence.repositories import AttemptRepository, RunRepository
 from lhas.validation import ValidationCheck, ValidationLevel, ValidationResult
 
 
@@ -57,6 +58,21 @@ class WorkflowVerifier:
         self.db = db
         self.validations = ValidationResultRepository(db)
 
+    def _resolve_attempt_id(self, step: Any) -> str | None:
+        """Resolve the real Attempt.id from step.task_id → Task → Run → Attempt."""
+        if not step.task_id:
+            return None
+        runs = RunRepository(self.db).list_for_task(step.task_id)
+        if not runs:
+            return None
+        # Prefer the most recent run
+        run = runs[-1]
+        attempts = AttemptRepository(self.db).list_for_run(run.id)
+        if not attempts:
+            return None
+        # Prefer the most recent attempt
+        return attempts[-1].id
+
     def verify(
         self,
         step: Any,
@@ -87,11 +103,27 @@ class WorkflowVerifier:
         )
 
         # --- 2. Success-criteria evaluation (V2 rule: marker in output) ----
+        # Only criteria with an explicitly supported deterministic rule may be
+        # automatically verified. Unsupported free-form criteria must NOT auto-pass.
+        SUPPORTED_CRITERIA_MARKERS = {
+            "exit_code": lambda out: "exit_code" in out,
+            "tests passed": lambda out: False,  # self-assertion — not independent
+            "no errors": lambda out: "traceback" not in out and "exception" not in out and "error:" not in out,
+        }
         if step.success_criteria:
             for criterion in step.success_criteria:
-                criterion_met = (
-                    criterion.lower() in output_text.lower() if output_text else False
-                )
+                # Check if this criterion has a supported deterministic rule
+                rule = None
+                for marker, checker in SUPPORTED_CRITERIA_MARKERS.items():
+                    if marker in criterion.lower():
+                        rule = checker
+                        break
+                if rule is not None:
+                    criterion_met = rule(output_text.lower()) if output_text else False
+                else:
+                    # Unsupported free-form criterion — fail closed
+                    # Agent text alone is never sufficient evidence
+                    criterion_met = False
                 checks.append(
                     ValidationCheck(
                         name=f"criterion:{criterion[:64]}",
@@ -99,12 +131,13 @@ class WorkflowVerifier:
                         detail=(
                             None
                             if criterion_met
-                            else f"acceptance criterion not verified in output: {criterion}"
+                            else f"acceptance criterion not independently verified: {criterion}"
                         ),
                     )
                 )
 
         # --- 3. Expected-effects verification against execution context ----
+        # BLOCKER 3: check actual VALUES, not just key presence
         if step.expected_effects:
             step_record = (
                 step.execution_context.get("steps", {}).get(step.id, {})
@@ -121,17 +154,24 @@ class WorkflowVerifier:
                 if isinstance(step_record.get("artifacts"), dict)
                 else {}
             )
-            for key, _expected_value in step.expected_effects.items():
-                effect_present = key in output_dict or key in artifacts
+            combined = {**output_dict, **artifacts}
+            for key, expected_value in step.expected_effects.items():
+                if key not in combined:
+                    effect_ok = False
+                    detail = f"expected effect '{key}' not found in step output or artifacts"
+                else:
+                    observed = combined[key]
+                    # Exact equality for scalar values
+                    effect_ok = observed == expected_value
+                    detail = (
+                        None if effect_ok
+                        else f"expected effect '{key}': expected {expected_value!r}, got {observed!r}"
+                    )
                 checks.append(
                     ValidationCheck(
                         name=f"effect:{key}",
-                        passed=effect_present,
-                        detail=(
-                            None
-                            if effect_present
-                            else f"expected effect '{key}' not found in step output or artifacts"
-                        ),
+                        passed=effect_ok,
+                        detail=detail,
                     )
                 )
 
@@ -143,8 +183,18 @@ class WorkflowVerifier:
         )
 
         # --- Persist for durability -----------------------------------------
+        # BLOCKER 2: resolve real Attempt.id, fail closed if unresolvable
+        attempt_id = self._resolve_attempt_id(step)
+        if attempt_id is None:
+            # Cannot resolve producing attempt — fail closed
+            return VerificationResult(
+                accepted=False,
+                reason="NO_PRODUCING_ATTEMPT: cannot resolve Attempt.id from step.task_id",
+                validation=None,
+            )
+
         validation = ValidationResult(
-            attempt_id=step.task_id or step.id,
+            attempt_id=attempt_id,
             passed=passed,
             level=ValidationLevel.V2_RULE,
             checks=checks,
