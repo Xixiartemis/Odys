@@ -211,6 +211,11 @@ class EventType(str, Enum):
     REPLAN_REJECTED = "REPLAN_REJECTED"
     STEP_FAILURE_PROVENANCE = "STEP_FAILURE_PROVENANCE"
 
+    # Phase 3.3 — Repair execution
+    REPAIR_STARTED = "REPAIR_STARTED"
+    REPAIR_COMPLETED = "REPAIR_COMPLETED"
+    REPAIR_STEP_INVALIDATED = "REPAIR_STEP_INVALIDATED"
+
 
 class FailureClass(str, Enum):
     """Failure taxonomy families (docs/07_FAILURE_TAXONOMY.md)."""

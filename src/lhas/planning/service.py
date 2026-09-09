@@ -224,7 +224,7 @@ class PlanExecutionService:
             goal=goal, plan=plan, signals=signals, context={**context, "capabilities": self._planner_capabilities()}
         )
         return result.accepted
-    async def execute_goal(self, goal: Goal, *, context: dict[str, Any] | None = None, experiment_id: str | None = None, approved_step_ids: set[str] | None = None, resume_plan_id: str | None = None) -> Plan:
+    async def execute_goal(self, goal: Goal, *, context: dict[str, Any] | None = None, experiment_id: str | None = None, approved_step_ids: set[str] | None = None, resume_plan_id: str | None = None, repair_step_ids: set[str] | None = None) -> Plan:
         self._emit(EventType.GOAL_CREATED, {"goal": goal.model_dump(mode="json")})
         GoalRepository(self.db).create(goal)
         plans = PlanRepository(self.db)
@@ -238,7 +238,7 @@ class PlanExecutionService:
             self._emit(EventType.PLAN_CREATED, {"plan": plan.model_dump(mode="json")})
         if plan.mode.value != "LINEAR":
             if plan.mode.value == "SIMPLE_DEPENDENCY":
-                return await self._execute_dependency_plan(goal, plan, context=context or {}, experiment_id=experiment_id, approved_step_ids=approved_step_ids or set())
+                return await self._execute_dependency_plan(goal, plan, context=context or {}, experiment_id=experiment_id, approved_step_ids=approved_step_ids or set(), repair_step_ids=repair_step_ids)
             raise NotImplementedError(f"unsupported plan mode: {plan.mode.value}")
         self._emit(EventType.PLAN_STARTED, {"plan_id": plan.id})
         task_repo = TaskRepository(self.db)
@@ -350,10 +350,105 @@ class PlanExecutionService:
         """Resume by explicitly granting one previously gated capability."""
         return await self.execute_goal(goal, context=context, experiment_id=experiment_id, approved_step_ids={step_id}, resume_plan_id=plan_id)
 
-    async def _execute_dependency_plan(self, goal, plan, *, context, experiment_id, approved_step_ids):
+    # -----------------------------------------------------------------------
+    # Phase 3.3 — Repair execution
+    # -----------------------------------------------------------------------
+
+    def _compute_repair_scope(self, plan: Plan, failed_step_id: str) -> set[str]:
+        """Compute the set of step IDs affected by a failure at failed_step_id.
+
+        Returns failed_step_id + all steps that transitively depend on it.
+        VERIFIED steps are excluded — they are never re-executed.
+        """
+        from lhas.planning.models import _TERMINAL_VERIFIED_STATUSES
+        by_id = {s.id: s for s in plan.steps}
+        # Build reverse dependency map: step_id → set of step_ids that depend on it
+        dependents: dict[str, set[str]] = {s.id: set() for s in plan.steps}
+        for step in plan.steps:
+            for dep_id in step.depends_on:
+                if dep_id in dependents:
+                    dependents[dep_id].add(step.id)
+        # BFS from failed_step_id through dependents
+        scope: set[str] = set()
+        queue = [failed_step_id]
+        while queue:
+            current = queue.pop(0)
+            if current in scope:
+                continue
+            # Never include VERIFIED steps in repair scope
+            step = by_id.get(current)
+            if step is not None and step.status in _TERMINAL_VERIFIED_STATUSES:
+                continue
+            scope.add(current)
+            for dependent_id in dependents.get(current, set()):
+                if dependent_id not in scope:
+                    queue.append(dependent_id)
+        return scope
+
+    async def repair_after_failure(self, plan_id: str, failed_step_id: str, goal: Goal, *, context: dict[str, Any] | None = None, experiment_id: str | None = None) -> Plan:
+        """Repair a plan after a step failure, preserving VERIFIED work.
+
+        Given a failed step_id:
+        1. Load the plan
+        2. Get the failure provenance from step.evidence
+        3. Compute repair scope (failed step + transitively dependent steps)
+        4. Invalidate affected steps to PENDING
+        5. Execute repair via execute_goal with repair_step_ids
+        6. Return the repaired plan
+
+        Respects repair budget: if a step has been repaired max_repair_attempts
+        times (from step.budget, default 3), stops retrying.
+        """
+        plans = PlanRepository(self.db)
+        plan = plans.get(plan_id)
+        if plan is None:
+            raise KeyError(f"plan not found: {plan_id}")
+        by_id = {s.id: s for s in plan.steps}
+        failed_step = by_id.get(failed_step_id)
+        if failed_step is None:
+            raise KeyError(f"step not found: {failed_step_id}")
+
+        # Compute repair scope
+        repair_scope = self._compute_repair_scope(plan, failed_step_id)
+
+        # Check repair budget
+        repair_count = failed_step.evidence.get("repair_attempt_count", 0)
+        max_repair_attempts = failed_step.budget.get("max_repair_attempts", 3)
+        if repair_count >= max_repair_attempts:
+            self._emit(EventType.REPAIR_COMPLETED, {
+                "plan_id": plan.id,
+                "repair_step_ids": sorted(repair_scope),
+                "outcome": "BUDGET_EXHAUSTED",
+                "repair_attempt_count": repair_count,
+            })
+            return plan
+
+        # Increment repair attempt count and chain provenance for each affected step
+        for step in plan.steps:
+            if step.id in repair_scope:
+                step.evidence["repair_attempt_count"] = step.evidence.get("repair_attempt_count", 0) + 1
+                step.evidence["repair_parent_step_id"] = failed_step_id
+        plans.update(plan)
+
+        # Execute repair
+        return await self.execute_goal(
+            goal, context=context, experiment_id=experiment_id,
+            resume_plan_id=plan_id, repair_step_ids=repair_scope,
+        )
+
+    async def _execute_dependency_plan(self, goal, plan, *, context, experiment_id, approved_step_ids, repair_step_ids=None):
         plans=PlanRepository(self.db); tasks=TaskRepository(self.db); scheduler=TaskGraphScheduler()
         events=EventStore(self.db)
         execution_context={"runtime":{**context,"goal_id":goal.id},"steps":{}}
+        # Phase 3.3 — Repair mode: invalidate repair targets to PENDING
+        if repair_step_ids:
+            self._emit(EventType.REPAIR_STARTED, {"plan_id": plan.id, "repair_step_ids": sorted(repair_step_ids)})
+            _TERMINAL_REPAIRABLE = {PlanStepStatus.FAILED, PlanStepStatus.CLASSIFIED_FAILURE, PlanStepStatus.BLOCKED, PlanStepStatus.STALE, PlanStepStatus.PRECONDITION_FAILED}
+            for s in plan.steps:
+                if s.id in repair_step_ids and s.status in _TERMINAL_REPAIRABLE:
+                    transition_step(s, PlanStepStatus.PENDING, "repair_invalidation", events, plan_id=plan.id)
+                    self._emit(EventType.REPAIR_STEP_INVALIDATED, {"plan_id": plan.id, "step_id": s.id})
+            plans.update(plan)
         for s in plan.steps:
             if s.id in approved_step_ids and s.status == PlanStepStatus.WAITING_FOR_HUMAN_APPROVAL:
                 transition_step(s, PlanStepStatus.PENDING, "human_approval_granted", events, plan_id=plan.id)
@@ -480,6 +575,11 @@ class PlanExecutionService:
                 continue
             if any(s.status==PlanStepStatus.WAITING_FOR_HUMAN_APPROVAL for s in plan.steps): plan.status=PlanStatus.WAITING_FOR_HUMAN_APPROVAL; plans.update(plan); return plan
             # Plan is complete when all non-stale steps are VERIFIED
-            if all(s.status in {PlanStepStatus.VERIFIED, PlanStepStatus.STALE} for s in plan.steps) and any(s.status == PlanStepStatus.VERIFIED for s in plan.steps): plan.status=PlanStatus.COMPLETED; plans.update(plan); self._emit(EventType.PLAN_COMPLETED,{"plan_id":plan.id}); return plan
+            if all(s.status in {PlanStepStatus.VERIFIED, PlanStepStatus.STALE} for s in plan.steps) and any(s.status == PlanStepStatus.VERIFIED for s in plan.steps):
+                plan.status=PlanStatus.COMPLETED; plans.update(plan); self._emit(EventType.PLAN_COMPLETED,{"plan_id":plan.id})
+                if repair_step_ids: self._emit(EventType.REPAIR_COMPLETED, {"plan_id": plan.id, "repair_step_ids": sorted(repair_step_ids), "outcome": "SUCCESS"})
+                return plan
             if not schedule.ready_steps and not schedule.pending_steps:
-                plan.status=PlanStatus.FAILED; plans.update(plan); self._emit(EventType.PLAN_FAILED,{"plan_id":plan.id}); return plan
+                plan.status=PlanStatus.FAILED; plans.update(plan); self._emit(EventType.PLAN_FAILED,{"plan_id":plan.id})
+                if repair_step_ids: self._emit(EventType.REPAIR_COMPLETED, {"plan_id": plan.id, "repair_step_ids": sorted(repair_step_ids), "outcome": "FAILED"})
+                return plan
