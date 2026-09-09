@@ -292,18 +292,27 @@ def evaluate_step_eligibility(
     execution_context: dict[str, Any] | None = None,
     event_store: Any | None = None,
     plan_id: str | None = None,
+    evaluation_phase: str = "DISPATCH",
 ) -> tuple[bool, str]:
     """Single authoritative eligibility decision for a workflow step.
 
     This is the ONLY place where step eligibility is determined.
     All callers (scheduler, executor, service) must use this function.
 
+    Args:
+        evaluation_phase: "SCHEDULING" or "DISPATCH".
+            SCHEDULING: runtime-only preconditions (key starts with "runtime.")
+            are deferred — the scheduler has no runtime context, so these
+            preconditions cannot be evaluated yet. They are assumed to pass
+            at scheduling time and re-evaluated at dispatch time.
+            DISPATCH: all preconditions are evaluated with full context.
+
     Returns (eligible: bool, reason: str).
     """
     execution_context = execution_context or {}
 
     # Already running or terminal — not eligible
-    if step.status in {PlanStepStatus.RUNNING, PlanStepStatus.READY, PlanStepStatus.CLAIMED_COMPLETE}:
+    if step.status in {PlanStepStatus.RUNNING, PlanStepStatus.READY, PlanStepStatus.CLAIMED_COMPLETE, PlanStepStatus.WAITING_FOR_VERIFICATION}:
         return False, f"already_{step.status.value.lower()}"
     if step.status in _TERMINAL_VERIFIED_STATUSES:
         return False, "already_completed"
@@ -321,7 +330,22 @@ def evaluate_step_eligibility(
             return False, f"dependency_{dep_id}_not_verified"
 
     # INVARIANT 2 — PRECONDITION AUTHORITY: evaluate against current state
-    pc_passed, _pc_ctx = evaluate_step_preconditions(step, execution_context)
+    # During SCHEDULING: defer runtime-only preconditions (key starts with "runtime.")
+    # During DISPATCH: evaluate all preconditions with full context
+    if evaluation_phase == "SCHEDULING":
+        # Filter out runtime-only preconditions during scheduling
+        schedulable_preconditions = [
+            pc for pc in step.preconditions
+            if not pc.key.startswith("runtime.")
+        ]
+        if schedulable_preconditions:
+            from lhas.planning.models import StepPrecondition
+            temp_step = step.model_copy(update={"preconditions": schedulable_preconditions})
+            pc_passed, _pc_ctx = evaluate_step_preconditions(temp_step, execution_context)
+        else:
+            pc_passed, _pc_ctx = True, {"preconditions": [], "all_passed": True, "deferred": [pc.key for pc in step.preconditions if pc.key.startswith("runtime.")]}
+    else:
+        pc_passed, _pc_ctx = evaluate_step_preconditions(step, execution_context)
     if not pc_passed:
         if event_store is not None and plan_id is not None:
             from lhas.domain.enums import EventType

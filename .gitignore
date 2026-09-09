@@ -34,3 +34,4 @@ Thumbs.db
 .env.*
 !.env.example
 .pytest_tmp
+.pytest-tmp/

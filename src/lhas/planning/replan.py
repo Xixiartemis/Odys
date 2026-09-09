@@ -104,7 +104,8 @@ class MacroReplanService:
                 id_remap[step.id] = completed.id
                 step.id = completed.id
                 # BLOCKER E: route VERIFIED preservation through transition_step()
-                step.status = PlanStepStatus.VERIFIED
+                # Use transition_step() so the PENDING→VERIFIED transition is audited.
+                transition_step(step, PlanStepStatus.VERIFIED, "replan_preserved_verified", self.events, plan_id=plan.id)
                 step.output = completed.output
                 step.task_id = completed.task_id
                 step.execution_context = completed.execution_context

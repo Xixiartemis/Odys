@@ -105,6 +105,14 @@ class PlanExecutionService:
             return _TaskGraphAgentExecutor(self.agent_executor_factory(step),plan,step,self.db)
         return _ToolExecutor(self.registry,step,self.db,context,self.tool_contract)
     def _emit(self, typ, payload): EventStore(self.db).append(typ, payload=payload)
+    @property
+    def _evidence_provenance(self) -> str:
+        """Evidence provenance for execution results produced by this service.
+
+        TOOL_CONTRACT_EVIDENCE: execution went through ToolContract (trusted).
+        AGENT_CLAIM: execution was by agent executor (untrusted for verification).
+        """
+        return "AGENT_CLAIM" if self.agent_executor_factory is not None else "TOOL_CONTRACT_EVIDENCE"
     def _planner_capabilities(self):
         """Return tool specs for plan creation.
 
@@ -182,9 +190,22 @@ class PlanExecutionService:
             plan = plans.get(plan.id) or plan
             restart_authoritative_schedule = False
             for step in list(plan.steps):
-                if step.status in {PlanStepStatus.CLAIMED_COMPLETE, PlanStepStatus.COMPLETED, PlanStepStatus.VERIFIED, PlanStepStatus.STALE, PlanStepStatus.BLOCKED, PlanStepStatus.CLASSIFIED_FAILURE, PlanStepStatus.FAILED, PlanStepStatus.PRECONDITION_FAILED}:
-                    if step.status in {PlanStepStatus.CLAIMED_COMPLETE, PlanStepStatus.COMPLETED, PlanStepStatus.VERIFIED}:
+                if step.status in {PlanStepStatus.COMPLETED, PlanStepStatus.VERIFIED, PlanStepStatus.STALE, PlanStepStatus.BLOCKED, PlanStepStatus.CLASSIFIED_FAILURE, PlanStepStatus.FAILED, PlanStepStatus.PRECONDITION_FAILED, PlanStepStatus.WAITING_FOR_VERIFICATION}:
+                    if step.status in {PlanStepStatus.COMPLETED, PlanStepStatus.VERIFIED}:
                         execution_context["steps"][step.id] = step.execution_context.get("steps", {}).get(step.id, {"capability": step.capability, "output": step.output, "artifacts": {}, "usage": {}})
+                    continue
+                # CLAIMED_COMPLETE on reload: route through verifier seam
+                if step.status == PlanStepStatus.CLAIMED_COMPLETE:
+                    execution_context["steps"][step.id] = step.execution_context.get("steps", {}).get(step.id, {"capability": step.capability, "output": step.output, "artifacts": {}, "usage": {}})
+                    if self.workflow_verifier is not None:
+                        vresult = self.workflow_verifier.verify(step, plan, events)
+                        if vresult.accepted:
+                            transition_step(step, PlanStepStatus.VERIFIED, "deferred_verification_accepted", events, plan_id=plan.id)
+                        else:
+                            transition_step(step, PlanStepStatus.CLASSIFIED_FAILURE, "deferred_verification_rejected", events, plan_id=plan.id)
+                    else:
+                        transition_step(step, PlanStepStatus.WAITING_FOR_VERIFICATION, "deferred_no_verifier", events, plan_id=plan.id)
+                    plans.update(plan)
                     continue
                 # BLOCKER B: dispatch-time eligibility check (dependency + precondition)
                 by_id = {s.id: s for s in plan.steps}
@@ -233,7 +254,7 @@ class PlanExecutionService:
                     except json.JSONDecodeError: pass
                 attempts = AttemptRepository(self.db).list_for_run(run.id)
                 raw = json.loads(attempts[-1].executor_result or "{}") if attempts and attempts[-1].executor_result else {}
-                record = {"capability": step.capability, "output": step.output, "artifacts": raw.get("artifacts", {}), "usage": raw.get("usage", {})}
+                record = {"capability": step.capability, "output": step.output, "artifacts": raw.get("artifacts", {}), "usage": raw.get("usage", {}), "provenance": self._evidence_provenance}
                 execution_context["steps"][step.id] = record
                 execution_context[step.capability] = record
                 step.execution_context = dict(execution_context)
@@ -257,8 +278,9 @@ class PlanExecutionService:
             if restart_authoritative_schedule:
                 continue
             plan = plans.get(plan.id) or plan
-            # Plan is complete when all non-stale steps are CLAIMED_COMPLETE or VERIFIED
-            if all(step.status in {PlanStepStatus.CLAIMED_COMPLETE, PlanStepStatus.COMPLETED, PlanStepStatus.VERIFIED, PlanStepStatus.STALE} for step in plan.steps) and all(step.status in {PlanStepStatus.CLAIMED_COMPLETE, PlanStepStatus.COMPLETED, PlanStepStatus.VERIFIED} for step in plan.steps if step.status is not PlanStepStatus.STALE):
+            # Plan is complete when all non-stale steps are VERIFIED
+            # (CLAIMED_COMPLETE and legacy COMPLETED do NOT complete a plan)
+            if all(step.status in {PlanStepStatus.VERIFIED, PlanStepStatus.STALE} for step in plan.steps) and any(step.status == PlanStepStatus.VERIFIED for step in plan.steps):
                 plan.status = PlanStatus.COMPLETED; plans.update(plan); self._emit(EventType.PLAN_COMPLETED, {"plan_id": plan.id}); return plan
             # Check if any step is waiting for verification (not a failure)
             if any(s.status == PlanStepStatus.WAITING_FOR_VERIFICATION for s in plan.steps):
@@ -277,7 +299,18 @@ class PlanExecutionService:
             if s.id in approved_step_ids and s.status == PlanStepStatus.WAITING_FOR_HUMAN_APPROVAL:
                 transition_step(s, PlanStepStatus.PENDING, "human_approval_granted", events, plan_id=plan.id)
             if s.status in {PlanStepStatus.COMPLETED, PlanStepStatus.VERIFIED}:
-                execution_context["steps"][s.id]=s.execution_context.get("steps",{}).get(s.id,{"capability":s.capability,"output":s.output,"artifacts":{},"usage":{}})
+                execution_context["steps"][s.id]=s.execution_context.get("steps",{}).get(s.id,{"capability":s.capability,"output":s.output,"artifacts":{}, "usage":{}})
+            # CLAIMED_COMPLETE on reload: route through verifier seam
+            if s.status == PlanStepStatus.CLAIMED_COMPLETE:
+                execution_context["steps"][s.id]=s.execution_context.get("steps",{}).get(s.id,{"capability":s.capability,"output":s.output,"artifacts":{}, "usage":{}})
+                if self.workflow_verifier is not None:
+                    vresult = self.workflow_verifier.verify(s, plan, events)
+                    if vresult.accepted:
+                        transition_step(s, PlanStepStatus.VERIFIED, "deferred_verification_accepted", events, plan_id=plan.id)
+                    else:
+                        transition_step(s, PlanStepStatus.CLASSIFIED_FAILURE, "deferred_verification_rejected", events, plan_id=plan.id)
+                else:
+                    transition_step(s, PlanStepStatus.WAITING_FOR_VERIFICATION, "deferred_no_verifier", events, plan_id=plan.id)
         plans.update(plan)
         while True:
             plan = plans.get(plan.id) or plan
@@ -335,7 +368,7 @@ class PlanExecutionService:
                     try: step.output=json.loads(step.output)
                     except json.JSONDecodeError: pass
                 attempts=AttemptRepository(self.db).list_for_run(run.id); raw=json.loads(attempts[-1].executor_result or "{}") if attempts and attempts[-1].executor_result else {}
-                rec={"capability":step.capability,"output":step.output,"artifacts":raw.get("artifacts",{}),"usage":raw.get("usage",{})}; execution_context["steps"][step.id]=rec
+                rec={"capability":step.capability,"output":step.output,"artifacts":raw.get("artifacts",{}),"usage":raw.get("usage",{}),"provenance":self._evidence_provenance}; execution_context["steps"][step.id]=rec
                 persisted_context=build_step_dependency_context(plan,step,execution_context); persisted_context["steps"][step.id]=rec; step.execution_context=persisted_context
 
                 # P3.1: run success → CLAIMED_COMPLETE
@@ -372,7 +405,7 @@ class PlanExecutionService:
             if schedule.ready_steps:
                 continue
             if any(s.status==PlanStepStatus.WAITING_FOR_HUMAN_APPROVAL for s in plan.steps): plan.status=PlanStatus.WAITING_FOR_HUMAN_APPROVAL; plans.update(plan); return plan
-            # Plan is complete when all non-stale steps are CLAIMED_COMPLETE or VERIFIED
-            if all(s.status in {PlanStepStatus.CLAIMED_COMPLETE, PlanStepStatus.COMPLETED, PlanStepStatus.VERIFIED, PlanStepStatus.STALE} for s in plan.steps): plan.status=PlanStatus.COMPLETED; plans.update(plan); self._emit(EventType.PLAN_COMPLETED,{"plan_id":plan.id}); return plan
+            # Plan is complete when all non-stale steps are VERIFIED
+            if all(s.status in {PlanStepStatus.VERIFIED, PlanStepStatus.STALE} for s in plan.steps) and any(s.status == PlanStepStatus.VERIFIED for s in plan.steps): plan.status=PlanStatus.COMPLETED; plans.update(plan); self._emit(EventType.PLAN_COMPLETED,{"plan_id":plan.id}); return plan
             if not schedule.ready_steps and not schedule.pending_steps:
                 plan.status=PlanStatus.FAILED; plans.update(plan); self._emit(EventType.PLAN_FAILED,{"plan_id":plan.id}); return plan
