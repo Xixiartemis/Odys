@@ -596,8 +596,8 @@ def compute_repair_scope(
         # Execution failures (timeout, crash, network) are retryable
         return RepairScope.LOCAL, {failed_step.id}
 
-    # Unknown failure class with dependents → conservative AFFECTED_SUBGRAPH
-    return RepairScope.AFFECTED_SUBGRAPH, {failed_step.id} | dependents
+    # Unknown failure with dependents → LOCAL (retry first, escalate if repeated)
+    return RepairScope.LOCAL, {failed_step.id}
 
 
 def invalidate_affected_subgraph(

@@ -513,7 +513,9 @@ class PlanExecutionService:
                     # P3.3: compute repair scope for the failed step
                     scope, affected_ids = compute_repair_scope(step, plan)
                     if scope == RepairScope.AFFECTED_SUBGRAPH:
-                        invalidated = invalidate_affected_subgraph(plan, affected_ids, events)
+                        # Exclude the failed step itself — it's already FAILED
+                        dependent_ids = affected_ids - {step.id}
+                        invalidated = invalidate_affected_subgraph(plan, dependent_ids, events)
                         plan.invalidated_step_ids.extend(sid for sid in invalidated if sid not in plan.invalidated_step_ids)
                         self._emit(EventType.PLAN_STEP_BLOCKED, {"plan_id":plan.id,"step_id":step.id,"repair_scope":"AFFECTED_SUBGRAPH","invalidated_step_ids":sorted(invalidated)})
                         plans.update(plan); continue

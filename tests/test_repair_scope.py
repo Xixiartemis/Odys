@@ -270,15 +270,15 @@ def test_invalidate_already_stale(db):
 # ---------------------------------------------------------------------------
 
 def test_unknown_failure_class_conservative():
-    """Unknown failure class with dependents → conservative AFFECTED_SUBGRAPH."""
+    """Unknown failure with dependents → LOCAL (retry first, escalate if repeated)."""
     plan = _make_plan([
         ("a", [], PlanStepStatus.FAILED),
         ("b", ["a"], PlanStepStatus.PENDING),
     ])
     step_a = plan.steps[0]
     scope, affected = compute_repair_scope(step_a, plan)  # no failure_class, no error_type
-    assert scope == RepairScope.AFFECTED_SUBGRAPH
-    assert affected == {"a", "b"}
+    assert scope == RepairScope.LOCAL
+    assert affected == {"a"}
 
 
 # ---------------------------------------------------------------------------
