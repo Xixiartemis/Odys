@@ -303,7 +303,7 @@ def evaluate_step_eligibility(
     execution_context = execution_context or {}
 
     # Already running or terminal — not eligible
-    if step.status in {PlanStepStatus.RUNNING, PlanStepStatus.READY, PlanStepStatus.CLAIMED_COMPLETE}:
+    if step.status in {PlanStepStatus.RUNNING, PlanStepStatus.READY, PlanStepStatus.CLAIMED_COMPLETE, PlanStepStatus.WAITING_FOR_VERIFICATION}:
         return False, f"already_{step.status.value.lower()}"
     if step.status in _TERMINAL_VERIFIED_STATUSES:
         return False, "already_completed"

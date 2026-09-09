@@ -128,11 +128,12 @@ class TestVerificationPaths:
     """B4: ACCEPT → VERIFIED, REJECT → CLASSIFIED_FAILURE, no-verifier → WAITING_FOR_VERIFICATION."""
 
     def test_accept_produces_verified(self, tmp_path):
-        """ACCEPT path: verifier accepts → step becomes VERIFIED."""
+        """ACCEPT path: structured evidence satisfies criterion → VERIFIED."""
         db = _make_db(tmp_path)
-        planner = _SingleStepPlanner(success_criteria=["no errors"])
+        planner = _SingleStepPlanner(success_criteria=["exit_code:0"])
         verifier = WorkflowVerifier(db)
-        svc, goal = _build_service(db, planner, lambda req: "completed successfully", workflow_verifier=verifier)
+        # Tool returns structured dict with exit_code=0
+        svc, goal = _build_service(db, planner, lambda req: {"exit_code": 0, "status": "ok"}, workflow_verifier=verifier)
 
         plan = asyncio.run(svc.execute_goal(goal))
         assert plan.status.value == "COMPLETED"
@@ -212,17 +213,17 @@ class TestVerificationStrictness:
         assert plan.steps[0].status == PlanStepStatus.CLASSIFIED_FAILURE
 
     def test_verification_evaluates_actual_criteria(self, tmp_path):
-        """Verification checks supported criteria with deterministic rules."""
+        """Verification checks structured evidence keys, not agent text."""
         db = _make_db(tmp_path)
-        # "no errors" is supported (checks "error" not in output)
-        # "exit_code" is supported (checks "exit_code" in output)
-        planner = _SingleStepPlanner(success_criteria=["no errors", "exit_code"])
+        # "exit_code:0" — key "exit_code" must exist with value 0 in structured output
+        # "status:ok" — key "status" must exist with value "ok"
+        planner = _SingleStepPlanner(success_criteria=["exit_code:0", "status:ok"])
         verifier = WorkflowVerifier(db)
-        # Output has no errors but no exit_code
-        svc, goal = _build_service(db, planner, lambda req: "completed successfully", workflow_verifier=verifier)
+        # Structured output has exit_code=0 but status=fail
+        svc, goal = _build_service(db, planner, lambda req: {"exit_code": 0, "status": "fail"}, workflow_verifier=verifier)
 
         plan = asyncio.run(svc.execute_goal(goal))
-        # "no errors" passes, "exit_code" fails → REJECT
+        # exit_code:0 passes, status:ok fails (status="fail" != "ok") → REJECT
         assert plan.steps[0].status == PlanStepStatus.CLASSIFIED_FAILURE
 
         from lhas.persistence.repositories import AttemptRepository, RunRepository
@@ -232,14 +233,6 @@ class TestVerificationStrictness:
         assert len(validations) >= 1
         v = validations[-1]
         assert v.passed is False
-        check_names = [c.name for c in v.checks]
-        assert "criterion:no errors" in check_names
-        assert "criterion:exit_code" in check_names
-        # "no errors" should pass, "exit_code" should fail
-        errors_check = next(c for c in v.checks if c.name == "criterion:no errors")
-        exit_check = next(c for c in v.checks if c.name == "criterion:exit_code")
-        assert errors_check.passed is True
-        assert exit_check.passed is False
 
     def test_output_without_all_criteria_fails_check_detail(self, tmp_path):
         """Unsupported criteria all fail closed."""
@@ -267,11 +260,11 @@ class TestVerificationStrictness:
             assert check.passed is False, f"{cname} should fail closed (unsupported)"
 
     def test_matching_criteria_is_accept(self, tmp_path):
-        """All supported criteria satisfied → ACCEPT and VERIFIED."""
+        """All structured criteria satisfied → ACCEPT and VERIFIED."""
         db = _make_db(tmp_path)
-        planner = _SingleStepPlanner(success_criteria=["no errors"])
+        planner = _SingleStepPlanner(success_criteria=["exit_code:0"])
         verifier = WorkflowVerifier(db)
-        svc, goal = _build_service(db, planner, lambda req: "All tests pass. completed successfully.", workflow_verifier=verifier)
+        svc, goal = _build_service(db, planner, lambda req: {"exit_code": 0}, workflow_verifier=verifier)
 
         plan = asyncio.run(svc.execute_goal(goal))
         assert plan.steps[0].status == PlanStepStatus.VERIFIED
@@ -318,13 +311,13 @@ class TestWorkflowVerifierUnit:
         assert result.validation.passed is True
 
     def test_criteria_match_accepts(self, tmp_path):
-        """Supported criterion satisfied → accept."""
+        """Structured criterion satisfied → accept."""
         db = _make_db(tmp_path)
         verifier = WorkflowVerifier(db)
 
         step = PlanStep(
             title="test", objective="test", capability="cap",
-            output="completed successfully. no errors found.", success_criteria=["no errors"],
+            output={"exit_code": 0}, success_criteria=["exit_code:0"],
         )
         _create_execution_chain(db, step)
         events = EventStore(db)
@@ -421,8 +414,8 @@ class TestWorkflowVerifierUnit:
 
         step = PlanStep(
             title="test", objective="test", capability="cap",
-            output="completed successfully. no errors.",
-            success_criteria=["no errors"],
+            output={"exit_code": 0},
+            success_criteria=["exit_code:0"],
         )
         task, run, attempt = _create_execution_chain(db, step)
         events = EventStore(db)

@@ -47,11 +47,11 @@ class WorkflowVerifier:
     result survives persistence/reload.
 
     Verification criteria (V2 rule level):
-    1. Structural — step output must be non-empty.
-    2. Success criteria — each criterion in ``step.success_criteria`` must
-       appear in the step output (substring / marker match).
-    3. Expected effects — if ``step.expected_effects`` is declared, each key
-       must be present in the step's execution context output or artifacts.
+    1. Structural — step must have produced output.
+    2. Success criteria — each criterion is checked against STRUCTURED evidence
+       only (artifacts, execution result keys). Agent textual output alone is
+       NEVER sufficient. Unsupported criteria fail closed.
+    3. Expected effects — exact value match against structured execution context.
     """
 
     def __init__(self, db: Any):
@@ -102,66 +102,72 @@ class WorkflowVerifier:
             )
         )
 
-        # --- 2. Success-criteria evaluation (V2 rule: marker in output) ----
-        # Only criteria with an explicitly supported deterministic rule may be
-        # automatically verified. Unsupported free-form criteria must NOT auto-pass.
-        SUPPORTED_CRITERIA_MARKERS = {
-            "exit_code": lambda out: "exit_code" in out,
-            "tests passed": lambda out: False,  # self-assertion — not independent
-            "no errors": lambda out: "traceback" not in out and "exception" not in out and "error:" not in out,
-        }
+        # --- 2. Success-criteria verification against STRUCTURED evidence ----
+        # Agent textual output alone is NEVER sufficient evidence.
+        # Only structured artifacts / execution result keys may verify criteria.
+        # Build structured evidence set from execution context AND step.output
+        step_record = (
+            step.execution_context.get("steps", {}).get(step.id, {})
+            if step.execution_context
+            else {}
+        )
+        structured_output = (
+            step_record.get("output", {})
+            if isinstance(step_record.get("output"), dict)
+            else {}
+        )
+        # Also consider step.output if it's a dict (direct structured output)
+        if not structured_output and isinstance(step.output, dict):
+            structured_output = step.output
+        structured_artifacts = (
+            step_record.get("artifacts", {})
+            if isinstance(step_record.get("artifacts"), dict)
+            else {}
+        )
+        structured_evidence_keys = set(structured_output.keys()) | set(structured_artifacts.keys())
+        structured_evidence = {**structured_output, **structured_artifacts}
+
         if step.success_criteria:
             for criterion in step.success_criteria:
-                # Check if this criterion has a supported deterministic rule
-                rule = None
-                for marker, checker in SUPPORTED_CRITERIA_MARKERS.items():
-                    if marker in criterion.lower():
-                        rule = checker
+                criterion_lower = criterion.lower()
+                criterion_met = False
+                detail = f"criterion not independently verified: {criterion}"
+
+                # Check against structured evidence keys only
+                # Match criterion name to a key in structured evidence
+                for ekey in structured_evidence_keys:
+                    if ekey.lower() == criterion_lower or criterion_lower.startswith(ekey.lower()):
+                        # Key found — check value if criterion implies a value
+                        if ":" in criterion:
+                            # criterion like "exit_code:0" — check value
+                            _, expected_val = criterion.split(":", 1)
+                            observed = structured_evidence.get(ekey)
+                            if str(observed) == expected_val:
+                                criterion_met = True
+                                detail = None
+                        else:
+                            # Key exists in structured evidence — accept
+                            criterion_met = True
+                            detail = None
                         break
-                if rule is not None:
-                    criterion_met = rule(output_text.lower()) if output_text else False
-                else:
-                    # Unsupported free-form criterion — fail closed
-                    # Agent text alone is never sufficient evidence
-                    criterion_met = False
+
                 checks.append(
                     ValidationCheck(
                         name=f"criterion:{criterion[:64]}",
                         passed=criterion_met,
-                        detail=(
-                            None
-                            if criterion_met
-                            else f"acceptance criterion not independently verified: {criterion}"
-                        ),
+                        detail=detail,
                     )
                 )
 
         # --- 3. Expected-effects verification against execution context ----
-        # BLOCKER 3: check actual VALUES, not just key presence
+        # Uses structured_evidence already built in section 2
         if step.expected_effects:
-            step_record = (
-                step.execution_context.get("steps", {}).get(step.id, {})
-                if step.execution_context
-                else {}
-            )
-            output_dict = (
-                step_record.get("output", {})
-                if isinstance(step_record.get("output"), dict)
-                else {}
-            )
-            artifacts = (
-                step_record.get("artifacts", {})
-                if isinstance(step_record.get("artifacts"), dict)
-                else {}
-            )
-            combined = {**output_dict, **artifacts}
             for key, expected_value in step.expected_effects.items():
-                if key not in combined:
+                if key not in structured_evidence:
                     effect_ok = False
-                    detail = f"expected effect '{key}' not found in step output or artifacts"
+                    detail = f"expected effect '{key}' not found in structured evidence"
                 else:
-                    observed = combined[key]
-                    # Exact equality for scalar values
+                    observed = structured_evidence[key]
                     effect_ok = observed == expected_value
                     detail = (
                         None if effect_ok

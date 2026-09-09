@@ -182,9 +182,22 @@ class PlanExecutionService:
             plan = plans.get(plan.id) or plan
             restart_authoritative_schedule = False
             for step in list(plan.steps):
-                if step.status in {PlanStepStatus.CLAIMED_COMPLETE, PlanStepStatus.COMPLETED, PlanStepStatus.VERIFIED, PlanStepStatus.STALE, PlanStepStatus.BLOCKED, PlanStepStatus.CLASSIFIED_FAILURE, PlanStepStatus.FAILED, PlanStepStatus.PRECONDITION_FAILED}:
-                    if step.status in {PlanStepStatus.CLAIMED_COMPLETE, PlanStepStatus.COMPLETED, PlanStepStatus.VERIFIED}:
+                if step.status in {PlanStepStatus.COMPLETED, PlanStepStatus.VERIFIED, PlanStepStatus.STALE, PlanStepStatus.BLOCKED, PlanStepStatus.CLASSIFIED_FAILURE, PlanStepStatus.FAILED, PlanStepStatus.PRECONDITION_FAILED, PlanStepStatus.WAITING_FOR_VERIFICATION}:
+                    if step.status in {PlanStepStatus.COMPLETED, PlanStepStatus.VERIFIED}:
                         execution_context["steps"][step.id] = step.execution_context.get("steps", {}).get(step.id, {"capability": step.capability, "output": step.output, "artifacts": {}, "usage": {}})
+                    continue
+                # CLAIMED_COMPLETE on reload: route through verifier seam
+                if step.status == PlanStepStatus.CLAIMED_COMPLETE:
+                    execution_context["steps"][step.id] = step.execution_context.get("steps", {}).get(step.id, {"capability": step.capability, "output": step.output, "artifacts": {}, "usage": {}})
+                    if self.workflow_verifier is not None:
+                        vresult = self.workflow_verifier.verify(step, plan, events)
+                        if vresult.accepted:
+                            transition_step(step, PlanStepStatus.VERIFIED, "deferred_verification_accepted", events, plan_id=plan.id)
+                        else:
+                            transition_step(step, PlanStepStatus.CLASSIFIED_FAILURE, "deferred_verification_rejected", events, plan_id=plan.id)
+                    else:
+                        transition_step(step, PlanStepStatus.WAITING_FOR_VERIFICATION, "deferred_no_verifier", events, plan_id=plan.id)
+                    plans.update(plan)
                     continue
                 # BLOCKER B: dispatch-time eligibility check (dependency + precondition)
                 by_id = {s.id: s for s in plan.steps}
@@ -278,7 +291,18 @@ class PlanExecutionService:
             if s.id in approved_step_ids and s.status == PlanStepStatus.WAITING_FOR_HUMAN_APPROVAL:
                 transition_step(s, PlanStepStatus.PENDING, "human_approval_granted", events, plan_id=plan.id)
             if s.status in {PlanStepStatus.COMPLETED, PlanStepStatus.VERIFIED}:
-                execution_context["steps"][s.id]=s.execution_context.get("steps",{}).get(s.id,{"capability":s.capability,"output":s.output,"artifacts":{},"usage":{}})
+                execution_context["steps"][s.id]=s.execution_context.get("steps",{}).get(s.id,{"capability":s.capability,"output":s.output,"artifacts":{}, "usage":{}})
+            # CLAIMED_COMPLETE on reload: route through verifier seam
+            if s.status == PlanStepStatus.CLAIMED_COMPLETE:
+                execution_context["steps"][s.id]=s.execution_context.get("steps",{}).get(s.id,{"capability":s.capability,"output":s.output,"artifacts":{}, "usage":{}})
+                if self.workflow_verifier is not None:
+                    vresult = self.workflow_verifier.verify(s, plan, events)
+                    if vresult.accepted:
+                        transition_step(s, PlanStepStatus.VERIFIED, "deferred_verification_accepted", events, plan_id=plan.id)
+                    else:
+                        transition_step(s, PlanStepStatus.CLASSIFIED_FAILURE, "deferred_verification_rejected", events, plan_id=plan.id)
+                else:
+                    transition_step(s, PlanStepStatus.WAITING_FOR_VERIFICATION, "deferred_no_verifier", events, plan_id=plan.id)
         plans.update(plan)
         while True:
             plan = plans.get(plan.id) or plan

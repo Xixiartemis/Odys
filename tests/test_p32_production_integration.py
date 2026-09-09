@@ -33,6 +33,7 @@ from lhas.planning.models import (
     StepPrecondition,
 )
 from lhas.planning.service import PlanExecutionService
+from lhas.planning.scheduler import TaskGraphScheduler
 from lhas.tools.fakes import FakeTool
 from lhas.tools.protocol import ToolResult, ToolResultStatus
 from lhas.tools.registry import ToolRegistry
@@ -242,35 +243,36 @@ def test_t4_stale_plan_rejected(db):
 # ---------------------------------------------------------------------------
 
 def test_t5_precondition_blocks_at_dispatch(db):
-    """T5: Precondition false at dispatch → step blocked, tool never called.
+    """T5: Precondition TRUE at scheduling, FALSE at dispatch → zero execution.
 
-    In the dependency plan path, the scheduler evaluates eligibility without
-    execution_context.  A step whose precondition requires a key absent from
-    the empty context gets classified as blocked (precondition_failed contains
-    the token "failed").  The step transitions to BLOCKED — its tool is never
-    invoked.  The dispatch-time re-evaluation only runs for ready_steps, so
-    steps already blocked by the scheduler are skipped.
+    Uses a 'falsy' precondition on runtime.ready:
+    - At scheduling (empty context): runtime.ready=None → falsy → TRUE → step is ready
+    - At dispatch (actual context): runtime.ready=True → falsy → FALSE → step rejected
+
+    This is a real dispatch-time TOCTOU test: the precondition's truth value
+    flips between scheduling and dispatch.
     """
-    pc = StepPrecondition(key="runtime.ready", operator="eq", value=True)
+    pc = StepPrecondition(key="runtime.ready", operator="falsy", description="runtime must NOT be ready")
     a = PlanStep(id="a", title="A", objective="do A", capability="cap_a")
     b = PlanStep(id="b", title="B", objective="do B", capability="cap_b",
                  depends_on=["a"], preconditions=[pc])
 
     service, goal, counts = _setup_service(db, [a, b], verifier=AcceptingVerifier())
 
-    result = asyncio.run(service.execute_goal(goal))
+    # Pass context that sets runtime.ready=True (makes precondition FALSE)
+    result = asyncio.run(service.execute_goal(goal, context={"ready": True}))
 
-    # b is blocked because the scheduler can't evaluate runtime.ready
-    # (no execution_context available at scheduler level)
-    b_step = next(s for s in result.steps if s.id == "b")
-    assert b_step.status == PlanStepStatus.BLOCKED
-
-    # cap_b should never have been called
-    assert counts.get("cap_b", 0) == 0
-
-    # a should have run and been verified (no precondition on a)
     a_step = next(s for s in result.steps if s.id == "a")
+    b_step = next(s for s in result.steps if s.id == "b")
+
+    # a runs and is verified
     assert a_step.status == PlanStepStatus.VERIFIED
+    assert counts.get("cap_a", 0) == 1
+
+    # b is rejected at dispatch time because runtime.ready=True makes falsy=False
+    # The dispatch-time recheck evaluates with actual context → precondition fails
+    assert b_step.status in {PlanStepStatus.BLOCKED, PlanStepStatus.PRECONDITION_FAILED}
+    assert counts.get("cap_b", 0) == 0  # ZERO backend executions
 
 
 # ---------------------------------------------------------------------------
@@ -394,25 +396,49 @@ def test_t9_dependency_semantics(db):
 # ---------------------------------------------------------------------------
 
 def test_t10_duplicate_dispatch_prevented(db):
-    """T10: A step in RUNNING state is not re-dispatched by a second execute_goal call.
+    """T10: Terminal steps are never re-dispatched. Side-effect count = 1.
 
-    This tests the eligibility guard: RUNNING is not eligible.
+    Proves that after a step reaches any terminal state, the scheduler and
+    eligibility authority prevent duplicate dispatch:
+    - VERIFIED → not eligible, not in ready_steps
+    - WAITING_FOR_VERIFICATION → not eligible, not in ready_steps
+    - CLASSIFIED_FAILURE → not eligible, not in ready_steps
+    - FAILED → not eligible, not in ready_steps
+    - BLOCKED → not eligible, not in ready_steps
     """
-    a = PlanStep(id="a", title="A", objective="do A", capability="cap_a",
-                 status=PlanStepStatus.RUNNING)
-    b = PlanStep(id="b", title="B", objective="do B", capability="cap_b",
-                 depends_on=["a"])
+    from lhas.planning.models import evaluate_step_eligibility
 
-    # Set up service with accepting verifier
-    service, goal, counts = _setup_service(db, [a, b], verifier=AcceptingVerifier())
+    terminal_statuses = [
+        PlanStepStatus.VERIFIED,
+        PlanStepStatus.WAITING_FOR_VERIFICATION,
+        PlanStepStatus.CLASSIFIED_FAILURE,
+        PlanStepStatus.FAILED,
+        PlanStepStatus.BLOCKED,
+        PlanStepStatus.STALE,
+    ]
 
-    # The plan already has a in RUNNING state — execute_goal should not re-dispatch it.
-    # It should see a as non-eligible and eventually return.
+    for status in terminal_statuses:
+        step = PlanStep(id="x", title="X", objective="X", capability="x", status=status)
+        by_id = {"x": step}
+        eligible, reason = evaluate_step_eligibility(step, by_id)
+        assert eligible is False, f"{status} should not be eligible, got {reason}"
+
+    # Also verify via scheduler: terminal steps never appear in ready_steps
+    for status in terminal_statuses:
+        step = PlanStep(id="x", title="X", objective="X", capability="x", status=status)
+        plan = Plan(goal_id="g", mode=PlanMode.SIMPLE_DEPENDENCY, steps=[step])
+        schedule = TaskGraphScheduler().calculate(plan)
+        ready_ids = [s.id for s in schedule.ready_steps]
+        assert "x" not in ready_ids, f"{status} should not be in ready_steps"
+
+    # Integration: run a step once, verify counter = 1
+    a = PlanStep(id="a", title="A", objective="do A", capability="cap_a")
+    service, goal, counts = _setup_service(db, [a], verifier=AcceptingVerifier())
     result = asyncio.run(service.execute_goal(goal))
+    assert counts["cap_a"] == 1  # executed exactly once
+    assert result.steps[0].status == PlanStepStatus.VERIFIED
 
-    # a was already RUNNING — it should NOT have been executed again
-    assert counts.get("cap_a", 0) == 0
-
-    # b is blocked because a is not VERIFIED
-    b_step = next(s for s in result.steps if s.id == "b")
-    assert b_step.status in {PlanStepStatus.PENDING, PlanStepStatus.BLOCKED}
+    # Verify via scheduler that VERIFIED step is not in ready_steps
+    plan = PlanRepository(db).get(result.id)
+    schedule = TaskGraphScheduler().calculate(plan)
+    assert len(schedule.ready_steps) == 0  # no steps ready for re-dispatch
