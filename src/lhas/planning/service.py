@@ -188,24 +188,34 @@ class PlanExecutionService:
     def _create_verification_failure_provenance(self, step, plan, vresult) -> None:
         """Create failure provenance for verification rejection.
 
-        Verification rejection is a VALIDATION_FAILURE — the step executed
+        Verification rejection is a real failure source — the step executed
         successfully but didn't pass verification criteria.
+        Persists real validation_id, run_id, attempt_id for durable lineage.
         """
         from lhas.domain.enums import FailureClass, FailureType
-        # Resolve the attempt that produced the execution
+        # Resolve the attempt/run that produced the execution
         attempt_id = None
+        run_id = None
         runs = RunRepository(self.db).list_for_task(step.task_id) if step.task_id else []
         if runs:
-            attempts = AttemptRepository(self.db).list_for_run(runs[-1].id)
+            run_id = runs[-1].id
+            attempts = AttemptRepository(self.db).list_for_run(run_id)
             if attempts:
                 attempt_id = attempts[-1].id
+
+        # Extract real validation_id if available
+        validation_id = None
+        if hasattr(vresult, 'validation') and vresult.validation:
+            validation_id = vresult.validation.id
 
         provenance = StepFailureProvenance(
             step_id=step.id,
             plan_id=plan.id,
             failure_class=FailureClass.DATA,  # verification failure = data didn't meet criteria
-            failure_type=FailureType.TOOL_ERROR,  # closest match for verification failure
+            failure_type=FailureType.TOOL_ERROR,  # closest existing enum
             failure_evidence={
+                "verification_failure": True,
+                "validation_id": validation_id,
                 "verification_reason": vresult.reason if hasattr(vresult, 'reason') else str(vresult),
                 "checks": [
                     {"name": c.name, "passed": c.passed, "detail": c.detail}
@@ -213,7 +223,7 @@ class PlanExecutionService:
                 ],
             },
             attempt_id=attempt_id,
-            run_id=None,  # run already completed; this is a verification failure
+            run_id=run_id,
             repair_scope_hint=RepairScopeHint.LOCAL,  # default for validation failures
         )
         step.evidence["failure_provenance"] = provenance.model_dump(mode="json")
@@ -221,6 +231,8 @@ class PlanExecutionService:
             "plan_id": plan.id,
             "step_id": step.id,
             "attempt_id": attempt_id,
+            "run_id": run_id,
+            "validation_id": validation_id,
             "failure_class": FailureClass.DATA.value,
             "failure_type": "VERIFICATION_REJECTED",
             "repair_scope_hint": RepairScopeHint.LOCAL.value,
@@ -427,9 +439,16 @@ class PlanExecutionService:
             failure_class=provenance.get("failure_class"),
             error_type=provenance.get("failure_type"),
         )
+
+        # MACRO_REPLAN: invoke canonical macro replan path, NOT local repair
+        if scope == RepairScope.MACRO_REPLAN:
+            self._record_step_replan_signal(failed_step, provenance.get("run_id", ""))
+            if await self._maybe_replan(goal, plan, provenance.get("run_id", ""), context):
+                plan = plans.get(plan_id) or plan
+            return plan
+
         # For LOCAL: only repair the failed step
         # For AFFECTED_SUBGRAPH: repair failed step + dependents
-        # For MACRO_REPLAN: delegate to replan (not handled here)
         repair_scope = affected_ids if affected_ids else {failed_step_id}
 
         # Check repair budget
@@ -464,10 +483,33 @@ class PlanExecutionService:
         plans.update(plan)
 
         # Execute repair
-        return await self.execute_goal(
+        repaired_plan = await self.execute_goal(
             goal, context=context, experiment_id=experiment_id,
             resume_plan_id=plan_id, repair_step_ids=repair_scope,
         )
+
+        # Capture repair attempt lineage after execution
+        for step in repaired_plan.steps:
+            if step.id in repair_scope and step.task_id:
+                new_runs = RunRepository(self.db).list_for_task(step.task_id)
+                if new_runs:
+                    new_attempts = AttemptRepository(self.db).list_for_run(new_runs[-1].id)
+                    if new_attempts:
+                        repair_attempt_id = new_attempts[-1].id
+                        step.evidence["repair_attempt_id"] = repair_attempt_id
+                        # Emit durable lineage event
+                        self._emit(EventType.REPAIR_COMPLETED, {
+                            "plan_id": plan_id,
+                            "step_id": step.id,
+                            "original_failure_attempt_id": step.evidence.get("original_failure_attempt_id"),
+                            "repair_attempt_id": repair_attempt_id,
+                            "repair_number": step.evidence.get("repair_attempt_count", 0),
+                            "scope": scope.value,
+                        })
+        plans = PlanRepository(self.db)
+        plan = plans.get(plan_id) or repaired_plan
+        plans.update(plan)
+        return repaired_plan
 
     async def _execute_dependency_plan(self, goal, plan, *, context, experiment_id, approved_step_ids, repair_step_ids=None):
         plans=PlanRepository(self.db); tasks=TaskRepository(self.db); scheduler=TaskGraphScheduler()
@@ -569,11 +611,27 @@ class PlanExecutionService:
                             restart_authoritative_schedule = True; break
                         plans.update(plan); continue
                     else:
-                        # LOCAL scope: current behavior
-                        self._record_step_replan_signal(step, run.id)
-                        if await self._maybe_replan(goal, plan, run.id, context):
-                            restart_authoritative_schedule = True; break
-                        plans.update(plan); continue
+                        # LOCAL scope: bounded local repair before replan
+                        # Check repair budget
+                        repair_count = step.evidence.get("repair_attempt_count", 0)
+                        max_repair = step.budget.get("max_repair_attempts", 3)
+                        if repair_count < max_repair:
+                            # Budget allows — reset step to PENDING for re-execution
+                            step.evidence["repair_attempt_count"] = repair_count + 1
+                            # Capture original failure attempt for lineage
+                            if "original_failure_attempt_id" not in step.evidence:
+                                attempts = AttemptRepository(self.db).list_for_run(run.id)
+                                if attempts:
+                                    step.evidence["original_failure_attempt_id"] = attempts[-1].id
+                            transition_step(step, PlanStepStatus.PENDING, "local_repair", events, plan_id=plan.id)
+                            plans.update(plan)
+                            continue
+                        else:
+                            # Budget exhausted — escalate to replan
+                            self._record_step_replan_signal(step, run.id)
+                            if await self._maybe_replan(goal, plan, run.id, context):
+                                restart_authoritative_schedule = True; break
+                            plans.update(plan); continue
                 if await self._maybe_replan(goal, plan, run.id, context):
                     restart_authoritative_schedule = True
                     break
