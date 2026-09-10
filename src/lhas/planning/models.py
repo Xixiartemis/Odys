@@ -10,7 +10,9 @@ from typing import Any, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from lhas.domain.enums import FailureClass
 from lhas.domain.models import new_id
+from lhas.domain.enums import FailureClass, FailureType
 
 
 def _semantic_value(value: Any) -> Any:
@@ -50,6 +52,76 @@ def compute_step_semantic_fingerprint(step: "PlanStep", by_id: dict[str, "PlanSt
         "dependency_semantics": dependency_semantics,
     }
     return hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+class RepairScopeHint(str, Enum):
+    """Scope of repair needed after a step failure."""
+    LOCAL = "LOCAL"
+    AFFECTED_SUBGRAPH = "AFFECTED_SUBGRAPH"
+    MACRO_REPLAN = "MACRO_REPLAN"
+
+
+def compute_repair_scope_hint(
+    failure_class: FailureClass,
+    failure_type: FailureType,
+    has_downstream_deps: bool = False,
+) -> RepairScopeHint:
+    """Compute the repair scope hint from failure classification.
+
+    Rules:
+    - TOOL_FAILURE (TOOL_ERROR) with no downstream deps → LOCAL
+    - VALIDATION_FAILURE (data/validation failures) → LOCAL (re-verify)
+    - ASSUMPTION_INVALID (WRONG_ASSUMPTION) → AFFECTED_SUBGRAPH
+    - PROVIDER_FAILURE / RESOURCE_EXHAUSTED → MACRO_REPLAN
+    - Default → LOCAL
+    """
+    _MACRO_REPLAN_TYPES = frozenset({
+        FailureType.QUOTA_EXHAUSTED,
+        FailureType.BILLING_OR_CREDIT_EXHAUSTED,
+        FailureType.AUTH_INVALID,
+        FailureType.PROVIDER_UNAVAILABLE,
+        FailureType.PROVIDER_TIMEOUT,
+        FailureType.MALFORMED_PROVIDER_RESPONSE,
+        FailureType.UNKNOWN_PROVIDER_FAILURE,
+        FailureType.BUDGET_EXHAUSTED,
+        FailureType.NETWORK_ERROR,
+    })
+
+    _AFFECTED_SUBGRAPH_TYPES = frozenset({
+        FailureType.WRONG_ASSUMPTION,
+        FailureType.STALE_CONTEXT,
+        FailureType.CONTEXT_CONFLICT,
+    })
+
+    if failure_type in _MACRO_REPLAN_TYPES:
+        return RepairScopeHint.MACRO_REPLAN
+    if failure_type in _AFFECTED_SUBGRAPH_TYPES:
+        return RepairScopeHint.AFFECTED_SUBGRAPH
+    if failure_type == FailureType.TOOL_ERROR:
+        return RepairScopeHint.LOCAL
+    # VALIDATION_FAILURE and all other types → LOCAL
+    return RepairScopeHint.LOCAL
+
+
+class StepFailureProvenance(BaseModel):
+    """Durable provenance linking a step failure to its classification.
+
+    Stored in step.evidence['failure_provenance'] for persistence through
+    plan save/reload cycles.
+    """
+    model_config = ConfigDict(extra="forbid")
+
+    step_id: str
+    plan_id: str
+    failure_class: FailureClass
+    failure_type: FailureType
+    task_id: str | None = None
+    failure_evidence: dict[str, Any] = Field(default_factory=dict)
+    attempt_id: str | None = None
+    run_id: str | None = None
+    validation_id: str | None = None
+    repair_scope_hint: RepairScopeHint
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 class PlanMode(str, Enum):
@@ -397,3 +469,179 @@ def transition_step(
     event_store.append(EventType.STEP_STATE_TRANSITION, payload=payload)
 
     return new_status
+
+
+# ---------------------------------------------------------------------------
+# P3.3 — Repair Scope Authority
+# ---------------------------------------------------------------------------
+
+class RepairScope(str, Enum):
+    """Repair scope decision for a failed step.
+
+    LOCAL:              Only redo the failed step (no dependents or retryable).
+    AFFECTED_SUBGRAPH:  Invalidate affected descendants, preserve others.
+    MACRO_REPLAN:       Full plan revision via MacroReplanService.
+    """
+
+    LOCAL = "LOCAL"
+    AFFECTED_SUBGRAPH = "AFFECTED_SUBGRAPH"
+    MACRO_REPLAN = "MACRO_REPLAN"
+
+
+# Failure types that indicate a systemic issue (provider down, quota exceeded).
+# These warrant a full macro replan regardless of dependency graph.
+_SYSTEMIC_FAILURE_CLASSES: frozenset[str] = frozenset({
+    FailureClass.EXECUTION.value,
+})
+
+# Specific error_type strings that indicate systemic provider failure.
+_SYSTEMIC_ERROR_TYPES: frozenset[str] = frozenset({
+    "QUOTA_EXHAUSTED",
+    "PROVIDER_UNAVAILABLE",
+    "AUTH_INVALID",
+    "BILLING_OR_CREDIT_EXHAUSTED",
+    "UNKNOWN_PROVIDER_FAILURE",
+    "PROVIDER_TIMEOUT",
+})
+
+# Error_type strings that indicate the failure invalidates downstream assumptions.
+_ASSUMPTION_INVALIDATING_ERROR_TYPES: frozenset[str] = frozenset({
+    "WRONG_ASSUMPTION",
+    "ASSUMPTION_INVALID",
+    "INVALID_ASSUMPTION",
+    "STALE_CONTEXT",
+    "CONTEXT_CONFLICT",
+    "MISSING_CONTEXT",
+    "CONTEXT_OVERLOAD",
+})
+
+
+def _get_dependents(step_id: str, plan: "Plan") -> set[str]:
+    """Find all step IDs that directly or transitively depend on *step_id*."""
+    # Build reverse dependency map
+    reverse_deps: dict[str, set[str]] = {s.id: set() for s in plan.steps}
+    for step in plan.steps:
+        for dep_id in step.depends_on:
+            if dep_id in reverse_deps:
+                reverse_deps[dep_id].add(step.id)
+
+    # BFS through reverse dependencies
+    dependents: set[str] = set()
+    queue = list(reverse_deps.get(step_id, set()))
+    while queue:
+        current = queue.pop(0)
+        if current not in dependents:
+            dependents.add(current)
+            queue.extend(reverse_deps.get(current, set()) - dependents)
+    return dependents
+
+
+def compute_repair_scope(
+    failed_step: "PlanStep",
+    plan: "Plan",
+    failure_class: FailureClass | str | None = None,
+    error_type: str | None = None,
+) -> tuple[RepairScope, set[str]]:
+    """Determine the repair scope for a failed step.
+
+    Decision matrix:
+    1. No dependents → LOCAL
+    2. Has dependents + failure is retryable (not assumption-invalidating) → LOCAL
+    3. Has dependents + failure invalidates assumptions → AFFECTED_SUBGRAPH
+    4. Systemic failure (provider down, quota) → MACRO_REPLAN
+
+    Args:
+        failed_step: The step that failed.
+        plan: The current plan (for dependency graph traversal).
+        failure_class: Optional FailureClass enum or string value.
+        error_type: Optional specific error type string for finer classification.
+
+    Returns:
+        (RepairScope, set of affected step_ids).
+        For LOCAL: affected set contains only the failed step.
+        For AFFECTED_SUBGRAPH: affected set contains the failed step + all
+            transitively dependent steps.
+        For MACRO_REPLAN: affected set is empty (full replan handles it).
+    """
+    dependents = _get_dependents(failed_step.id, plan)
+
+    # Normalize failure_class to string for comparison
+    fc_value = None
+    if failure_class is not None:
+        fc_value = failure_class.value if isinstance(failure_class, FailureClass) else str(failure_class)
+
+    # Normalize error_type
+    et_value = str(error_type).upper() if error_type else None
+
+    # 1. Systemic failure → MACRO_REPLAN regardless of DAG shape.
+    if et_value and et_value in _SYSTEMIC_ERROR_TYPES:
+        return RepairScope.MACRO_REPLAN, set()
+    if fc_value and fc_value in _SYSTEMIC_FAILURE_CLASSES and et_value and et_value in _SYSTEMIC_ERROR_TYPES:
+        return RepairScope.MACRO_REPLAN, set()
+
+    # 2. Non-systemic failure with no dependents → LOCAL.
+    if not dependents:
+        return RepairScope.LOCAL, {failed_step.id}
+
+    # 3. Failure invalidates assumptions → AFFECTED_SUBGRAPH
+    if et_value and et_value in _ASSUMPTION_INVALIDATING_ERROR_TYPES:
+        return RepairScope.AFFECTED_SUBGRAPH, {failed_step.id} | dependents
+
+    # If failure_class is CONTEXT or REASONING with dependents, assume invalidation
+    if fc_value in {FailureClass.CONTEXT.value, FailureClass.REASONING.value}:
+        return RepairScope.AFFECTED_SUBGRAPH, {failed_step.id} | dependents
+
+    # 4. Has dependents but failure is retryable (transient/execution error) → LOCAL
+    # Default: if we can't classify, be conservative with AFFECTED_SUBGRAPH
+    # Only default to LOCAL if we have positive evidence it's retryable
+    if fc_value == FailureClass.EXECUTION.value:
+        # Execution failures (timeout, crash, network) are retryable
+        return RepairScope.LOCAL, {failed_step.id}
+
+    # Unknown failure with dependents → LOCAL (retry first, escalate if repeated)
+    return RepairScope.LOCAL, {failed_step.id}
+
+
+def invalidate_affected_subgraph(
+    plan: "Plan",
+    affected_step_ids: set[str],
+    event_store: Any,
+) -> set[str]:
+    """Mark affected steps as STALE, preserving unrelated VERIFIED work.
+
+    Steps in *affected_step_ids* that are not already terminal (VERIFIED,
+    COMPLETED, or STALE) will be transitioned to STALE via transition_step().
+    Steps already STALE are also counted as invalidated.
+
+    Args:
+        plan: The current plan.
+        affected_step_ids: Set of step IDs to invalidate.
+        event_store: EventStore for recording transitions.
+
+    Returns:
+        Set of step IDs that were actually invalidated (transitioned or
+        already STALE).
+    """
+    invalidated: set[str] = set()
+    by_id = {s.id: s for s in plan.steps}
+
+    for step_id in affected_step_ids:
+        step = by_id.get(step_id)
+        if step is None:
+            continue
+        # Already STALE — count but don't re-transition
+        if step.status == PlanStepStatus.STALE:
+            invalidated.add(step_id)
+            continue
+        # Already terminal (VERIFIED/COMPLETED) — still invalidate (mark STALE)
+        # because the failure of a dependency invalidates this step's output.
+        if step.status in _TERMINAL_VERIFIED_STATUSES:
+            transition_step(step, PlanStepStatus.STALE, "repair_scope_invalidation", event_store, plan_id=plan.id)
+            invalidated.add(step_id)
+            continue
+        # Non-terminal, non-STALE: mark STALE
+        if step.status not in {PlanStepStatus.STALE}:
+            transition_step(step, PlanStepStatus.STALE, "repair_scope_invalidation", event_store, plan_id=plan.id)
+            invalidated.add(step_id)
+
+    return invalidated

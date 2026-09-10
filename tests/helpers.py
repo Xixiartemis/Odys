@@ -60,6 +60,7 @@ def make_test_capability_definition(
     preferred_tool: str | None = None,
     side_effect: bool = False,
     requires_human_approval: bool = False,
+    retryable: bool = True,
 ) -> CapabilityDefinition:
     """Create an explicit ``CapabilityDefinition`` for a test capability.
 
@@ -80,7 +81,7 @@ def make_test_capability_definition(
         risk_level="LOW",
         workspace_scope="SOURCE_WORKSPACE",
         timeout_seconds=30.0,
-        retryable=True,
+        retryable=retryable,
         preferred_tool=preferred_tool or capability_id,
         fallback_tools=(),
         source="test-fixture",
