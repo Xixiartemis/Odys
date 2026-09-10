@@ -573,15 +573,15 @@ def compute_repair_scope(
     # Normalize error_type
     et_value = str(error_type).upper() if error_type else None
 
-    # 1. No dependents → LOCAL (always)
-    if not dependents:
-        return RepairScope.LOCAL, {failed_step.id}
-
-    # 2. Systemic failure → MACRO_REPLAN
+    # 1. Systemic failure → MACRO_REPLAN regardless of DAG shape.
     if et_value and et_value in _SYSTEMIC_ERROR_TYPES:
         return RepairScope.MACRO_REPLAN, set()
     if fc_value and fc_value in _SYSTEMIC_FAILURE_CLASSES and et_value and et_value in _SYSTEMIC_ERROR_TYPES:
         return RepairScope.MACRO_REPLAN, set()
+
+    # 2. Non-systemic failure with no dependents → LOCAL.
+    if not dependents:
+        return RepairScope.LOCAL, {failed_step.id}
 
     # 3. Failure invalidates assumptions → AFFECTED_SUBGRAPH
     if et_value and et_value in _ASSUMPTION_INVALIDATING_ERROR_TYPES:

@@ -57,15 +57,14 @@ def test_local_scope_no_dependents():
 
 
 def test_local_scope_no_dependents_with_error_type():
-    """Even with systemic error_type, no dependents → LOCAL."""
+    """Systemic error_type → MACRO_REPLAN even without dependents."""
     plan = _make_plan([
         ("a", [], PlanStepStatus.FAILED),
     ])
     step_a = plan.steps[0]
     scope, affected = compute_repair_scope(step_a, plan, error_type="QUOTA_EXHAUSTED")
-    # No dependents → LOCAL regardless of error type
-    assert scope == RepairScope.LOCAL
-    assert affected == {"a"}
+    assert scope == RepairScope.MACRO_REPLAN
+    assert affected == set()
 
 
 # ---------------------------------------------------------------------------

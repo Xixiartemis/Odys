@@ -431,6 +431,87 @@ def test_t5_quota_failure_routes_to_macro_without_local_repair(db, monkeypatch):
     assert counts["cap_quota"] >= 1
 
 
+def test_t5a_single_node_quota_routes_to_macro_without_local_repair(db, monkeypatch):
+    """Systemic quota failure takes MACRO_REPLAN even without dependents."""
+    step = PlanStep(id="quota-only", title="quota-only", objective="quota", capability="cap_quota")
+    service, goal, counts = _setup_service(
+        db,
+        [step],
+        verifier=None,
+        tool_handlers={
+            "cap_quota": lambda req: ToolResult(
+                status=ToolResultStatus.FAILURE,
+                error_type="QUOTA_EXHAUSTED",
+                error_message="quota",
+            ),
+        },
+    )
+    replan_calls = {"n": 0}
+
+    async def no_replan(*args, **kwargs):
+        replan_calls["n"] += 1
+        return False
+
+    monkeypatch.setattr(service, "_maybe_replan", no_replan)
+    result = asyncio.run(service.execute_goal(goal))
+    quota_step = result.steps[0]
+    assert quota_step.evidence.get("repair_attempt_count", 0) == 0
+    assert counts["cap_quota"] == 1
+    assert replan_calls["n"] == 1
+    assert result.replan_count == 0
+
+
+def test_t5b_single_node_tool_error_remains_local(db):
+    """A non-systemic TOOL_ERROR with no dependents remains LOCAL."""
+    step = PlanStep(id="tool-error", title="tool-error", objective="tool error", capability="cap_tool")
+    plan = Plan(goal_id="goal-tool-error", steps=[step], mode=PlanMode.SIMPLE_DEPENDENCY)
+    scope, affected = compute_repair_scope(step, plan, error_type="TOOL_ERROR")
+    assert scope == RepairScope.LOCAL
+    assert affected == {step.id}
+
+
+def test_t7_lineage_and_event_survive_reopen_after_repair(db):
+    """Repair lineage is durable after the repair itself and a real DB reopen."""
+    step = PlanStep(id="reopen-lineage", title="reopen-lineage", objective="repair", capability="cap_reopen")
+    handler, _ = _make_fail_handler(fail_until_call=2)
+    service, goal, _ = _setup_service(
+        db,
+        [step],
+        verifier=AcceptingVerifier(),
+        tool_handlers={"cap_reopen": handler},
+    )
+    result = asyncio.run(service.execute_goal(goal))
+    completed_step = result.steps[0]
+    tasks = TaskRepository(db).list(goal.project_id)
+    runs = [RunRepository(db).list_for_task(task.id)[0] for task in tasks]
+    attempts = [AttemptRepository(db).list_for_run(run.id) for run in runs]
+    plan_id = result.id
+    original_attempt_id = attempts[0][-1].id
+    repair_attempt_id = attempts[1][-1].id
+    assert completed_step.evidence["repair_lineage"]
+
+    db_path = db.engine.url.database
+    db.close()
+    from lhas.persistence.database import Database
+    reopened = Database(db_path)
+    reopened.init_db()
+    reloaded = PlanRepository(reopened).get(plan_id)
+    assert reloaded is not None
+    lineage = reloaded.steps[0].evidence["repair_lineage"]
+    assert lineage[0]["original_failure_attempt_id"] == original_attempt_id
+    assert lineage[0]["repair_attempt_id"] == repair_attempt_id
+    assert original_attempt_id != repair_attempt_id
+    repair_events = [
+        event for event in EventStore(reopened).list_all()
+        if event.event_type == EventType.REPAIR_COMPLETED
+        and event.payload.get("step_id") == completed_step.id
+    ]
+    assert repair_events
+    assert repair_events[-1].payload["original_failure_attempt_id"] == original_attempt_id
+    assert repair_events[-1].payload["repair_attempt_id"] == repair_attempt_id
+    reopened.close()
+
+
 def test_t6_verified_ancestor_is_not_reexecuted_during_local_repair(db):
     """T8: a VERIFIED ancestor remains untouched while B is locally repaired."""
     a = PlanStep(id="a", title="A", objective="A", capability="cap_a")
