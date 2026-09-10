@@ -89,6 +89,12 @@ class _TaskGraphAgentExecutor:
     async def status(self, run_id): return await self.executor.status(run_id)
 
 class PlanExecutionService:
+    """Execute plans and apply P3.3 selective repair semantics.
+
+    P3.3 authoritative repair semantics apply only to SIMPLE_DEPENDENCY.
+    LINEAR remains a legacy execution path and is intentionally outside the
+    P3.3 selective-repair contract.
+    """
     def __init__(self, db: Database, planner: Planner, registry: ToolRegistry, agent_executor_factory=None, tool_contract=None, capability_registry=None, workflow_verifier=None):
         self.db, self.planner, self.registry, self.agent_executor_factory = db, planner, registry, agent_executor_factory
         # P3.1 verification seam: explicit verifier only, default=None (fail-closed)
@@ -185,7 +191,27 @@ class PlanExecutionService:
         })
         return provenance
 
-    def _create_verification_failure_provenance(self, step, plan, vresult) -> None:
+    def _resolve_verification_identity(self, step, validation):
+        """Resolve the producing Run/Attempt from ValidationResult.attempt_id.
+
+        The validation record is authoritative; never substitute the latest
+        attempt when its exact identity cannot be found.
+        """
+        if validation is None or not validation.id or not validation.attempt_id or not step.task_id:
+            return None
+        runs = RunRepository(self.db).list_for_task(step.task_id)
+        for run in runs:
+            for attempt in AttemptRepository(self.db).list_for_run(run.id):
+                if attempt.id == validation.attempt_id and attempt.run_id == run.id:
+                    return run, attempt
+        return None
+
+    def _resolve_attempt_id_for_run(self, run_id: str) -> str | None:
+        """Return an actual Attempt.id belonging to the supplied Run.id."""
+        attempts = AttemptRepository(self.db).list_for_run(run_id)
+        return attempts[-1].id if attempts else None
+
+    def _create_verification_failure_provenance(self, step, plan, vresult) -> StepFailureProvenance | None:
         """Create failure provenance for verification rejection.
 
         Verification rejection is a real failure source — the step executed
@@ -193,50 +219,118 @@ class PlanExecutionService:
         Persists real validation_id, run_id, attempt_id for durable lineage.
         """
         from lhas.domain.enums import FailureClass, FailureType
-        # Resolve the attempt/run that produced the execution
-        attempt_id = None
-        run_id = None
-        runs = RunRepository(self.db).list_for_task(step.task_id) if step.task_id else []
-        if runs:
-            run_id = runs[-1].id
-            attempts = AttemptRepository(self.db).list_for_run(run_id)
-            if attempts:
-                attempt_id = attempts[-1].id
-
-        # Extract real validation_id if available
-        validation_id = None
-        if hasattr(vresult, 'validation') and vresult.validation:
-            validation_id = vresult.validation.id
+        validation = getattr(vresult, "validation", None)
+        identity = self._resolve_verification_identity(step, validation)
+        if identity is None:
+            # Fail closed: no fabricated run/attempt/validation identity.
+            return None
+        run, attempt = identity
 
         provenance = StepFailureProvenance(
             step_id=step.id,
             plan_id=plan.id,
-            failure_class=FailureClass.DATA,  # verification failure = data didn't meet criteria
-            failure_type=FailureType.TOOL_ERROR,  # closest existing enum
+            task_id=step.task_id,
+            failure_class=FailureClass.DATA,
+            failure_type=FailureType.VERIFICATION_REJECTED,
             failure_evidence={
                 "verification_failure": True,
-                "validation_id": validation_id,
+                "validation_id": validation.id,
                 "verification_reason": vresult.reason if hasattr(vresult, 'reason') else str(vresult),
                 "checks": [
                     {"name": c.name, "passed": c.passed, "detail": c.detail}
-                    for c in (vresult.validation.checks if hasattr(vresult, 'validation') and vresult.validation else [])
+                    for c in (validation.checks or [])
                 ],
             },
-            attempt_id=attempt_id,
-            run_id=run_id,
-            repair_scope_hint=RepairScopeHint.LOCAL,  # default for validation failures
+            attempt_id=attempt.id,
+            run_id=run.id,
+            validation_id=validation.id,
+            repair_scope_hint=RepairScopeHint.LOCAL,
         )
         step.evidence["failure_provenance"] = provenance.model_dump(mode="json")
         self._emit(EventType.STEP_FAILURE_PROVENANCE, {
             "plan_id": plan.id,
             "step_id": step.id,
-            "attempt_id": attempt_id,
-            "run_id": run_id,
-            "validation_id": validation_id,
+            "task_id": step.task_id,
+            "attempt_id": attempt.id,
+            "run_id": run.id,
+            "validation_id": validation.id,
             "failure_class": FailureClass.DATA.value,
-            "failure_type": "VERIFICATION_REJECTED",
+            "failure_type": FailureType.VERIFICATION_REJECTED.value,
             "repair_scope_hint": RepairScopeHint.LOCAL.value,
         })
+        return provenance
+
+    def _handle_verification_rejection(self, step, plan, vresult, events):
+        """Single authority for immediate and deferred verifier rejection."""
+        transition_step(step, PlanStepStatus.CLASSIFIED_FAILURE, "verification_rejected", events, plan_id=plan.id)
+        provenance = self._create_verification_failure_provenance(step, plan, vresult)
+        if provenance is None:
+            return None, None, set()
+        scope, affected_ids = compute_repair_scope(
+            step,
+            plan,
+            failure_class=provenance.failure_class,
+            error_type=provenance.failure_type.value,
+        )
+        return provenance, scope, affected_ids
+
+    def _prepare_inline_local_repair(self, step, provenance, scope, events, plan_id, producing_attempt_id=None) -> bool:
+        """Persist pending LOCAL repair context before the next dispatch."""
+        repair_count = int(step.evidence.get("repair_attempt_count", 0))
+        max_repair = int(step.budget.get("max_repair_attempts", 3))
+        if repair_count >= max_repair:
+            return False
+        original_attempt_id = step.evidence.get("original_failure_attempt_id")
+        if original_attempt_id is None and provenance is not None:
+            original_attempt_id = (
+                provenance.get("attempt_id")
+                if isinstance(provenance, dict)
+                else getattr(provenance, "attempt_id", None)
+            )
+        if original_attempt_id is None:
+            original_attempt_id = producing_attempt_id
+        if not original_attempt_id:
+            return False
+        repair_number = repair_count + 1
+        step.evidence["repair_attempt_count"] = repair_number
+        step.evidence["original_failure_attempt_id"] = original_attempt_id
+        step.evidence["repair_pending"] = {
+            "original_failure_attempt_id": original_attempt_id,
+            "repair_number": repair_number,
+            "repair_scope": scope.value,
+        }
+        transition_step(step, PlanStepStatus.PENDING, "local_repair", events, plan_id=plan_id)
+        return True
+
+    def _finalize_inline_repair_lineage(self, step, plan, run) -> bool:
+        """Persist A1→A2 lineage from the exact repair Run returned."""
+        pending = step.evidence.get("repair_pending")
+        if not pending:
+            return True
+        attempts = AttemptRepository(self.db).list_for_run(run.id)
+        if not attempts:
+            return False
+        repair_attempt = attempts[-1]
+        original_attempt_id = pending.get("original_failure_attempt_id")
+        if not original_attempt_id or repair_attempt.id == original_attempt_id:
+            return False
+        entry = {
+            "plan_id": plan.id,
+            "step_id": step.id,
+            "original_failure_attempt_id": original_attempt_id,
+            "repair_attempt_id": repair_attempt.id,
+            "repair_number": pending.get("repair_number"),
+            "repair_scope": pending.get("repair_scope", RepairScope.LOCAL.value),
+        }
+        lineage = list(step.evidence.get("repair_lineage", []))
+        lineage.append(entry)
+        step.evidence["repair_lineage"] = lineage
+        step.evidence["repair_attempt_id"] = repair_attempt.id
+        step.evidence["repair_number"] = pending.get("repair_number")
+        step.evidence["repair_scope"] = pending.get("repair_scope", RepairScope.LOCAL.value)
+        step.evidence.pop("repair_pending", None)
+        EventStore(self.db).append(EventType.REPAIR_COMPLETED, payload={**entry, "outcome": "ATTEMPT_CREATED"})
+        return True
 
     def _record_step_replan_signal(self, step, run_id: str) -> None:
         """Turn a durable step failure into the canonical replan input."""
@@ -313,7 +407,7 @@ class PlanExecutionService:
                         if vresult.accepted:
                             transition_step(step, PlanStepStatus.VERIFIED, "deferred_verification_accepted", events, plan_id=plan.id)
                         else:
-                            transition_step(step, PlanStepStatus.CLASSIFIED_FAILURE, "deferred_verification_rejected", events, plan_id=plan.id)
+                            self._handle_verification_rejection(step, plan, vresult, events)
                     else:
                         transition_step(step, PlanStepStatus.WAITING_FOR_VERIFICATION, "deferred_no_verifier", events, plan_id=plan.id)
                     plans.update(plan)
@@ -381,9 +475,7 @@ class PlanExecutionService:
                     if vresult.accepted:
                         transition_step(step, PlanStepStatus.VERIFIED, "verification_accepted", events, plan_id=plan.id)
                     else:
-                        transition_step(step, PlanStepStatus.CLASSIFIED_FAILURE, "verification_rejected", events, plan_id=plan.id)
-                        # Create failure provenance for verification rejection
-                        self._create_verification_failure_provenance(step, plan, vresult)
+                        self._handle_verification_rejection(step, plan, vresult, events)
                 else:
                     # No verifier configured → WAITING_FOR_VERIFICATION (fail-closed)
                     transition_step(step, PlanStepStatus.WAITING_FOR_VERIFICATION, "no_verifier_configured", events, plan_id=plan.id)
@@ -543,7 +635,9 @@ class PlanExecutionService:
                     if vresult.accepted:
                         transition_step(s, PlanStepStatus.VERIFIED, "deferred_verification_accepted", events, plan_id=plan.id)
                     else:
-                        transition_step(s, PlanStepStatus.CLASSIFIED_FAILURE, "deferred_verification_rejected", events, plan_id=plan.id)
+                        provenance, scope, affected_ids = self._handle_verification_rejection(s, plan, vresult, events)
+                        if provenance is not None and scope == RepairScope.LOCAL:
+                            self._prepare_inline_local_repair(s, provenance, scope, events, plan.id)
                 else:
                     transition_step(s, PlanStepStatus.WAITING_FOR_VERIFICATION, "deferred_no_verifier", events, plan_id=plan.id)
         plans.update(plan)
@@ -587,6 +681,10 @@ class PlanExecutionService:
                 plans.update(plan)
                 orch=RecoveringOrchestrator(self.db,executor_factory=lambda s=step,p=plan: self._step_executor(p,s,step.execution_context),executor_type="TaskGraphAgentExecutor" if self.agent_executor_factory else "ToolRegistryExecutor",provider="native-kernel" if self.agent_executor_factory else "tool-registry",model="provider-adapter" if self.agent_executor_factory else "deterministic",harness_version=HARNESS_VERSION,dataset_version="PLANNING-V0.1",experiment_id=experiment_id)
                 run=await orch.execute_task(task.id)
+                if not self._finalize_inline_repair_lineage(step, plan, run):
+                    plan.status = PlanStatus.FAILED
+                    plans.update(plan)
+                    return plan
                 if run.status.value != "COMPLETED":
                     transition_step(step, PlanStepStatus.FAILED, "run_failed", events, plan_id=plan.id)
                     self._emit(EventType.PLAN_STEP_FAILED,{"plan_id":plan.id,"step_id":step.id,"run_id":run.id})
@@ -612,18 +710,11 @@ class PlanExecutionService:
                         plans.update(plan); continue
                     else:
                         # LOCAL scope: bounded local repair before replan
-                        # Check repair budget
-                        repair_count = step.evidence.get("repair_attempt_count", 0)
-                        max_repair = step.budget.get("max_repair_attempts", 3)
-                        if repair_count < max_repair:
-                            # Budget allows — reset step to PENDING for re-execution
-                            step.evidence["repair_attempt_count"] = repair_count + 1
-                            # Capture original failure attempt for lineage
-                            if "original_failure_attempt_id" not in step.evidence:
-                                attempts = AttemptRepository(self.db).list_for_run(run.id)
-                                if attempts:
-                                    step.evidence["original_failure_attempt_id"] = attempts[-1].id
-                            transition_step(step, PlanStepStatus.PENDING, "local_repair", events, plan_id=plan.id)
+                        provenance_model = step.evidence.get("failure_provenance")
+                        if self._prepare_inline_local_repair(
+                            step, provenance_model, scope, events, plan.id,
+                            producing_attempt_id=self._resolve_attempt_id_for_run(run.id),
+                        ):
                             plans.update(plan)
                             continue
                         else:
@@ -654,9 +745,11 @@ class PlanExecutionService:
                     if vresult.accepted:
                         transition_step(step, PlanStepStatus.VERIFIED, "verification_accepted", events, plan_id=plan.id)
                     else:
-                        transition_step(step, PlanStepStatus.CLASSIFIED_FAILURE, "verification_rejected", events, plan_id=plan.id)
-                        # Create failure provenance for verification rejection
-                        self._create_verification_failure_provenance(step, plan, vresult)
+                        provenance, scope, affected_ids = self._handle_verification_rejection(step, plan, vresult, events)
+                        if provenance is not None and scope == RepairScope.LOCAL:
+                            if self._prepare_inline_local_repair(step, provenance, scope, events, plan.id):
+                                plans.update(plan)
+                                continue
                 else:
                     transition_step(step, PlanStepStatus.WAITING_FOR_VERIFICATION, "no_verifier_configured", events, plan_id=plan.id)
 
