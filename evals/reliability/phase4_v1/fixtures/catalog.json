@@ -1,0 +1,10 @@
+{
+  "fixtures": {
+    "fixture-completion-v1": {"version": "1", "hash_source": "catalog-entry:fixture-completion-v1", "initial_state": "clean fixture workspace"},
+    "fixture-execution-v1": {"version": "1", "hash_source": "catalog-entry:fixture-execution-v1", "initial_state": "clean fixture workspace"},
+    "fixture-replan-v1": {"version": "1", "hash_source": "catalog-entry:fixture-replan-v1", "initial_state": "clean fixture workspace"},
+    "fixture-provider-v1": {"version": "1", "hash_source": "catalog-entry:fixture-provider-v1", "initial_state": "clean fixture workspace"},
+    "fixture-truth-v1": {"version": "1", "hash_source": "catalog-entry:fixture-truth-v1", "initial_state": "clean fixture workspace"},
+    "fixture-delegation-v1": {"version": "1", "hash_source": "catalog-entry:fixture-delegation-v1", "initial_state": "clean fixture workspace"}
+  }
+}

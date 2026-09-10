@@ -1,0 +1,8 @@
+{
+  "config_id": "minimal",
+  "label": "MINIMAL_AGENT_RUNTIME",
+  "semantics": ["Context", "Model", "Tool", "Observation"],
+  "features": {"completion_authority": false, "workflow_verifier": false, "typed_taskgraph": false, "failure_provenance": false, "selective_repair": false, "macro_replan": false, "durable_workflow_recovery": false},
+  "validator_id": "external-observable-v1",
+  "tool_capability_set": ["workspace.list", "workspace.read", "workspace.search", "workspace.edit", "workspace.edit_lines", "workspace.diff", "cli.exec"]
+}

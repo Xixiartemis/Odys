@@ -1,0 +1,36 @@
+{
+  "benchmark_version": "phase4-v1",
+  "research_question": "Can verifier-backed workflow control and selective recovery improve reliable task completion under controlled failures compared with a minimal agent runtime, and what additional execution cost does that reliability require?",
+  "headline": {
+    "tasks": 60,
+    "families": 6,
+    "tasks_per_family": 10,
+    "repeats": 3,
+    "configs": ["minimal", "odys_p3"],
+    "total_runs": 360
+  },
+  "canonical_families": ["COMPLETION_INTEGRITY", "EXECUTION_STATE_RECOVERY", "COMPLEX_WORKFLOW_REPLAN", "PROVIDER_TOOL_FAILURE", "RUNTIME_TRUTH_POLICY", "DELEGATION_LIFECYCLE"],
+  "primary_metrics": ["verified_completion_rate", "false_completion_rate", "recovery_success_rate", "cost_per_verified_completion", "duplicate_side_effect_rate", "lost_work_rate"],
+  "secondary_metrics": ["repair_scope_ratio", "redundant_tool_calls", "tool_calls", "model_calls", "attempts", "repair_attempts", "replans", "human_intervention", "wall_time", "tokens_input", "tokens_output", "total_tokens", "measured_model_cost", "duplicate_side_effect_count", "lost_work_units", "verified_work_preserved", "failure_type", "repair_scope", "recovery_attempted"],
+  "missing_metric_value": "NOT_MEASURED",
+  "budgets": {"timeout_seconds": 900, "max_turns": 20, "max_model_calls": 20},
+  "fairness": {"model": "FROZEN_BY_P4.2", "provider": "FROZEN_BY_P4.2", "tool_capability_set": ["workspace.list", "workspace.read", "workspace.search", "workspace.edit", "workspace.edit_lines", "workspace.diff", "cli.exec"], "fixture_set": "fixtures/catalog.json", "validator_id": "external-observable-v1", "budget_ref": "budgets"},
+  "metric_definitions": {
+    "verified_completion_rate": "verified completions / valid runs",
+    "false_completion_rate": "runs where claimed completion is false / valid runs",
+    "recovery_success_rate": "eventually externally verified recovery runs / runs where eligible recovery was required or attempted",
+    "cost_per_verified_completion": "total measured execution cost / verified completions; NOT_MEASURED when price is unavailable or denominator is zero",
+    "duplicate_side_effect_rate": "runs with unintended duplicate externally observable side effect / valid runs",
+    "lost_work_rate": "eligible recovery runs with lost or unnecessarily redone pre-failure valid work / eligible recovery runs"
+  },
+  "repeat_reporting": {"repeats": 3, "per_task_distribution": ["0/3", "1/3", "2/3", "3/3"], "report_failure_consistency": true},
+  "shared_validator_id": "external-observable-v1",
+  "manifest": "manifest.json",
+  "faults": "faults.json",
+  "fixtures": "fixtures/catalog.json",
+  "validators": "validators.json",
+  "configs_dir": "configs",
+  "ablation": "ablation.json",
+  "result_schema": "schemas/result.schema.json",
+  "reporting": {"invalid_runs_separate": true, "raw_results_immutable": true, "calibration_excluded": true}
+}

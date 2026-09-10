@@ -1,0 +1,9 @@
+{
+  "config_id": "odys_p3",
+  "label": "ODYS_P3_VERIFIED_WORKFLOW",
+  "semantics": ["NativeMinimalAgentRuntime", "CompletionAuthority", "TypedTaskGraph", "WorkflowVerifier", "FailureProvenance", "SelectiveRepair", "MacroReplan"],
+  "features": {"completion_authority": true, "workflow_verifier": true, "typed_taskgraph": true, "failure_provenance": true, "selective_repair": true, "macro_replan": true, "durable_workflow_recovery": true},
+  "plan_mode": "SIMPLE_DEPENDENCY",
+  "validator_id": "external-observable-v1",
+  "tool_capability_set": ["workspace.list", "workspace.read", "workspace.search", "workspace.edit", "workspace.edit_lines", "workspace.diff", "cli.exec"]
+}
