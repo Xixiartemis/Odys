@@ -34,6 +34,25 @@ P3_FEATURES = {
     "failure_provenance", "selective_repair", "macro_replan",
     "durable_workflow_recovery",
 }
+FAIRNESS_IDENTITY_FIELDS = (
+    "benchmark_version",
+    "protocol_hash",
+    "manifest_hash",
+    "fault_set_hash",
+    "validator_hash",
+    "fixture_set_hash",
+    "model_identity",
+    "provider_identity",
+    "budget_identity",
+)
+FAMILY_FAULT_TYPES = {
+    "COMPLETION_INTEGRITY": {"tool_failure", "malformed_response", "partial_output", "stale_workspace", "capability_unavailable", "quota_exhausted"},
+    "EXECUTION_STATE_RECOVERY": {"tool_failure", "interruption", "duplicate_delivery", "malformed_response", "provider_timeout"},
+    "COMPLEX_WORKFLOW_REPLAN": {"assumption_invalidated", "stale_workspace", "provider_unavailable", "quota_exhausted", "tool_failure"},
+    "PROVIDER_TOOL_FAILURE": {"provider_timeout", "provider_unavailable", "quota_exhausted", "malformed_response", "tool_failure", "interruption", "capability_unavailable"},
+    "RUNTIME_TRUTH_POLICY": {"stale_workspace", "capability_unavailable", "interruption", "partial_output"},
+    "DELEGATION_LIFECYCLE": {"tool_failure", "duplicate_delivery", "interruption", "partial_output", "provider_timeout", "capability_unavailable", "malformed_response"},
+}
 
 
 class ProtocolError(ValueError):
@@ -102,6 +121,7 @@ def validate_protocol(root: Path = ROOT) -> dict[str, Any]:
         for path in sorted((root / "configs").glob("*.json"))
     }
     tasks = manifest.get("tasks", [])
+    fault_by_id = {item["fault_id"]: item for item in faults.get("faults", [])}
     if protocol.get("benchmark_version") != "phase4-v1" or manifest.get("benchmark_version") != "phase4-v1":
         raise ProtocolError("benchmark version drift")
     if len(tasks) != 60:
@@ -127,12 +147,20 @@ def validate_protocol(root: Path = ROOT) -> dict[str, Any]:
             raise ProtocolError("task benchmark version drift")
         if task["fixture_id"] not in catalog.get("fixtures", {}):
             raise ProtocolError(f"unresolved fixture {task['fixture_id']}")
-        if task["fault_injection"] not in {item["fault_id"] for item in faults.get("faults", [])}:
+        if task["fault_injection"] not in fault_by_id:
             raise ProtocolError(f"unresolved fault {task['fault_injection']}")
         if task["validator_id"] not in validators:
             raise ProtocolError(f"unresolved validator {task['validator_id']}")
         if _walk_keys(task) & PROHIBITED_BIAS_FIELDS:
             raise ProtocolError(f"bias field in {task['task_id']}")
+        fault_type = fault_by_id[task["fault_injection"]]["fault_type"]
+        if fault_type not in FAMILY_FAULT_TYPES[task["family"]]:
+            raise ProtocolError(f"fault category {fault_type} is invalid for {task['family']}")
+        task_text = f"{task['title']} {task['objective']}".casefold()
+        if fault_type == "provider_unavailable" and not any(term in task_text for term in ("provider unavailable", "provider unavailability", "provider outage")):
+            raise ProtocolError(f"provider-unavailable terminology missing in {task['task_id']}")
+        if fault_type != "provider_unavailable" and any(term in task_text for term in ("auth_invalid", "invalid provider authorization")):
+            raise ProtocolError(f"contradictory authorization terminology in {task['task_id']}")
     if protocol["headline"] != {
         "tasks": 60, "families": 6, "tasks_per_family": 10, "repeats": 3,
         "configs": ["minimal", "odys_p3"], "total_runs": 360,
@@ -184,8 +212,17 @@ def validate_protocol(root: Path = ROOT) -> dict[str, Any]:
 
 
 def compare_fairness_identity(left: dict[str, Any], right: dict[str, Any]) -> bool:
-    fields = ("benchmark_version", "manifest_hash", "fixture_hash", "validator_id", "fault_id", "model", "provider", "budget", "tool_capabilities")
-    return all(left.get(field) == right.get(field) for field in fields)
+    """Allow comparison only when all frozen experiment identities match.
+
+    Configuration identity is intentionally absent: ``minimal`` and ``odys_p3``
+    are the two configurations being compared under the same experiment.
+    Missing identity is a mismatch, never an implicit wildcard.
+    """
+    if any(field not in left or field not in right for field in FAIRNESS_IDENTITY_FIELDS):
+        return False
+    if any(left[field] is None or right[field] is None for field in FAIRNESS_IDENTITY_FIELDS):
+        return False
+    return all(left[field] == right[field] for field in FAIRNESS_IDENTITY_FIELDS)
 
 
 def validate_raw_result(result: dict[str, Any], schema_path: Path = ROOT / "schemas" / "result.schema.json") -> None:

@@ -45,10 +45,56 @@ def test_minimal_is_not_given_p3_authority_and_odys_is_explicit():
 
 
 def test_fairness_mismatch_is_rejected():
-    left = {"benchmark_version":"phase4-v1", "manifest_hash":"m", "fixture_hash":"f", "validator_id":"v", "fault_id":"fault", "model":"model", "provider":"provider", "budget":"b", "tool_capabilities":["read"]}
-    right = dict(left, fixture_hash="different")
+    left = _fairness_identity()
+    right = dict(left, fixture_set_hash="different")
     assert compare_fairness_identity(left, left)
     assert not compare_fairness_identity(left, right)
+
+
+def _fairness_identity(**overrides):
+    identity = {
+        "benchmark_version": "phase4-v1",
+        "protocol_hash": "protocol",
+        "manifest_hash": "manifest",
+        "fault_set_hash": "faults",
+        "validator_hash": "validator",
+        "fixture_set_hash": "fixtures",
+        "model_identity": "model",
+        "provider_identity": "provider",
+        "budget_identity": "budget",
+        "config_name": "minimal",
+    }
+    identity.update(overrides)
+    return identity
+
+
+def test_fairness_rejects_protocol_hash_mismatch():
+    assert not compare_fairness_identity(_fairness_identity(), _fairness_identity(protocol_hash="other"))
+
+
+def test_fairness_rejects_fault_set_hash_mismatch():
+    assert not compare_fairness_identity(_fairness_identity(), _fairness_identity(fault_set_hash="other"))
+
+
+def test_fairness_rejects_validator_hash_mismatch():
+    assert not compare_fairness_identity(_fairness_identity(), _fairness_identity(validator_hash="other"))
+
+
+def test_fairness_allows_minimal_vs_odys_with_same_experiment_identity():
+    assert compare_fairness_identity(
+        _fairness_identity(config_name="minimal"),
+        _fairness_identity(config_name="odys_p3"),
+    )
+
+
+def test_every_task_fault_reference_and_category_are_semantically_valid():
+    report = validate_protocol(ROOT)
+    assert report["task_count"] == 60
+    manifest = json.loads((ROOT / "manifest.json").read_text(encoding="utf-8"))
+    ptf07 = next(task for task in manifest["tasks"] if task["task_id"] == "PTF-07")
+    assert ptf07["fault_injection"] == "PROVIDER_UNAVAILABLE"
+    assert "unavailability" in ptf07["objective"]
+    assert "auth" not in ptf07["objective"].casefold()
 
 
 def test_not_measured_is_supported_but_not_zero():
