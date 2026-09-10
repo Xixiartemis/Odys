@@ -1,0 +1,11 @@
+{
+  "external-observable-v1": {
+    "validator_id": "external-observable-v1",
+    "version": "1",
+    "shared_across_configurations": true,
+    "configuration_agnostic": true,
+    "checks": ["workspace_state", "test_result", "expected_effect", "durable_evidence_when_declared", "side_effect_count", "dependency_order"],
+    "rejects": ["agent_self_report", "configuration_specific_status", "completed_string_as_proof"],
+    "validity_values": ["VALIDATED_PASS", "VALIDATED_FAIL", "INVALID_RUN"]
+  }
+}

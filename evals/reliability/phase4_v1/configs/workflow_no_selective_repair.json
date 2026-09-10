@@ -1,0 +1,8 @@
+{
+  "config_id": "workflow_no_selective_repair",
+  "label": "WORKFLOW_NO_SELECTIVE_REPAIR",
+  "semantics": ["Context", "Model", "Tool", "Observation", "CompletionAuthority", "WorkflowVerifier", "TypedTaskGraph"],
+  "features": {"completion_authority": true, "workflow_verifier": true, "typed_taskgraph": true, "failure_provenance": false, "selective_repair": false, "macro_replan": false, "durable_workflow_recovery": false},
+  "validator_id": "external-observable-v1",
+  "tool_capability_set": ["workspace.list", "workspace.read", "workspace.search", "workspace.edit", "workspace.edit_lines", "workspace.diff", "cli.exec"]
+}

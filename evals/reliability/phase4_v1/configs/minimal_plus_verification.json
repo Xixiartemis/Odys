@@ -1,0 +1,8 @@
+{
+  "config_id": "minimal_plus_verification",
+  "label": "MINIMAL_PLUS_VERIFICATION",
+  "semantics": ["Context", "Model", "Tool", "Observation", "CompletionAuthority", "WorkflowVerifier"],
+  "features": {"completion_authority": true, "workflow_verifier": true, "typed_taskgraph": false, "failure_provenance": false, "selective_repair": false, "macro_replan": false, "durable_workflow_recovery": false},
+  "validator_id": "external-observable-v1",
+  "tool_capability_set": ["workspace.list", "workspace.read", "workspace.search", "workspace.edit", "workspace.edit_lines", "workspace.diff", "cli.exec"]
+}

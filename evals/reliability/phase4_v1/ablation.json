@@ -1,0 +1,8 @@
+{
+  "benchmark_version": "phase4-v1",
+  "task_ids": ["CI-01", "CI-06", "ESR-01", "ESR-06", "CWR-01", "CWR-06", "PTF-01", "PTF-06", "RTP-01", "RTP-06", "DL-01", "DL-06"],
+  "configs": ["minimal", "minimal_plus_verification", "workflow_no_selective_repair", "odys_p3"],
+  "repeats": 3,
+  "total_runs": 144,
+  "selection_basis": "two coverage-diverse preregistered tasks per canonical family"
+}
