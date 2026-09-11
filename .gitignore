@@ -35,3 +35,8 @@ Thumbs.db
 !.env.example
 .pytest_tmp
 .pytest-tmp/
+
+# Benchmark runtime artifacts
+artifacts/
+results/
+evals/reliability/results/
