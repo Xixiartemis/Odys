@@ -1,0 +1,12 @@
+{
+  "runner_git_sha": "1429706ccd706b3b700ccb95fec5eaf9c125299a",
+  "protocol_hash": "993eae04290fe683d40fcf845b9e7325b9572b227e78e7cb3090dd7ee37637c3",
+  "benchmark_version": "phase4-v1",
+  "python_version": "3.11.11",
+  "os": "Windows-10-10.0.26200-SP0",
+  "dependency_lock_hash": "1b42c740da47ab8b4666d8c56d36507d000a2617a31d80101617ed6a39d584ae",
+  "model_identity": "FROZEN_BY_P4.2",
+  "provider_identity": "FROZEN_BY_P4.2",
+  "budget_identity": "1c79527d3d2b81c883f407ec2a2918fd6d3d9f85c3b7fb1a4b16676234f3df5a",
+  "created_at": "2026-09-10T08:37:38.806346+00:00"
+}

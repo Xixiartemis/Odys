@@ -1,0 +1,543 @@
+"""P4.6 Official Model Freeze — Real LLM provider wrapper for benchmark.
+
+Replaces ScriptedProviderAdapter with a real OpenAI-compatible provider
+for official benchmark runs.  This module is the ONLY new code for P4.6;
+no existing benchmark task, fault, validator, metric, runner, protocol,
+manifest, or fault file is modified.
+
+Usage::
+
+    from evals.reliability.p46_provider import (
+        RealLLMProvider,
+        RealLLMMinimalRuntimeFactory,
+        RealLLMOdysRuntimeFactory,
+        create_real_provider,
+    )
+
+    # Quick start from env vars
+    provider = create_real_provider()
+
+    # Minimal baseline factory
+    factory = RealLLMMinimalRuntimeFactory(workspace_root=Path("/tmp/ws"))
+
+    # Full ODYS factory
+    factory = RealLLMOdysRuntimeFactory(workspace_root=Path("/tmp/ws"))
+"""
+
+from __future__ import annotations
+
+import os
+import hashlib
+import json
+from pathlib import Path
+from typing import Any
+
+from lhas.native.models import RuntimeTarget
+from lhas.native.provider import OpenAIChatProviderAdapter
+
+
+# These values are the P4.6 freeze inputs.  They are deliberately kept in
+# code rather than inferred from a provider default at run time: an official
+# run must stop if the effective provider identity drifts.
+FROZEN_PROVIDER = "xiaomimimo-openai-compatible"
+FROZEN_MODEL = "mimo-v2.5-pro"
+FROZEN_ENDPOINT = "https://token-plan-cn.xiaomimimo.com/v1"
+FROZEN_API_VERSION = "chat-completions-v1"
+FROZEN_TEMPERATURE = 0.0
+FROZEN_MAX_TOKENS = 4096
+FROZEN_SEED = 42
+FROZEN_SYSTEM_PROMPT_HASH = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+FROZEN_TOOL_POLICY_HASH = "c6fb217770dcc6b5da23982cc9f9d70f19f4b45c2e343344bbdddd2f74e46f2b"
+
+
+class ProviderIdentityError(RuntimeError):
+    """Raised when the real benchmark provider cannot be proven frozen."""
+
+
+def _sha256_text(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+class RealLLMProvider:
+    """OpenAI-compatible provider that delegates to a real model API.
+
+    Wraps :class:`OpenAIChatProviderAdapter` with explicit construction
+    parameters for benchmark reproducibility (temperature, max_tokens, seed).
+
+    Satisfies the :class:`ProviderAdapter` protocol:
+
+    - ``name`` attribute
+    - ``runtime_target`` property
+    - ``generate(context, tools, timeout_seconds)`` coroutine
+    """
+
+    name: str
+
+    def __init__(
+        self,
+        *,
+        model: str,
+        api_key: str,
+        base_url: str | None = None,
+        temperature: float = 0.0,
+        max_tokens: int = 4096,
+        seed: int = 42,
+        provider_id: str = FROZEN_PROVIDER,
+        endpoint_identity: str | None = None,
+        credential_route_id: str = "benchmark",
+        client: Any = None,
+    ):
+        if model != FROZEN_MODEL:
+            raise ProviderIdentityError(
+                f"MODEL_IDENTITY_MISMATCH: expected {FROZEN_MODEL}, got {model}"
+            )
+        if provider_id != FROZEN_PROVIDER:
+            raise ProviderIdentityError(
+                f"PROVIDER_IDENTITY_MISMATCH: expected {FROZEN_PROVIDER}, got {provider_id}"
+            )
+        if not api_key or not str(api_key).strip():
+            raise ProviderIdentityError("CREDENTIAL_REQUIRED_BEFORE_RUN")
+        if float(temperature) != FROZEN_TEMPERATURE:
+            raise ProviderIdentityError("MODEL_PARAMETER_MISMATCH: temperature")
+        if int(max_tokens) != FROZEN_MAX_TOKENS:
+            raise ProviderIdentityError("MODEL_PARAMETER_MISMATCH: max_tokens")
+        if int(seed) != FROZEN_SEED:
+            raise ProviderIdentityError("MODEL_PARAMETER_MISMATCH: seed")
+
+        self.name = f"real-llm:{model}"
+        self.model = model
+        self.temperature = temperature
+        self.max_tokens = max_tokens
+        self.seed = seed
+
+        # Build extra_body for deterministic completions
+        extra_body: dict[str, Any] = {}
+        if temperature is not None:
+            extra_body["temperature"] = temperature
+        if max_tokens is not None:
+            extra_body["max_tokens"] = max_tokens
+        if seed is not None:
+            extra_body["seed"] = seed
+
+        self._inner = OpenAIChatProviderAdapter(
+            model=model,
+            api_key=api_key,
+            base_url=base_url,
+            extra_body=extra_body or None,
+            client=client,
+            provider_id=provider_id,
+            endpoint_identity=endpoint_identity,
+            credential_route_id=credential_route_id,
+        )
+
+        actual_endpoint = self.transport_identity.endpoint_identity
+        expected_endpoint = _canonical_endpoint(FROZEN_ENDPOINT)
+        if actual_endpoint != expected_endpoint:
+            raise ProviderIdentityError(
+                "PROVIDER_ENDPOINT_MISMATCH: "
+                f"expected {expected_endpoint}, got {actual_endpoint}"
+            )
+
+    @property
+    def runtime_target(self) -> RuntimeTarget:
+        """Secret-free identity for trace correlation."""
+        return self._inner.runtime_target
+
+    @property
+    def transport_identity(self):
+        """Transport-layer identity (endpoint host, fingerprint)."""
+        return self._inner.transport_identity
+
+    async def generate(
+        self,
+        *,
+        context: Any,
+        tools: list[dict[str, Any]],
+        timeout_seconds: float,
+    ) -> Any:
+        """Delegate one model call to the real OpenAI-compatible endpoint.
+
+        Parameters
+        ----------
+        context:
+            A :class:`ModelContext` (or anything the inner adapter accepts)
+            containing the messages payload.
+        tools:
+            JSON-schema tool definitions to send with the request.
+        timeout_seconds:
+            Per-call deadline in seconds.
+
+        Returns
+        -------
+        dict[str, Any]
+            Normalized response dict (``choices``, ``usage``, etc.).
+        """
+        normalized = await self._inner.generate(
+            context=context,
+            tools=tools,
+            timeout_seconds=timeout_seconds,
+        )
+        actual_model = normalized.get("model") if isinstance(normalized, dict) else None
+        if actual_model != self.model:
+            raise ProviderIdentityError(
+                "MODEL_IDENTITY_MISMATCH: provider response did not prove "
+                f"{self.model} (reported {actual_model!r})"
+            )
+        return normalized
+
+    def __repr__(self) -> str:
+        return (
+            f"RealLLMProvider(model={self.model!r}, "
+            f"base_url={self._inner.base_url!r}, "
+            f"temp={self.temperature}, seed={self.seed})"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Factory from environment variables
+# ---------------------------------------------------------------------------
+
+_DEFAULT_MODEL = "mimo-v2.5-pro"
+_DEFAULT_BASE_URL = "https://token-plan-cn.xiaomimimo.com/v1"
+_DEFAULT_TEMPERATURE = 0.0
+_DEFAULT_MAX_TOKENS = 4096
+_DEFAULT_SEED = 42
+
+
+def _canonical_endpoint(value: str) -> str:
+    """Use the same canonical transport identity as the native adapter."""
+    from lhas.native.transport import canonical_transport_identity
+
+    return canonical_transport_identity(value).endpoint_identity
+
+
+def provider_identity(provider: RealLLMProvider) -> dict[str, Any]:
+    """Return the secret-free identity proved by a constructed provider."""
+    if not isinstance(provider, RealLLMProvider):
+        raise ProviderIdentityError("PROVIDER_IDENTITY_UNAVAILABLE")
+
+    target = provider.runtime_target
+    actual_provider = target.provider_id
+    actual_model = target.model_id
+    actual_endpoint = provider.transport_identity.endpoint_identity
+    if actual_provider != FROZEN_PROVIDER:
+        raise ProviderIdentityError("PROVIDER_IDENTITY_MISMATCH")
+    if actual_model != FROZEN_MODEL:
+        raise ProviderIdentityError("MODEL_IDENTITY_MISMATCH")
+    if actual_endpoint != _canonical_endpoint(FROZEN_ENDPOINT):
+        raise ProviderIdentityError("PROVIDER_ENDPOINT_MISMATCH")
+    if provider.temperature != FROZEN_TEMPERATURE:
+        raise ProviderIdentityError("MODEL_PARAMETER_MISMATCH: temperature")
+    if provider.max_tokens != FROZEN_MAX_TOKENS:
+        raise ProviderIdentityError("MODEL_PARAMETER_MISMATCH: max_tokens")
+    if provider.seed != FROZEN_SEED:
+        raise ProviderIdentityError("MODEL_PARAMETER_MISMATCH: seed")
+
+    return {
+        "provider": actual_provider,
+        "model": actual_model,
+        "api_version": FROZEN_API_VERSION,
+        "endpoint_hash": _sha256_text(actual_endpoint),
+        "temperature": provider.temperature,
+        "max_tokens": provider.max_tokens,
+        "system_prompt_hash": FROZEN_SYSTEM_PROMPT_HASH,
+        "tool_policy_hash": FROZEN_TOOL_POLICY_HASH,
+    }
+
+
+def validate_and_persist_provider_identity(
+    provider: RealLLMProvider,
+    *,
+    path: Path = Path("results/official_phase4/provider_identity.json"),
+) -> dict[str, Any]:
+    """Validate provider identity and persist only non-secret evidence."""
+    identity = provider_identity(provider)
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        try:
+            existing = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ProviderIdentityError("PROVIDER_IDENTITY_ARTIFACT_INVALID") from exc
+        if existing != identity:
+            raise ProviderIdentityError("PROVIDER_IDENTITY_ARTIFACT_MISMATCH")
+        return identity
+    path.write_text(
+        json.dumps(identity, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return identity
+
+
+def create_real_provider(
+    *,
+    model: str | None = None,
+    api_key: str | None = None,
+    base_url: str | None = None,
+    temperature: float | None = None,
+    max_tokens: int | None = None,
+    seed: int | None = None,
+) -> RealLLMProvider:
+    """Create a :class:`RealLLMProvider` from explicit args or env vars.
+
+    Resolution order (each parameter):
+    1. Explicit keyword argument (if not None).
+    2. Environment variable (see mapping below).
+    3. Module-level default.
+
+    Environment variables
+    ---------------------
+    ODYS_BENCHMARK_MODEL           → model        (default: mimo-v2.5-pro)
+    ODYS_BENCHMARK_API_KEY         → api_key      (fallback: HERMES_CUSTOM_TOKEN_PLAN_CN_XIAOMIMIMO_COM_API_KEY)
+    ODYS_BENCHMARK_BASE_URL        → base_url     (default: https://token-plan-cn.xiaomimimo.com/v1)
+    ODYS_BENCHMARK_TEMPERATURE     → temperature   (default: 0.0)
+    ODYS_BENCHMARK_MAX_TOKENS      → max_tokens    (default: 4096)
+    ODYS_BENCHMARK_SEED            → seed          (default: 42)
+    """
+    resolved_model = model or os.environ.get("ODYS_BENCHMARK_MODEL", _DEFAULT_MODEL)
+    configured_provider = os.environ.get("ODYS_BENCHMARK_PROVIDER", FROZEN_PROVIDER)
+    if configured_provider != FROZEN_PROVIDER:
+        raise ProviderIdentityError(
+            "PROVIDER_IDENTITY_MISMATCH: "
+            f"expected {FROZEN_PROVIDER}, got {configured_provider}"
+        )
+
+    resolved_key = (
+        api_key
+        or os.environ.get("ODYS_BENCHMARK_API_KEY")
+        or os.environ.get("HERMES_CUSTOM_TOKEN_PLAN_CN_XIAOMIMIMO_COM_API_KEY")
+    )
+    if not resolved_key or not str(resolved_key).strip():
+        raise ProviderIdentityError(
+            "CREDENTIAL_REQUIRED_BEFORE_RUN: set ODYS_BENCHMARK_API_KEY or "
+            "HERMES_CUSTOM_TOKEN_PLAN_CN_XIAOMIMIMO_COM_API_KEY in the environment, "
+            "or pass api_key= explicitly."
+        )
+
+    resolved_base = base_url or os.environ.get("ODYS_BENCHMARK_BASE_URL", _DEFAULT_BASE_URL)
+    resolved_temp = (
+        temperature
+        if temperature is not None
+        else float(os.environ.get("ODYS_BENCHMARK_TEMPERATURE", _DEFAULT_TEMPERATURE))
+    )
+    resolved_max = (
+        max_tokens
+        if max_tokens is not None
+        else int(os.environ.get("ODYS_BENCHMARK_MAX_TOKENS", _DEFAULT_MAX_TOKENS))
+    )
+    resolved_seed = (
+        seed
+        if seed is not None
+        else int(os.environ.get("ODYS_BENCHMARK_SEED", _DEFAULT_SEED))
+    )
+
+    return RealLLMProvider(
+        model=resolved_model,
+        api_key=resolved_key,
+        base_url=resolved_base,
+        temperature=resolved_temp,
+        max_tokens=resolved_max,
+        seed=resolved_seed,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Runtime factories — drop-in replacements for MinimalRuntimeFactory /
+# OdysRuntimeFactory that use a real LLM instead of ScriptedProviderAdapter
+# ---------------------------------------------------------------------------
+
+def _build_real_minimal_components(
+    config: dict[str, Any],
+    workspace_root: Any = None,
+    provider: RealLLMProvider | None = None,
+) -> tuple[Any, Any, Any]:
+    """Build provider, dispatcher, and db for the minimal runtime."""
+    import tempfile
+
+    from lhas.capability_registry import default_capabilities
+    from lhas.native.tools import NativeToolDispatcher
+    from lhas.persistence.database import Database
+    from lhas.tools.registry import ToolRegistry
+    from tests.helpers import make_test_capability_definition, make_test_capability_registry
+
+    tmp_dir = tempfile.mkdtemp(prefix="odys-p46-minimal-")
+    db = Database(Path(tmp_dir) / "p46-minimal.db")
+    db.init_db()
+
+    if provider is None:
+        provider = create_real_provider()
+
+    allowed = set(config.get("tool_capability_set", []))
+
+    if workspace_root is not None:
+        from evals.reliability.tools.registry import create_benchmark_tool_registry
+        registry = create_benchmark_tool_registry(Path(workspace_root))
+    else:
+        registry = ToolRegistry()
+
+    default_ids = {d.id for d in default_capabilities()}
+    extra_defs = [
+        make_test_capability_definition(cap_id, output_schema={})
+        for cap_id in allowed
+        if cap_id not in default_ids
+    ]
+    cap_reg, contract = make_test_capability_registry(registry, extra_defs)
+
+    dispatcher = NativeToolDispatcher(
+        db=db,
+        registry=registry,
+        allowed_capabilities=allowed,
+        allowed_side_effect_capabilities=allowed,
+        capability_registry=cap_reg,
+        tool_contract=contract,
+    )
+
+    return provider, dispatcher, db
+
+
+def _build_real_odys_kernel(
+    config: dict[str, Any],
+    workspace_root: Any = None,
+    provider: RealLLMProvider | None = None,
+) -> tuple[Any, Any]:
+    """Build a full NativeAgentKernel with real LLM provider."""
+    import tempfile
+
+    from lhas.capability_registry import default_capabilities
+    from lhas.native.completion import CompletionAuthority
+    from lhas.native.kernel import NativeAgentKernel
+    from lhas.native.models import NoOpNativeFaultInjector
+    from lhas.native.parser import ModelResponseParser
+    from lhas.native.tools import NativeToolDispatcher
+    from lhas.persistence.database import Database
+    from lhas.tools.registry import ToolRegistry
+    from tests.helpers import (
+        PassingCommandValidator,
+        make_test_capability_definition,
+        make_test_capability_registry,
+    )
+
+    tmp_dir = tempfile.mkdtemp(prefix="odys-p46-benchmark-")
+    db = Database(Path(tmp_dir) / "p46-benchmark.db")
+    db.init_db()
+
+    if provider is None:
+        provider = create_real_provider()
+
+    allowed = set(config.get("tool_capability_set", []))
+
+    if workspace_root is not None:
+        from evals.reliability.tools.registry import create_benchmark_tool_registry
+        registry = create_benchmark_tool_registry(Path(workspace_root))
+    else:
+        registry = ToolRegistry()
+
+    default_ids = {d.id for d in default_capabilities()}
+    extra_defs = [
+        make_test_capability_definition(cap_id, output_schema={})
+        for cap_id in allowed
+        if cap_id not in default_ids
+    ]
+    cap_reg, contract = make_test_capability_registry(registry, extra_defs)
+
+    dispatcher = NativeToolDispatcher(
+        db=db,
+        registry=registry,
+        allowed_capabilities=allowed,
+        allowed_side_effect_capabilities=allowed,
+        capability_registry=cap_reg,
+        tool_contract=contract,
+    )
+
+    validator = PassingCommandValidator()
+    completion_authority = CompletionAuthority(
+        db=db,
+        validator=validator,
+        fault_injector=NoOpNativeFaultInjector(),
+    )
+
+    kernel = NativeAgentKernel(
+        db=db,
+        provider=provider,
+        dispatcher=dispatcher,
+        completion_authority=completion_authority,
+        parser=ModelResponseParser(),
+        fault_injector=NoOpNativeFaultInjector(),
+    )
+
+    return kernel, db
+
+
+class RealLLMMinimalRuntimeFactory:
+    """Factory producing minimal runtimes backed by a real LLM.
+
+    Drop-in replacement for :class:`MinimalRuntimeFactory` that uses
+    :class:`RealLLMProvider` instead of :class:`ScriptedProviderAdapter`.
+    """
+
+    def __init__(
+        self,
+        *,
+        provider: RealLLMProvider | None = None,
+        workspace_root: Any = None,
+    ):
+        self._provider = provider
+        self._workspace_root = workspace_root
+
+    def create_runtime(self, config: dict[str, Any]) -> Any:
+        """Create a minimal runtime with a real LLM provider."""
+        from evals.reliability.runtime_factory.minimal_factory import _MinimalRuntime
+
+        provider, dispatcher, db = _build_real_minimal_components(
+            config,
+            workspace_root=self._workspace_root,
+            provider=self._provider,
+        )
+        runtime = _MinimalRuntime(provider=provider, dispatcher=dispatcher, db=db)
+        assert (
+            not hasattr(runtime, "completion") or runtime.completion is None
+        ), "MinimalRuntime must NOT have CompletionAuthority"
+        return runtime
+
+
+class RealLLMOdysRuntimeFactory:
+    """Factory producing full ODYS runtimes backed by a real LLM.
+
+    Drop-in replacement for :class:`OdysRuntimeFactory` that uses
+    :class:`RealLLMProvider` instead of :class:`ScriptedProviderAdapter`.
+    """
+
+    def __init__(
+        self,
+        *,
+        provider: RealLLMProvider | None = None,
+        workspace_root: Any = None,
+    ):
+        self._provider = provider
+        self._workspace_root = workspace_root
+
+    def create_runtime(self, config: dict[str, Any]) -> Any:
+        """Create a full ODYS runtime with a real LLM provider."""
+        from evals.reliability.runtime_factory.odys_factory import _OdysRuntime
+
+        kernel, db = _build_real_odys_kernel(
+            config,
+            workspace_root=self._workspace_root,
+            provider=self._provider,
+        )
+        runtime = _OdysRuntime(kernel=kernel, db=db)
+        assert (
+            hasattr(runtime, "completion") and runtime.completion is not None
+        ), "OdysRuntime MUST have CompletionAuthority"
+        return runtime
+
+
+__all__ = [
+    "RealLLMProvider",
+    "RealLLMMinimalRuntimeFactory",
+    "RealLLMOdysRuntimeFactory",
+    "ProviderIdentityError",
+    "provider_identity",
+    "validate_and_persist_provider_identity",
+    "create_real_provider",
+]

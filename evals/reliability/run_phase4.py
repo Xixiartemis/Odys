@@ -391,6 +391,11 @@ class ExecutionOutcome:
     tool_cost: float | str = NOT_MEASURED
     wall_time_seconds: float | str = NOT_MEASURED
     human_intervention: bool = False
+    # These fields are execution-layer observations.  They are intentionally
+    # not promoted into the frozen result schema; official trace references
+    # are carried by the free-form runtime_environment object below.
+    execution_trace: list[dict[str, Any]] = field(default_factory=list)
+    runtime_source: str | None = None
 
     @classmethod
     def from_value(cls, value: "ExecutionOutcome | Mapping[str, Any]") -> "ExecutionOutcome":
@@ -497,13 +502,31 @@ def _repo_sha(repo_root: Path) -> str:
         return "UNKNOWN"
 
 
-def _runtime_environment(snapshot: ProtocolSnapshot, *, model: str, provider: str) -> dict[str, Any]:
-    return {
+def _runtime_environment(
+    snapshot: ProtocolSnapshot,
+    *,
+    model: str,
+    provider: str,
+    runtime_source: str | None = None,
+    execution_trace_ref: str | None = None,
+    trace_event_count: int | None = None,
+) -> dict[str, Any]:
+    environment: dict[str, Any] = {
         "python": platform.python_version(),
         "platform": platform.platform(),
         "runner": "phase4-v1",
         "identity": snapshot.fairness_identity(model=model, provider=provider),
     }
+    # result.schema.json is frozen and rejects new top-level keys.  The
+    # runtime_environment object is intentionally extensible, so the trace
+    # contract is recorded here without changing protocol_hash.
+    if runtime_source is not None:
+        environment["runtime_source"] = runtime_source
+    if execution_trace_ref is not None:
+        environment["execution_trace_ref"] = execution_trace_ref
+    if trace_event_count is not None:
+        environment["trace_event_count"] = trace_event_count
+    return environment
 
 
 def _invalid_outcome(exc: BaseException) -> dict[str, Any]:
@@ -628,6 +651,94 @@ class ResultWriter:
         return {"valid": len(self._raw), "invalid": len(self._invalid)}
 
 
+TRACE_EVENT_FIELDS = frozenset(
+    {"timestamp", "event_type", "task_id", "step_id", "attempt_id", "status", "metadata"}
+)
+
+
+class TraceOutputError(RuntimeError):
+    """Raised when a valid run cannot be represented by the trace contract."""
+
+
+class TraceWriter:
+    """Append-only trace sidecar writer for official execution output."""
+
+    def __init__(self, path: Path):
+        self.path = Path(path)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._records: dict[str, tuple[str, int]] = {}
+        self._line_count = 0
+        if self.path.exists():
+            for line_number, line in enumerate(
+                self.path.read_text(encoding="utf-8").splitlines(), start=1
+            ):
+                self._line_count = line_number
+                if not line.strip():
+                    continue
+                record = json.loads(line)
+                run_id = record.get("run_id")
+                if not isinstance(run_id, str):
+                    raise TraceOutputError("TRACE_RUN_ID_MISSING")
+                event_count = record.get("trace_event_count")
+                if not isinstance(event_count, int) or event_count < 1:
+                    raise TraceOutputError("TRACE_SCHEMA_INVALID")
+                self._records[run_id] = (f"{self.path.name}#L{line_number}", event_count)
+
+    @staticmethod
+    def _validate_events(events: Any) -> list[dict[str, Any]]:
+        if not isinstance(events, list) or not events:
+            raise TraceOutputError("TRACE_EVENTS_MISSING")
+        normalized: list[dict[str, Any]] = []
+        for event in events:
+            if not isinstance(event, Mapping) or not TRACE_EVENT_FIELDS.issubset(event):
+                raise TraceOutputError("TRACE_SCHEMA_INVALID")
+            if not isinstance(event["metadata"], Mapping):
+                raise TraceOutputError("TRACE_SCHEMA_INVALID")
+            normalized.append(dict(event))
+        return normalized
+
+    def assert_present(self, run_id: str) -> None:
+        if run_id not in self._records:
+            raise TraceOutputError(f"TRACE_RESUME_RECORD_MISSING: {run_id}")
+
+    def append(
+        self,
+        *,
+        run_id: str,
+        task_id: str,
+        config: str,
+        repeat: int,
+        runtime_source: str,
+        model_identity: str,
+        protocol_hash: str,
+        events: Any,
+    ) -> tuple[str, int]:
+        normalized = self._validate_events(events)
+        existing = self._records.get(run_id)
+        if existing is not None:
+            return existing
+        record = {
+            "run_id": run_id,
+            "task_id": task_id,
+            "config": config,
+            "repeat": repeat,
+            "runtime_source": runtime_source,
+            "model_identity": model_identity,
+            "protocol_hash": protocol_hash,
+            "execution_trace": normalized,
+            "trace_event_count": len(normalized),
+        }
+        line = json.dumps(record, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n"
+        with self.path.open("a", encoding="utf-8", newline="\n") as handle:
+            handle.write(line)
+            handle.flush()
+            os.fsync(handle.fileno())
+        self._line_count += 1
+        reference = f"{self.path.name}#L{self._line_count}"
+        self._records[run_id] = (reference, len(normalized))
+        return reference, len(normalized)
+
+
 class Phase4Runner:
     """Runs selected frozen cases and writes schema-validated raw evidence."""
 
@@ -642,7 +753,13 @@ class Phase4Runner:
         model: str = "FROZEN_BY_P4.2",
         provider: str = "FROZEN_BY_P4.2",
         repo_root: Path | None = None,
+        trace_path: Path | None = None,
+        require_trace: bool = False,
     ):
+        if require_trace and trace_path is None:
+            raise RunnerConfigurationError(
+                "TRACE_OUTPUT_REQUIRED: provide trace_path for official runs"
+            )
         self.snapshot = snapshot
         self.output = ResultWriter(output_dir)
         self.executor = executor or UnconfiguredExecutor()
@@ -653,6 +770,8 @@ class Phase4Runner:
         self.provider = provider
         self.repo_root = Path(repo_root or Path.cwd()).resolve()
         self.repo_sha = _repo_sha(self.repo_root)
+        self.require_trace = require_trace
+        self.trace_output = TraceWriter(trace_path) if trace_path is not None else None
 
     async def run(self, runs: Iterable[RunSpec]) -> dict[str, int]:
         for spec in runs:
@@ -661,6 +780,9 @@ class Phase4Runner:
                     spec.run_id,
                     self.snapshot.fairness_identity(model=self.model, provider=self.provider),
                 )
+                if self.require_trace:
+                    assert self.trace_output is not None
+                    self.trace_output.assert_present(spec.run_id)
                 continue
             await self._run_one(spec)
         self.output._rewrite_aggregation()
@@ -693,7 +815,39 @@ class Phase4Runner:
                     outcome.wall_time_seconds = round(time.perf_counter() - started_clock, 6)
                 validation = self.validator.validate(spec.task, fixture, outcome)
                 finished = _utc_now()
-                record = self._record(spec, fixture, fault, outcome, validation, started, finished)
+                trace_ref: str | None = None
+                trace_event_count: int | None = None
+                runtime_source = outcome.runtime_source or str(
+                    outcome.observed_state.get("runtime_source", "unknown")
+                )
+                trace = outcome.execution_trace or outcome.observed_state.get(
+                    "execution_trace", []
+                )
+                if self.require_trace:
+                    if self.trace_output is None:
+                        raise TraceOutputError("TRACE_OUTPUT_REQUIRED")
+                    trace_ref, trace_event_count = self.trace_output.append(
+                        run_id=spec.run_id,
+                        task_id=spec.task["task_id"],
+                        config=spec.config["config_id"],
+                        repeat=spec.repeat_index,
+                        runtime_source=runtime_source,
+                        model_identity=self.model,
+                        protocol_hash=self.snapshot.protocol_hash,
+                        events=trace,
+                    )
+                record = self._record(
+                    spec,
+                    fixture,
+                    fault,
+                    outcome,
+                    validation,
+                    started,
+                    finished,
+                    runtime_source=runtime_source,
+                    execution_trace_ref=trace_ref,
+                    trace_event_count=trace_event_count,
+                )
             except Exception as exc:
                 execution_error = exc
             try:
@@ -720,6 +874,10 @@ class Phase4Runner:
         validation: ValidationOutcome,
         started: datetime,
         finished: datetime,
+        *,
+        runtime_source: str | None = None,
+        execution_trace_ref: str | None = None,
+        trace_event_count: int | None = None,
     ) -> dict[str, Any]:
         return {
             "benchmark_version": PROTOCOL_NAME,
@@ -734,7 +892,14 @@ class Phase4Runner:
             "protocol_hash": self.snapshot.protocol_hash,
             "model": self.model,
             "provider": self.provider,
-            "runtime_environment": _runtime_environment(self.snapshot, model=self.model, provider=self.provider),
+            "runtime_environment": _runtime_environment(
+                self.snapshot,
+                model=self.model,
+                provider=self.provider,
+                runtime_source=runtime_source,
+                execution_trace_ref=execution_trace_ref,
+                trace_event_count=trace_event_count,
+            ),
             "validator_id": self.snapshot.protocol["shared_validator_id"],
             "fault_id": fault.fault_id,
             "fault_type": fault.fault_type,
