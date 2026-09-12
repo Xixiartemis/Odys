@@ -12,6 +12,7 @@ from evals.reliability.run_phase4 import (
     RunSelectionError,
     select_runs,
 )
+from evals.reliability.p46_launcher import ProgressTracker, compute_summary
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -71,7 +72,8 @@ def test_runner_writes_schema_validated_raw_and_aggregation_input(tmp_path):
     assert raw[0]["protocol_hash"] == snapshot.protocol_hash
     assert raw[0]["manifest_hash"] == snapshot.manifest_hash
     assert raw[0]["fixture_hash"]
-    assert not (tmp_path / "invalid.jsonl").exists()
+    assert (tmp_path / "invalid.jsonl").exists()
+    assert (tmp_path / "invalid.jsonl").read_text(encoding="utf-8") == ""
     assert executor.requests[0].fault.fault_id == "PARTIAL_OUTPUT"
 
 
@@ -97,7 +99,81 @@ def test_runner_resume_does_not_reexecute_completed_run(tmp_path):
     second = ExplodingExecutor()
     resumed = Phase4Runner(snapshot, output_dir=tmp_path, executor=second, repo_root=ROOT)
     assert asyncio.run(resumed.run(run)) == {"valid": 1, "invalid": 0}
-    assert not (tmp_path / "invalid.jsonl").exists()
+    assert (tmp_path / "invalid.jsonl").exists()
+    assert (tmp_path / "invalid.jsonl").read_text(encoding="utf-8") == ""
+
+
+def test_immutable_result_collision_is_recorded_as_infra_invalid(tmp_path):
+    snapshot, run = _seed_result(tmp_path)
+    collision_runner = Phase4Runner(
+        snapshot,
+        output_dir=tmp_path,
+        executor=PassingExecutor(),
+        repo_root=ROOT,
+    )
+
+    # Normal resume skips an existing run.  Calling the one-run path directly
+    # simulates a duplicate execution whose result differs from immutable raw
+    # evidence and exercises the collision accounting path.
+    asyncio.run(collision_runner._run_one(run[0]))
+
+    invalid = [
+        json.loads(line)
+        for line in (tmp_path / "invalid.jsonl").read_text().splitlines()
+        if line.strip()
+    ]
+    assert invalid[-1]["run_id"] == run[0].run_id
+    assert invalid[-1]["status"] == "INFRA_FAILURE"
+    assert invalid[-1]["error_type"] == "IMMUTABLE_RESULT_COLLISION"
+    assert collision_runner.output.counts == {"valid": 1, "invalid": 1}
+
+    summary = compute_summary(tmp_path, planned_runs=1)
+    assert summary["valid_runs"] == 0
+    assert summary["invalid_runs"] == 1
+    assert summary["total_runs"] == 1
+    assert summary["collision_count"] == 1
+    assert summary["execution_attempts"] == 2
+    assert summary["planned_runs"] == 1
+
+    reopened = Phase4Runner(
+        snapshot,
+        output_dir=tmp_path,
+        executor=ExplodingExecutor(),
+        repo_root=ROOT,
+    )
+    assert asyncio.run(reopened.run(run)) == {"valid": 1, "invalid": 1}
+
+
+def test_progress_separates_planned_runs_from_execution_attempts(tmp_path):
+    tracker = ProgressTracker(total=12, output_dir=tmp_path)
+    for _ in range(12):
+        tracker.record_result(is_valid=True)
+    tracker.record_result(is_valid=False, counts_as_completion=False)
+
+    snapshot = tracker.snapshot()
+    assert snapshot["planned_runs"] == 12
+    assert snapshot["completed"] == 12
+    assert snapshot["execution_attempts"] == 13
+    assert snapshot["remaining"] == 0
+
+
+def test_progress_load_clamps_legacy_overcount(tmp_path):
+    (tmp_path / "progress.json").write_text(
+        json.dumps(
+            {
+                "total": 12,
+                "completed": 13,
+                "valid": 12,
+                "invalid": 1,
+                "execution_attempts": 13,
+            }
+        ),
+        encoding="utf-8",
+    )
+    tracker = ProgressTracker(total=12, output_dir=tmp_path)
+
+    assert tracker.completed == 12
+    assert tracker.execution_attempts == 13
 
 
 def _seed_result(tmp_path):

@@ -44,15 +44,26 @@ def compute_metrics(runs: list[dict[str, Any]]) -> dict[str, float | str]:
 
     Returns
     -------
-    dict with keys: verified_completion_rate, false_completion_rate,
-    recovery_success_rate, cost_per_verified_completion,
-    duplicate_side_effect_rate, lost_work_rate
+    dict with the six historical metrics plus the P410 semantic metrics.
     """
     valid_runs = [r for r in runs if r.get("validity") in ("VALIDATED_PASS", "VALIDATED_FAIL")]
     recovery_eligible = [r for r in valid_runs if r.get("recovery_required") is True]
     verified = [r for r in valid_runs if r.get("verified_completion") is True]
-    false_positive = [r for r in valid_runs if r.get("false_completion") is True]
-    recovery_successes = [r for r in recovery_eligible if r.get("recovery_success") is True]
+    def validation_identity(record: dict[str, Any]) -> dict[str, Any]:
+        environment = record.get("runtime_environment")
+        value = environment.get("validation") if isinstance(environment, dict) else None
+        return value if isinstance(value, dict) else {}
+
+    def false_completion_detected(record: dict[str, Any]) -> bool:
+        return bool(
+            record.get("false_completion_detected") is True
+            or validation_identity(record).get("false_completion_detected") is True
+            or record.get("false_completion") is True
+        )
+
+    false_positive = [r for r in valid_runs if false_completion_detected(r)]
+    recovery_attempted = [r for r in valid_runs if r.get("recovery_attempted") is True]
+    recovery_successes = [r for r in recovery_attempted if r.get("recovery_success") is True]
     dup_side_effects = [r for r in valid_runs if (r.get("duplicate_side_effect_count") or 0) > 0]
 
     # Lost work: recovery-eligible runs with lost_work_units > 0 (numeric)
@@ -77,7 +88,9 @@ def compute_metrics(runs: list[dict[str, Any]]) -> dict[str, float | str]:
     return {
         "verified_completion_rate": _safe_divide(len(verified), len(valid_runs)),
         "false_completion_rate": _safe_divide(len(false_positive), len(valid_runs)),
-        "recovery_success_rate": _safe_divide(len(recovery_successes), len(recovery_eligible), not_measured=True),
+        "false_completion_detected_rate": _safe_divide(len(false_positive), len(valid_runs)),
+        "recovery_execution_rate": _safe_divide(len(recovery_attempted), len(recovery_eligible), not_measured=True),
+        "recovery_success_rate": _safe_divide(len(recovery_successes), len(recovery_attempted), not_measured=True),
         "cost_per_verified_completion": cost_per_verified,
         "duplicate_side_effect_rate": _safe_divide(len(dup_side_effects), len(valid_runs)),
         "lost_work_rate": _safe_divide(len(lost_work_runs), len(recovery_eligible), not_measured=True),
@@ -151,6 +164,8 @@ def _fmt_metric_json(value: float | str) -> float | str:
 METRIC_LABELS = {
     "verified_completion_rate": "Verified Completion Rate",
     "false_completion_rate": "False Completion Rate",
+    "false_completion_detected_rate": "False Completion Detected Rate",
+    "recovery_execution_rate": "Recovery Execution Rate",
     "recovery_success_rate": "Recovery Success Rate",
     "cost_per_verified_completion": "Cost per Verified Completion",
     "duplicate_side_effect_rate": "Duplicate Side-Effect Rate",

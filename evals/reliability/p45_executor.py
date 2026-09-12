@@ -107,6 +107,8 @@ class P45BenchmarkExecutor:
         trace_file: Path | None = None,
         provider: Any | None = None,
         provider_identity: dict[str, Any] | None = None,
+        expected_model: str | None = None,
+        recovery_runner: Any | None = None,
     ):
         if factory_type not in ("real", "scripted"):
             raise ValueError(
@@ -118,6 +120,17 @@ class P45BenchmarkExecutor:
         self._trace_file = trace_file
         self._provider = provider
         self._provider_identity = dict(provider_identity or {}) or None
+        self._recovery_runner = recovery_runner
+        # Runtime objects are retained only until the runner asks for a
+        # validation-rejection recovery.  A runtime may expose the canonical
+        # repair_after_failure seam; tests and dedicated pilots may inject a
+        # recovery_runner using the same narrow contract.
+        self._active_runtimes: dict[str, Any] = {}
+        self._expected_model = expected_model or (
+            self._provider_identity.get("model")
+            if self._provider_identity
+            else None
+        )
         logger.info("P45BenchmarkExecutor created with factory_type=%s", factory_type)
 
     @property
@@ -131,7 +144,13 @@ class P45BenchmarkExecutor:
             raise RuntimeError("PROVIDER_IDENTITY_UNAVAILABLE")
         from evals.reliability.p46_provider import validate_and_persist_provider_identity
 
-        identity = validate_and_persist_provider_identity(self._provider, path=path)
+        identity = validate_and_persist_provider_identity(
+            self._provider,
+            path=path,
+            expected_model=self._expected_model or getattr(
+                self._provider, "model", "mimo-v2.5-pro"
+            ),
+        )
         self._provider_identity = dict(identity)
         return identity
 
@@ -144,10 +163,15 @@ class P45BenchmarkExecutor:
             from evals.reliability.p46_provider import (
                 create_real_provider,
                 validate_and_persist_provider_identity,
+                FROZEN_MODEL,
             )
 
-            self._provider = create_real_provider()
-            self._provider_identity = validate_and_persist_provider_identity(self._provider)
+            self._expected_model = self._expected_model or FROZEN_MODEL
+            self._provider = create_real_provider(expected_model=self._expected_model)
+            self._provider_identity = validate_and_persist_provider_identity(
+                self._provider,
+                expected_model=self._expected_model,
+            )
 
         config_id = request.config.get("config_id", "unknown")
         task = request.task
@@ -224,7 +248,9 @@ class P45BenchmarkExecutor:
                     runtime_source = "odys_factory"
                 else:
                     trace.append(_trace_event("VALIDATION_RESULT", task_id, attempt_id,
-                                              result="fail", reason=f"Unknown config: {config_id}"))
+                                              validator_execution_status="NOT_EXECUTED",
+                                              acceptance_status="NOT_EVALUATED",
+                                              reason=f"Unknown config: {config_id}"))
                     return ExecutionOutcome(
                         claimed_complete=False,
                         observed_state={
@@ -249,7 +275,9 @@ class P45BenchmarkExecutor:
                     runtime_source = "odys_factory"
                 else:
                     trace.append(_trace_event("VALIDATION_RESULT", task_id, attempt_id,
-                                              result="fail", reason=f"Unknown config: {config_id}"))
+                                              validator_execution_status="NOT_EXECUTED",
+                                              acceptance_status="NOT_EVALUATED",
+                                              reason=f"Unknown config: {config_id}"))
                     return ExecutionOutcome(
                         claimed_complete=False,
                         observed_state={
@@ -262,6 +290,7 @@ class P45BenchmarkExecutor:
                     )
 
             runtime = factory.create_runtime(request.config)
+            self._active_runtimes[request.run_id] = runtime
 
             # ---- RUNTIME_CREATED ----
             trace.append(_trace_event("RUNTIME_CREATED", task_id, attempt_id,
@@ -289,10 +318,13 @@ class P45BenchmarkExecutor:
                     trace.append(_trace_event("FIXTURE_OBSERVATIONS", task_id, attempt_id,
                                               observation_keys=[], note="no fixture"))
 
-            # ---- VALIDATION_RESULT ----
-            validation_passed = outcome.claimed_complete and outcome.failure_type is None
+            # The shared Phase4Runner owns the actual external validator
+            # boundary.  Keep this event as a non-authoritative placeholder;
+            # the runner replaces it with explicit execution/acceptance
+            # statuses after validation.
             trace.append(_trace_event("VALIDATION_RESULT", task_id, attempt_id,
-                                      result="pass" if validation_passed else "fail",
+                                      validator_execution_status="NOT_EXECUTED",
+                                      acceptance_status="NOT_EVALUATED",
                                       failure_type=outcome.failure_type))
 
             # ---- Propagate trace into observed_state ----
@@ -318,7 +350,9 @@ class P45BenchmarkExecutor:
             trace.append(_trace_event("EXECUTION_COMPLETE", task_id, attempt_id,
                                       error=f"{type(exc).__name__}: {str(exc)[:500]}"))
             trace.append(_trace_event("VALIDATION_RESULT", task_id, attempt_id,
-                                      result="fail", failure_type=f"EXECUTOR_ERROR:{type(exc).__name__}"))
+                                      validator_execution_status="NOT_EXECUTED",
+                                      acceptance_status="NOT_EVALUATED",
+                                      failure_type=f"EXECUTOR_ERROR:{type(exc).__name__}"))
             return ExecutionOutcome(
                 claimed_complete=False,
                 observed_state={
@@ -333,6 +367,37 @@ class P45BenchmarkExecutor:
             )
         finally:
             self._reset_fixture(request)
+
+    async def recover_after_validation(
+        self,
+        request: ExecutionRequest,
+        outcome: ExecutionOutcome,
+        validation: Any,
+    ) -> ExecutionOutcome | dict[str, Any] | None:
+        """Delegate rejection recovery to the runtime's canonical seam.
+
+        P45 does not invent a second repair implementation.  It first gives
+        the runtime a chance to use its existing ``repair_after_failure``
+        service, and otherwise uses an explicitly injected adapter (used by
+        the integration pilot).  Returning ``None`` leaves the rejection as
+        a valid, unrecovered benchmark result.
+        """
+        runtime = self._active_runtimes.get(request.run_id)
+        handler = getattr(runtime, "repair_after_failure", None)
+        if callable(handler):
+            result = handler(request, outcome, validation)
+            if hasattr(result, "__await__"):
+                result = await result
+            self._active_runtimes.pop(request.run_id, None)
+            return result
+        if callable(self._recovery_runner):
+            result = self._recovery_runner(request, outcome, validation)
+            if hasattr(result, "__await__"):
+                result = await result
+            self._active_runtimes.pop(request.run_id, None)
+            return result
+        self._active_runtimes.pop(request.run_id, None)
+        return None
 
     def _setup_fixture(self, request: ExecutionRequest) -> Path:
         """Setup fixture workspace for a task."""
@@ -424,6 +489,30 @@ def create_executor() -> P45BenchmarkExecutor:
         factory_type="real",
         provider=provider,
         provider_identity=identity,
+        expected_model=provider.model,
+    )
+
+
+def create_cheap_executor() -> P45BenchmarkExecutor:
+    """Factory for the isolated ``phase4-v1-cheap-model`` profile."""
+    from evals.reliability.fixture_packages.registry import FixtureRegistry
+    from evals.reliability.p46_provider import (
+        CHEAP_MODEL,
+        create_cheap_model_provider,
+        provider_identity,
+    )
+
+    fixture_registry = FixtureRegistry()
+    logger.info("Loaded %d fixtures", len(fixture_registry))
+    provider = create_cheap_model_provider()
+    identity = provider_identity(provider, expected_model=CHEAP_MODEL)
+
+    return P45BenchmarkExecutor(
+        fixture_registry=fixture_registry,
+        factory_type="real",
+        provider=provider,
+        provider_identity=identity,
+        expected_model=CHEAP_MODEL,
     )
 
 
@@ -447,5 +536,6 @@ def create_scripted_executor() -> P45BenchmarkExecutor:
 __all__ = [
     "P45BenchmarkExecutor",
     "create_executor",
+    "create_cheap_executor",
     "create_scripted_executor",
 ]

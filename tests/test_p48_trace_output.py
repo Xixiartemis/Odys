@@ -74,10 +74,17 @@ def test_official_trace_is_append_only_and_referenced_by_schema_valid_raw(tmp_pa
 
     environment = raw["runtime_environment"]
     assert environment["execution_trace_ref"] == "traces.jsonl#L1"
-    assert environment["trace_event_count"] == 2
+    assert environment["trace_event_count"] == 3
     assert environment["runtime_source"] == "real_test_adapter"
     assert trace_record["run_id"] == run[0].run_id
-    assert trace_record["trace_event_count"] == 2
+    assert trace_record["trace_event_count"] == 3
+    validation_events = [
+        event for event in trace_record["execution_trace"]
+        if event["event_type"] == "VALIDATION_RESULT"
+    ]
+    assert validation_events[0]["metadata"]["validator_execution_status"] == "SUCCESS"
+    assert validation_events[0]["metadata"]["acceptance_status"] == "ACCEPTED"
+    assert "result" not in validation_events[0]["metadata"]
     for event in trace_record["execution_trace"]:
         assert {
             "timestamp", "event_type", "task_id", "step_id",

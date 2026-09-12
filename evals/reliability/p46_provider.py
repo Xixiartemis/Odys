@@ -41,6 +41,9 @@ from lhas.native.provider import OpenAIChatProviderAdapter
 # run must stop if the effective provider identity drifts.
 FROZEN_PROVIDER = "xiaomimimo-openai-compatible"
 FROZEN_MODEL = "mimo-v2.5-pro"
+CHEAP_MODEL = "mimo-v2.5"
+CHEAP_CREDENTIAL_ENV = "ODYS_CHEAP_BENCHMARK_API_KEY"
+CHEAP_BASE_URL_ENV = "ODYS_CHEAP_BENCHMARK_BASE_URL"
 FROZEN_ENDPOINT = "https://token-plan-cn.xiaomimimo.com/v1"
 FROZEN_API_VERSION = "chat-completions-v1"
 FROZEN_TEMPERATURE = 0.0
@@ -86,10 +89,11 @@ class RealLLMProvider:
         endpoint_identity: str | None = None,
         credential_route_id: str = "benchmark",
         client: Any = None,
+        expected_model: str = FROZEN_MODEL,
     ):
-        if model != FROZEN_MODEL:
+        if model != expected_model:
             raise ProviderIdentityError(
-                f"MODEL_IDENTITY_MISMATCH: expected {FROZEN_MODEL}, got {model}"
+                f"MODEL_IDENTITY_MISMATCH: expected {expected_model}, got {model}"
             )
         if provider_id != FROZEN_PROVIDER:
             raise ProviderIdentityError(
@@ -106,6 +110,7 @@ class RealLLMProvider:
 
         self.name = f"real-llm:{model}"
         self.model = model
+        self.expected_model = expected_model
         self.temperature = temperature
         self.max_tokens = max_tokens
         self.seed = seed
@@ -211,7 +216,11 @@ def _canonical_endpoint(value: str) -> str:
     return canonical_transport_identity(value).endpoint_identity
 
 
-def provider_identity(provider: RealLLMProvider) -> dict[str, Any]:
+def provider_identity(
+    provider: RealLLMProvider,
+    *,
+    expected_model: str = FROZEN_MODEL,
+) -> dict[str, Any]:
     """Return the secret-free identity proved by a constructed provider."""
     if not isinstance(provider, RealLLMProvider):
         raise ProviderIdentityError("PROVIDER_IDENTITY_UNAVAILABLE")
@@ -222,7 +231,7 @@ def provider_identity(provider: RealLLMProvider) -> dict[str, Any]:
     actual_endpoint = provider.transport_identity.endpoint_identity
     if actual_provider != FROZEN_PROVIDER:
         raise ProviderIdentityError("PROVIDER_IDENTITY_MISMATCH")
-    if actual_model != FROZEN_MODEL:
+    if actual_model != expected_model:
         raise ProviderIdentityError("MODEL_IDENTITY_MISMATCH")
     if actual_endpoint != _canonical_endpoint(FROZEN_ENDPOINT):
         raise ProviderIdentityError("PROVIDER_ENDPOINT_MISMATCH")
@@ -249,9 +258,10 @@ def validate_and_persist_provider_identity(
     provider: RealLLMProvider,
     *,
     path: Path = Path("results/official_phase4/provider_identity.json"),
+    expected_model: str = FROZEN_MODEL,
 ) -> dict[str, Any]:
     """Validate provider identity and persist only non-secret evidence."""
-    identity = provider_identity(provider)
+    identity = provider_identity(provider, expected_model=expected_model)
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists():
@@ -277,6 +287,7 @@ def create_real_provider(
     temperature: float | None = None,
     max_tokens: int | None = None,
     seed: int | None = None,
+    expected_model: str = FROZEN_MODEL,
 ) -> RealLLMProvider:
     """Create a :class:`RealLLMProvider` from explicit args or env vars.
 
@@ -338,6 +349,42 @@ def create_real_provider(
         temperature=resolved_temp,
         max_tokens=resolved_max,
         seed=resolved_seed,
+        expected_model=expected_model,
+    )
+
+
+def create_cheap_model_provider(
+    *,
+    api_key: str | None = None,
+    base_url: str | None = None,
+    temperature: float | None = None,
+    max_tokens: int | None = None,
+    seed: int | None = None,
+) -> RealLLMProvider:
+    """Create the isolated P49 ``mimo-v2.5`` provider profile.
+
+    The profile shares the frozen provider transport and model parameters but
+    has its own benchmark identity.  It never changes phase4-v1 inputs.
+    """
+    resolved_key = api_key or os.environ.get(CHEAP_CREDENTIAL_ENV)
+    if not resolved_key or not str(resolved_key).strip():
+        raise ProviderIdentityError(
+            f"CREDENTIAL_REQUIRED_BEFORE_RUN: set {CHEAP_CREDENTIAL_ENV} "
+            "in the environment or pass api_key= explicitly."
+        )
+
+    resolved_base_url = base_url or os.environ.get(
+        CHEAP_BASE_URL_ENV,
+        FROZEN_ENDPOINT,
+    )
+    return create_real_provider(
+        model=CHEAP_MODEL,
+        api_key=resolved_key,
+        base_url=resolved_base_url,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        seed=seed,
+        expected_model=CHEAP_MODEL,
     )
 
 
@@ -534,10 +581,14 @@ class RealLLMOdysRuntimeFactory:
 
 __all__ = [
     "RealLLMProvider",
+    "CHEAP_MODEL",
+    "CHEAP_CREDENTIAL_ENV",
+    "CHEAP_BASE_URL_ENV",
     "RealLLMMinimalRuntimeFactory",
     "RealLLMOdysRuntimeFactory",
     "ProviderIdentityError",
     "provider_identity",
     "validate_and_persist_provider_identity",
     "create_real_provider",
+    "create_cheap_model_provider",
 ]

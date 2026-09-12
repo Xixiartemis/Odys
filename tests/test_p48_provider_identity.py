@@ -3,12 +3,14 @@ import json
 import pytest
 
 from evals.reliability.p46_provider import (
+    CHEAP_MODEL,
     FROZEN_ENDPOINT,
     FROZEN_MODEL,
     FROZEN_PROVIDER,
     ProviderIdentityError,
     RealLLMProvider,
     create_real_provider,
+    create_cheap_model_provider,
     provider_identity,
     validate_and_persist_provider_identity,
 )
@@ -82,3 +84,12 @@ def test_model_and_endpoint_drift_fail_closed():
             base_url="https://different.example/v1",
             client=type("OtherClient", (), {"base_url": "https://different.example/v1"})(),
         )
+
+
+def test_cheap_model_is_an_explicit_separate_profile():
+    provider = create_cheap_model_provider(
+        api_key="test-secret-never-persisted",
+        base_url=FROZEN_ENDPOINT,
+    )
+    assert provider.model == CHEAP_MODEL
+    assert provider.expected_model == CHEAP_MODEL

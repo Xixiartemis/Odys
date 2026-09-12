@@ -41,6 +41,7 @@ from evals.reliability.phase4_v1.validate import (
 NOT_MEASURED = "NOT_MEASURED"
 PROTOCOL_NAME = "phase4-v1"
 DEFAULT_PROTOCOL_ROOT = Path(__file__).parent / "phase4_v1"
+IMMUTABLE_COLLISION_ERROR = "IMMUTABLE_RESULT_COLLISION"
 
 
 class RunnerConfigurationError(RuntimeError):
@@ -396,6 +397,12 @@ class ExecutionOutcome:
     # are carried by the free-form runtime_environment object below.
     execution_trace: list[dict[str, Any]] = field(default_factory=list)
     runtime_source: str | None = None
+    # These identifiers are optional execution-layer evidence.  When a
+    # recovery adapter creates a new durable attempt it can provide the
+    # authoritative IDs; otherwise the runner records its deterministic
+    # boundary IDs in runtime_environment.recovery.
+    original_failure_attempt_id: str | None = None
+    repair_attempt_id: str | None = None
 
     @classmethod
     def from_value(cls, value: "ExecutionOutcome | Mapping[str, Any]") -> "ExecutionOutcome":
@@ -423,6 +430,19 @@ class ValidationOutcome:
     verified_completion: bool
     validity: str
     failure_type: str | None = None
+    # ``SUCCESS`` means the validator ran successfully.  It does not mean
+    # that the task was accepted.  Keeping these separate prevents the old
+    # ambiguous VALIDATION_RESULT.result=pass representation.
+    validator_execution_status: str = "SUCCESS"
+    acceptance_status: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.acceptance_status:
+            object.__setattr__(
+                self,
+                "acceptance_status",
+                "ACCEPTED" if self.verified_completion else "REJECTED",
+            )
 
 
 class ValidatorAdapter(Protocol):
@@ -466,6 +486,8 @@ class ExternalObservableValidator:
             verified_completion=verified,
             validity="VALIDATED_PASS" if verified else "VALIDATED_FAIL",
             failure_type=outcome.failure_type,
+            validator_execution_status="SUCCESS",
+            acceptance_status="ACCEPTED" if verified else "REJECTED",
         )
 
 
@@ -510,6 +532,8 @@ def _runtime_environment(
     runtime_source: str | None = None,
     execution_trace_ref: str | None = None,
     trace_event_count: int | None = None,
+    validation: Mapping[str, Any] | None = None,
+    recovery: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     environment: dict[str, Any] = {
         "python": platform.python_version(),
@@ -526,6 +550,13 @@ def _runtime_environment(
         environment["execution_trace_ref"] = execution_trace_ref
     if trace_event_count is not None:
         environment["trace_event_count"] = trace_event_count
+    # The frozen raw-result schema intentionally leaves this object
+    # extensible.  P410's semantic additions live here so the frozen Phase 4
+    # inputs (and therefore protocol_hash) remain unchanged.
+    if validation is not None:
+        environment["validation"] = dict(validation)
+    if recovery is not None:
+        environment["recovery"] = dict(recovery)
     return environment
 
 
@@ -545,15 +576,27 @@ class ResultWriter:
         self.raw_path = self.output_dir / "raw.jsonl"
         self.invalid_path = self.output_dir / "invalid.jsonl"
         self.aggregation_path = self.output_dir / "aggregation-input.jsonl"
+        # The artifact contract requires this sidecar even when no run is
+        # invalid.  touch() is non-destructive for an existing append-only
+        # file and makes empty bundles auditable.
+        self.invalid_path.touch(exist_ok=True)
         self._repair_trailing_partial(self.raw_path)
         self._repair_trailing_partial(self.invalid_path)
         self._raw = self._load(self.raw_path)
         self._invalid = self._load(self.invalid_path)
-        self._ids = {record["benchmark_run_id"] for record in (*self._raw, *self._invalid)}
-        self._records = {
-            record["benchmark_run_id"]: record
+        self._ids = {
+            record["benchmark_run_id"]
             for record in (*self._raw, *self._invalid)
         }
+        # A collision record intentionally shares the run ID of the
+        # canonical raw result.  Keep raw authoritative when rebuilding the
+        # resume index after reopening the output bundle.
+        self._records = {
+            record["benchmark_run_id"]: record for record in self._invalid
+        }
+        self._records.update(
+            {record["benchmark_run_id"]: record for record in self._raw}
+        )
 
     @staticmethod
     def _repair_trailing_partial(path: Path) -> None:
@@ -623,6 +666,17 @@ class ResultWriter:
 
     def write_invalid(self, record: dict[str, Any]) -> None:
         run_id = record["benchmark_run_id"]
+        # An immutable collision is an infrastructure event about a run that
+        # already has an immutable result.  It must be append-only evidence in
+        # invalid.jsonl, but it must not replace the canonical raw record or
+        # make the same run ID appear twice in the resume index.
+        if record.get("error_type") == IMMUTABLE_COLLISION_ERROR:
+            self._append(self.invalid_path, record)
+            self._invalid.append(record)
+            if run_id not in self._ids:
+                self._ids.add(run_id)
+                self._records[run_id] = record
+            return
         if self.has_run(run_id):
             if self._records[run_id] != record:
                 raise ValueError(f"immutable result collision for {run_id}")
@@ -739,6 +793,110 @@ class TraceWriter:
         return reference, len(normalized)
 
 
+def _trace_event(
+    event_type: str,
+    *,
+    task_id: str,
+    step_id: str = "root",
+    attempt_id: str,
+    status: str | None = None,
+    metadata: Mapping[str, Any] | None = None,
+    **extra: Any,
+) -> dict[str, Any]:
+    """Create a trace-contract event at a runner-owned boundary."""
+    event_metadata = dict(metadata or {})
+    event_metadata.update(extra)
+    return {
+        "timestamp": _timestamp(_utc_now()),
+        "event_type": event_type,
+        "task_id": task_id,
+        "step_id": step_id,
+        "attempt_id": attempt_id,
+        "status": status or event_type.casefold(),
+        "metadata": event_metadata,
+    }
+
+
+def _validation_metadata(
+    validation: ValidationOutcome,
+    *,
+    claimed_complete: bool,
+    phase: str,
+) -> dict[str, Any]:
+    """Return unambiguous validator/external-acceptance trace metadata."""
+    return {
+        "phase": phase,
+        "validator_execution_status": validation.validator_execution_status,
+        "acceptance_status": validation.acceptance_status,
+        "agent_claimed_complete": bool(claimed_complete),
+        "failure_type": validation.failure_type,
+    }
+
+
+def _normalize_validation_trace(
+    trace: Any,
+    *,
+    task_id: str,
+    attempt_id: str,
+    validation: ValidationOutcome,
+    claimed_complete: bool,
+    phase: str,
+) -> list[dict[str, Any]]:
+    """Normalize executor placeholders without changing observed events.
+
+    Executors may emit a lifecycle trace before the shared validator runs.
+    Any existing ``VALIDATION_RESULT`` placeholder is rewritten at this
+    runner boundary; ``result=pass`` is deliberately removed because it was
+    ambiguous between validator execution and task acceptance.
+    """
+    normalized: list[dict[str, Any]] = []
+    found = False
+    for raw_event in trace if isinstance(trace, list) else []:
+        if not isinstance(raw_event, Mapping):
+            continue
+        event = dict(raw_event)
+        metadata = dict(event.get("metadata") or {})
+        if event.get("event_type") == "VALIDATION_RESULT":
+            metadata.pop("result", None)
+            metadata.update(
+                _validation_metadata(
+                    validation,
+                    claimed_complete=claimed_complete,
+                    phase=phase,
+                )
+            )
+            event["metadata"] = metadata
+            event["status"] = validation.acceptance_status.casefold()
+            found = True
+        normalized.append(event)
+    if not found:
+        normalized.append(
+            _trace_event(
+                "VALIDATION_RESULT",
+                task_id=task_id,
+                attempt_id=attempt_id,
+                status=validation.acceptance_status.casefold(),
+                metadata=_validation_metadata(
+                    validation,
+                    claimed_complete=claimed_complete,
+                    phase=phase,
+                ),
+            )
+        )
+    return normalized
+
+
+def _recovery_enabled(config: Mapping[str, Any]) -> bool:
+    features = config.get("features")
+    if not isinstance(features, Mapping):
+        return False
+    return bool(
+        features.get("durable_workflow_recovery")
+        or features.get("selective_repair")
+        or features.get("failure_provenance")
+    )
+
+
 class Phase4Runner:
     """Runs selected frozen cases and writes schema-validated raw evidence."""
 
@@ -813,7 +971,10 @@ class Phase4Runner:
                 outcome = ExecutionOutcome.from_value(result)
                 if outcome.wall_time_seconds == NOT_MEASURED:
                     outcome.wall_time_seconds = round(time.perf_counter() - started_clock, 6)
-                validation = self.validator.validate(spec.task, fixture, outcome)
+                # This is the first (initial) validator observation.  A
+                # rejection is data, not an executor exception.
+                initial_validation = self.validator.validate(spec.task, fixture, outcome)
+                validation = initial_validation
                 finished = _utc_now()
                 trace_ref: str | None = None
                 trace_event_count: int | None = None
@@ -823,6 +984,40 @@ class Phase4Runner:
                 trace = outcome.execution_trace or outcome.observed_state.get(
                     "execution_trace", []
                 )
+                initial_attempt_id = str(
+                    outcome.original_failure_attempt_id
+                    or self._first_attempt_id(trace)
+                    or f"{spec.run_id}::attempt-{spec.repeat_index}"
+                )
+                trace = _normalize_validation_trace(
+                    trace,
+                    task_id=spec.task["task_id"],
+                    attempt_id=initial_attempt_id,
+                    validation=initial_validation,
+                    claimed_complete=outcome.claimed_complete,
+                    phase="initial",
+                )
+
+                # Recovery is an explicit executor capability.  The runner
+                # owns the validator boundary and orchestration events; the
+                # adapter owns the actual repair/reverification mechanics.
+                false_completion_detected = bool(
+                    outcome.claimed_complete
+                    and initial_validation.acceptance_status == "REJECTED"
+                )
+                recovery = await self._recover_after_rejection(
+                    spec,
+                    fixture,
+                    request,
+                    outcome,
+                    initial_validation,
+                    trace,
+                    initial_attempt_id=initial_attempt_id,
+                )
+                if recovery is not None:
+                    outcome, validation, trace = recovery
+                    runtime_source = outcome.runtime_source or runtime_source
+                finished = _utc_now()
                 if self.require_trace:
                     if self.trace_output is None:
                         raise TraceOutputError("TRACE_OUTPUT_REQUIRED")
@@ -842,8 +1037,11 @@ class Phase4Runner:
                     fault,
                     outcome,
                     validation,
-                    started,
-                    finished,
+                    initial_validation=initial_validation,
+                    false_completion_detected=false_completion_detected,
+                    initial_attempt_id=initial_attempt_id,
+                    started=started,
+                    finished=finished,
                     runtime_source=runtime_source,
                     execution_trace_ref=trace_ref,
                     trace_event_count=trace_event_count,
@@ -860,10 +1058,198 @@ class Phase4Runner:
             validate_raw_result(record, self.snapshot.root / "schemas" / "result.schema.json")
             self.output.write_raw(record)
         except Exception as exc:
+            if "immutable result collision" in str(exc).lower():
+                # Do not pass this through _invalid_record: that is a normal
+                # phase4 result and cannot coexist with the already-written
+                # immutable record under the same run ID.  Collision evidence
+                # intentionally uses the small infra-event schema instead.
+                self.output.write_invalid(
+                    {
+                        "benchmark_run_id": spec.run_id,
+                        "run_id": spec.run_id,
+                        "status": "INFRA_FAILURE",
+                        "error_type": IMMUTABLE_COLLISION_ERROR,
+                    }
+                )
+                return
             finished = _utc_now()
             invalid = self._invalid_record(spec, fixture, fault, started, finished, exc)
             validate_raw_result(invalid, self.snapshot.root / "schemas" / "result.schema.json")
             self.output.write_invalid(invalid)
+
+    @staticmethod
+    def _first_attempt_id(trace: Any) -> str | None:
+        if not isinstance(trace, list):
+            return None
+        for event in trace:
+            if isinstance(event, Mapping) and event.get("attempt_id"):
+                return str(event["attempt_id"])
+        return None
+
+    async def _recover_after_rejection(
+        self,
+        spec: RunSpec,
+        fixture: FixtureHandle,
+        request: ExecutionRequest,
+        outcome: ExecutionOutcome,
+        initial_validation: ValidationOutcome,
+        trace: list[dict[str, Any]],
+        *,
+        initial_attempt_id: str,
+    ) -> tuple[ExecutionOutcome, ValidationOutcome, list[dict[str, Any]]] | None:
+        """Run an adapter-owned repair/reverification after rejection.
+
+        The optional hook is deliberately narrow.  It is not a second
+        validator and it cannot alter frozen task truth; it only returns the
+        observations from the existing runtime recovery path.  If no hook is
+        provided, the original rejection remains a valid benchmark result.
+        """
+        if initial_validation.acceptance_status != "REJECTED":
+            return None
+        if not _recovery_enabled(spec.config):
+            return None
+        recover = getattr(self.executor, "recover_after_validation", None)
+        if not callable(recover):
+            return None
+
+        recovery_result = recover(request, outcome, initial_validation)
+        if inspect.isawaitable(recovery_result):
+            recovery_result = await recovery_result
+        if recovery_result is None:
+            return None
+        repaired = ExecutionOutcome.from_value(recovery_result)
+
+        repair_attempt_id = str(
+            repaired.repair_attempt_id
+            or repaired.observed_state.get("repair_attempt_id", "")
+            or f"{spec.run_id}::repair-attempt-1"
+        )
+        repaired.original_failure_attempt_id = str(
+            repaired.original_failure_attempt_id
+            or repaired.observed_state.get("original_failure_attempt_id", "")
+            or initial_attempt_id
+        )
+        repaired.repair_attempt_id = repair_attempt_id
+        repaired.recovery_required = True
+        repaired.recovery_attempted = True
+        repaired.repair_attempts = max(1, int(repaired.repair_attempts))
+        repaired.attempt_count = max(
+            int(outcome.attempt_count) + int(repaired.attempt_count),
+            int(outcome.attempt_count) + 1,
+        )
+        repaired.runtime_source = repaired.runtime_source or outcome.runtime_source
+
+        repair_trace = repaired.execution_trace or repaired.observed_state.get(
+            "execution_trace", []
+        )
+        merged_trace = list(trace)
+        merged_trace.append(
+            _trace_event(
+                "FAILURE_DETECTED",
+                task_id=spec.task["task_id"],
+                attempt_id=initial_attempt_id,
+                status="detected",
+                failure_type=initial_validation.failure_type or "VALIDATOR_REJECTION",
+            )
+        )
+        repair_events = [
+            dict(event)
+            for event in repair_trace
+            if isinstance(event, Mapping)
+        ] if isinstance(repair_trace, list) else []
+        repair_event_types = {event.get("event_type") for event in repair_events}
+        if "StepFailureProvenance" not in repair_event_types:
+            merged_trace.append(
+                _trace_event(
+                    "StepFailureProvenance",
+                    task_id=spec.task["task_id"],
+                    attempt_id=initial_attempt_id,
+                    status="recorded",
+                    original_failure_attempt_id=initial_attempt_id,
+                    repair_attempt_id=repair_attempt_id,
+                    failure_type=initial_validation.failure_type or "VALIDATOR_REJECTION",
+                )
+            )
+        if "REPAIR_STARTED" not in repair_event_types:
+            merged_trace.append(
+                _trace_event(
+                    "REPAIR_STARTED",
+                    task_id=spec.task["task_id"],
+                    attempt_id=repair_attempt_id,
+                    status="started",
+                    original_failure_attempt_id=initial_attempt_id,
+                    repair_attempt_id=repair_attempt_id,
+                    repair_scope=repaired.repair_scope,
+                )
+            )
+        merged_trace.extend(repair_events)
+        if "REPAIR_COMPLETED" not in repair_event_types:
+            merged_trace.append(
+                _trace_event(
+                    "REPAIR_COMPLETED",
+                    task_id=spec.task["task_id"],
+                    attempt_id=repair_attempt_id,
+                    status="completed",
+                    original_failure_attempt_id=initial_attempt_id,
+                    repair_attempt_id=repair_attempt_id,
+                )
+            )
+
+        final_validation = self.validator.validate(spec.task, fixture, repaired)
+        # Keep the initial rejection in the trace and append a separate,
+        # explicitly labelled revalidation result.
+        merged_trace.append(
+            _trace_event(
+                "VALIDATION_RESULT",
+                task_id=spec.task["task_id"],
+                attempt_id=repair_attempt_id,
+                status=final_validation.acceptance_status.casefold(),
+                metadata=_validation_metadata(
+                    final_validation,
+                    claimed_complete=repaired.claimed_complete,
+                    phase="revalidation",
+                ),
+            )
+        )
+        if final_validation.acceptance_status == "ACCEPTED":
+            merged_trace.append(
+                _trace_event(
+                    "STEP_VERIFIED",
+                    task_id=spec.task["task_id"],
+                    attempt_id=repair_attempt_id,
+                    status="verified",
+                    original_failure_attempt_id=initial_attempt_id,
+                    repair_attempt_id=repair_attempt_id,
+                )
+            )
+            merged_trace.append(
+                _trace_event(
+                    "VERIFICATION_PASSED",
+                    task_id=spec.task["task_id"],
+                    attempt_id=repair_attempt_id,
+                    status="passed",
+                    original_failure_attempt_id=initial_attempt_id,
+                    repair_attempt_id=repair_attempt_id,
+                )
+            )
+            repaired.recovery_success = True
+        else:
+            merged_trace.append(
+                _trace_event(
+                    "VERIFICATION_FAILED",
+                    task_id=spec.task["task_id"],
+                    attempt_id=repair_attempt_id,
+                    status="failed",
+                    original_failure_attempt_id=initial_attempt_id,
+                    repair_attempt_id=repair_attempt_id,
+                )
+            )
+            repaired.recovery_success = False
+        repaired.execution_trace = merged_trace
+        repaired.observed_state["execution_trace"] = merged_trace
+        repaired.observed_state["original_failure_attempt_id"] = initial_attempt_id
+        repaired.observed_state["repair_attempt_id"] = repair_attempt_id
+        return repaired, final_validation, merged_trace
 
     def _record(
         self,
@@ -872,13 +1258,43 @@ class Phase4Runner:
         fault: FaultPlan,
         outcome: ExecutionOutcome,
         validation: ValidationOutcome,
+        *,
+        initial_validation: ValidationOutcome | None = None,
+        false_completion_detected: bool | None = None,
+        initial_attempt_id: str | None = None,
         started: datetime,
         finished: datetime,
-        *,
         runtime_source: str | None = None,
         execution_trace_ref: str | None = None,
         trace_event_count: int | None = None,
     ) -> dict[str, Any]:
+        initial_validation = initial_validation or validation
+        if false_completion_detected is None:
+            false_completion_detected = bool(
+                outcome.claimed_complete
+                and initial_validation.acceptance_status == "REJECTED"
+            )
+        initial_attempt_id = initial_attempt_id or outcome.original_failure_attempt_id
+        recovery_identity = {
+            "recovery_required": bool(outcome.recovery_required),
+            "recovery_attempted": bool(outcome.recovery_attempted),
+            "recovery_success": bool(outcome.recovery_success),
+            "repair_scope": outcome.repair_scope,
+            "repair_attempts": int(outcome.repair_attempts),
+            "original_failure_attempt_id": outcome.original_failure_attempt_id or initial_attempt_id,
+            "repair_attempt_id": outcome.repair_attempt_id,
+        }
+        validation_identity = {
+            # acceptance_status is the initial validator decision.  This
+            # preserves a detected false-completion rejection even when a
+            # subsequent recovery is accepted.
+            "validator_execution_status": initial_validation.validator_execution_status,
+            "acceptance_status": initial_validation.acceptance_status,
+            "final_validator_execution_status": validation.validator_execution_status,
+            "final_acceptance_status": validation.acceptance_status,
+            "false_completion_detected": bool(false_completion_detected),
+            "agent_claimed_complete": bool(outcome.claimed_complete),
+        }
         return {
             "benchmark_version": PROTOCOL_NAME,
             "benchmark_run_id": spec.run_id,
@@ -899,13 +1315,19 @@ class Phase4Runner:
                 runtime_source=runtime_source,
                 execution_trace_ref=execution_trace_ref,
                 trace_event_count=trace_event_count,
+                validation=validation_identity,
+                recovery=recovery_identity,
             ),
             "validator_id": self.snapshot.protocol["shared_validator_id"],
             "fault_id": fault.fault_id,
             "fault_type": fault.fault_type,
             "claimed_complete": bool(outcome.claimed_complete),
             "verified_completion": bool(validation.verified_completion),
-            "false_completion": bool(outcome.claimed_complete and not validation.verified_completion),
+            # Preserve the initial claim/rejection signal even if a later
+            # recovery reaches verified completion.  The new explicit
+            # false_completion_detected metric is derived from the same
+            # boundary evidence.
+            "false_completion": bool(false_completion_detected),
             "failure_type": validation.failure_type,
             "recovery_required": bool(outcome.recovery_required),
             "recovery_attempted": bool(outcome.recovery_attempted),
@@ -953,7 +1375,28 @@ class Phase4Runner:
             "protocol_hash": self.snapshot.protocol_hash,
             "model": self.model,
             "provider": self.provider,
-            "runtime_environment": _runtime_environment(self.snapshot, model=self.model, provider=self.provider),
+            "runtime_environment": _runtime_environment(
+                self.snapshot,
+                model=self.model,
+                provider=self.provider,
+                validation={
+                    "validator_execution_status": "NOT_EXECUTED",
+                    "acceptance_status": "NOT_EVALUATED",
+                    "final_validator_execution_status": "NOT_EXECUTED",
+                    "final_acceptance_status": "NOT_EVALUATED",
+                    "false_completion_detected": False,
+                    "agent_claimed_complete": False,
+                },
+                recovery={
+                    "recovery_required": False,
+                    "recovery_attempted": False,
+                    "recovery_success": False,
+                    "repair_scope": None,
+                    "repair_attempts": 0,
+                    "original_failure_attempt_id": None,
+                    "repair_attempt_id": None,
+                },
+            ),
             "validator_id": self.snapshot.protocol["shared_validator_id"],
             "fault_id": fault.fault_id,
             "fault_type": fault.fault_type,
