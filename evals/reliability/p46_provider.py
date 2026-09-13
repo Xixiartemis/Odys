@@ -29,11 +29,13 @@ from __future__ import annotations
 import os
 import hashlib
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from lhas.native.models import RuntimeTarget
 from lhas.native.provider import OpenAIChatProviderAdapter
+from evals.reliability.run_phase4 import RunBudgetExhausted
 
 
 # These values are the P4.6 freeze inputs.  They are deliberately kept in
@@ -114,6 +116,11 @@ class RealLLMProvider:
         self.temperature = temperature
         self.max_tokens = max_tokens
         self.seed = seed
+        # Secret-free provider-call accounting. P45 attributes the slice for
+        # one benchmark run, including calls made during recovery.
+        self.call_records: list[dict[str, Any]] = []
+        self._execution_context: dict[str, str] = {}
+        self._run_budget: Any = None
 
         # Build extra_body for deterministic completions
         extra_body: dict[str, Any] = {}
@@ -153,6 +160,30 @@ class RealLLMProvider:
         """Transport-layer identity (endpoint host, fingerprint)."""
         return self._inner.transport_identity
 
+    def bind_execution_context(
+        self,
+        *,
+        run_id: str,
+        task_id: str,
+        attempt_id: str,
+        phase: str,
+    ) -> None:
+        """Bind safe correlation fields for the next provider request."""
+        self._execution_context = {
+            "run_id": str(run_id),
+            "task_id": str(task_id),
+            "attempt_id": str(attempt_id),
+            "phase": str(phase),
+        }
+
+    def bind_run_budget(self, ledger: Any) -> None:
+        """Bind the one run-scoped provider budget used by all phases."""
+        self._run_budget = ledger
+
+    @property
+    def budget_exhausted(self) -> bool:
+        return bool(self._run_budget is not None and self._run_budget.exhausted)
+
     async def generate(
         self,
         *,
@@ -177,18 +208,84 @@ class RealLLMProvider:
         dict[str, Any]
             Normalized response dict (``choices``, ``usage``, etc.).
         """
-        normalized = await self._inner.generate(
-            context=context,
-            tools=tools,
-            timeout_seconds=timeout_seconds,
-        )
-        actual_model = normalized.get("model") if isinstance(normalized, dict) else None
-        if actual_model != self.model:
-            raise ProviderIdentityError(
-                "MODEL_IDENTITY_MISMATCH: provider response did not prove "
-                f"{self.model} (reported {actual_model!r})"
+        record: dict[str, Any] = {
+            "call_index": len(self.call_records) + 1,
+            "provider_call": True,
+            "provider": FROZEN_PROVIDER,
+            "model": self.model,
+            "started_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "tool_count": len(tools),
+            **self._execution_context,
+        }
+        try:
+            if self._run_budget is not None:
+                phase = self._execution_context.get("phase", "initial")
+                try:
+                    self._run_budget.reserve(phase)
+                except RunBudgetExhausted as exc:
+                    record.update(
+                        {
+                            "provider_call": False,
+                            "status": "BUDGET_BLOCKED",
+                            "error_type": "BUDGET_EXHAUSTED",
+                            "finished_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                            "input_tokens": "NOT_MEASURED",
+                            "output_tokens": "NOT_MEASURED",
+                            "total_tokens": "NOT_MEASURED",
+                        }
+                    )
+                    self.call_records.append(record)
+                    raise exc
+            normalized = await self._inner.generate(
+                context=context,
+                tools=tools,
+                timeout_seconds=timeout_seconds,
             )
-        return normalized
+            actual_model = normalized.get("model") if isinstance(normalized, dict) else None
+            if actual_model != self.model:
+                raise ProviderIdentityError(
+                    "MODEL_IDENTITY_MISMATCH: provider response did not prove "
+                    f"{self.model} (reported {actual_model!r})"
+                )
+            usage = normalized.get("usage") if isinstance(normalized, dict) else None
+            usage = usage if isinstance(usage, dict) else {}
+            for target, aliases in {
+                "input_tokens": ("prompt_tokens", "input_tokens"),
+                "output_tokens": ("completion_tokens", "output_tokens"),
+                "total_tokens": ("total_tokens",),
+            }.items():
+                value = next(
+                    (usage.get(key) for key in aliases if usage.get(key) is not None),
+                    None,
+                )
+                record[target] = value if isinstance(value, int) else "NOT_MEASURED"
+            record.update(
+                {
+                    "status": "SUCCESS",
+                    "response_model": actual_model,
+                    "finished_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                }
+            )
+            self.call_records.append(record)
+            return normalized
+        except RunBudgetExhausted:
+            # The reserve path already recorded one non-transport blocked
+            # attempt.  Do not append a second record in the generic failure
+            # handler below.
+            raise
+        except Exception as exc:
+            record.update(
+                {
+                    "status": "FAILURE",
+                    "error_type": type(exc).__name__,
+                    "finished_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                    "input_tokens": "NOT_MEASURED",
+                    "output_tokens": "NOT_MEASURED",
+                    "total_tokens": "NOT_MEASURED",
+                }
+            )
+            self.call_records.append(record)
+            raise
 
     def __repr__(self) -> str:
         return (
@@ -446,7 +543,7 @@ def _build_real_odys_kernel(
     config: dict[str, Any],
     workspace_root: Any = None,
     provider: RealLLMProvider | None = None,
-) -> tuple[Any, Any]:
+) -> tuple[Any, Any, Any]:
     """Build a full NativeAgentKernel with real LLM provider."""
     import tempfile
 
@@ -512,7 +609,16 @@ def _build_real_odys_kernel(
         fault_injector=NoOpNativeFaultInjector(),
     )
 
-    return kernel, db
+    from evals.reliability.runtime_factory.recovery import OfficialOdysRecoveryCoordinator
+
+    recovery = OfficialOdysRecoveryCoordinator(
+        db=db,
+        kernel=kernel,
+        registry=registry,
+        capability_registry=cap_reg,
+        tool_contract=contract,
+    )
+    return kernel, db, recovery
 
 
 class RealLLMMinimalRuntimeFactory:
@@ -567,12 +673,12 @@ class RealLLMOdysRuntimeFactory:
         """Create a full ODYS runtime with a real LLM provider."""
         from evals.reliability.runtime_factory.odys_factory import _OdysRuntime
 
-        kernel, db = _build_real_odys_kernel(
+        kernel, db, recovery = _build_real_odys_kernel(
             config,
             workspace_root=self._workspace_root,
             provider=self._provider,
         )
-        runtime = _OdysRuntime(kernel=kernel, db=db)
+        runtime = _OdysRuntime(kernel=kernel, db=db, recovery=recovery)
         assert (
             hasattr(runtime, "completion") and runtime.completion is not None
         ), "OdysRuntime MUST have CompletionAuthority"

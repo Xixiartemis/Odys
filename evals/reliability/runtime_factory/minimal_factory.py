@@ -151,6 +151,11 @@ class _MinimalRuntime:
                 model_calls=0,
                 attempt_count=1,
                 wall_time_seconds=round(elapsed, 6),
+                infrastructure_failure=True,
+                infrastructure_error=(
+                    f"MINIMAL_RUNTIME_EXCEPTION:{type(exc).__name__}: "
+                    f"{str(exc)[:500]}"
+                ),
             )
 
 
@@ -171,6 +176,7 @@ class _MinimalSnapshot:
         self.recent_tool_outcomes: list[dict] = []
         self.repeated_failure_state: dict = {}
         self.verification_state: dict = {}
+        self.workspace_identity: dict[str, Any] = {}
         self.workspace_mutation_version = 0
         self.current_failure: dict = {}
         self.phase = type("Phase", (), {"value": "CONTINUE"})()

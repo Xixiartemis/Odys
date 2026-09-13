@@ -13,6 +13,13 @@ from lhas.persistence.database import Database
 from lhas.persistence.orm import EventRow
 
 
+def _as_utc(value: datetime) -> datetime:
+    """Preserve UTC semantics when SQLite drops timezone metadata."""
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
 class EventStore:
     """Every state transition is appended here before the next transition runs.
 
@@ -43,7 +50,7 @@ class EventStore:
             session.flush()  # obtain the autoincrement id (== sequence)
             return Event(
                 id=row.id, task_id=row.task_id, run_id=row.run_id, attempt_id=row.attempt_id,
-                event_type=event_type, timestamp=row.created_at,
+                event_type=event_type, timestamp=_as_utc(row.created_at),
                 payload=json_loads(row.payload) or {},
             )
 
@@ -93,6 +100,6 @@ class EventStore:
     def _from_row(self, r: EventRow) -> Event:
         return Event(
             id=r.id, task_id=r.task_id, run_id=r.run_id, attempt_id=r.attempt_id,
-            event_type=EventType(r.event_type), timestamp=r.created_at,
+            event_type=EventType(r.event_type), timestamp=_as_utc(r.created_at),
             payload=json_loads(r.payload) or {},
         )

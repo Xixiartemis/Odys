@@ -25,6 +25,7 @@ from __future__ import annotations
 import logging
 import shutil
 import tempfile
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -33,9 +34,60 @@ from evals.reliability.run_phase4 import (
     ExecutionOutcome,
     ExecutionRequest,
     NOT_MEASURED,
+    RuntimeInfrastructureError,
+    RunBudgetExhausted,
 )
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class RunBudgetLedger:
+    """One immutable experiment budget shared by all phases of one run.
+
+    The frozen protocol exposes ``max_model_calls`` as the provider-call
+    ceiling.  Recovery is a continuation of the same benchmark run, so it
+    receives this ledger rather than a fresh per-attempt budget.
+    """
+
+    max_provider_calls: int
+    max_turns: int | None = None
+    max_repair_attempts: int = 1
+    max_replan_attempts: int = 0
+    root_provider_calls: int = 0
+    nested_provider_calls: int = 0
+    blocked_provider_calls: int = 0
+    exhausted: bool = False
+    _phases: list[str] = field(default_factory=list)
+
+    def reserve(self, phase: str) -> None:
+        """Reserve exactly one real provider call, or fail before transport."""
+        if self.exhausted or self.total_provider_calls >= self.max_provider_calls:
+            self.exhausted = True
+            self.blocked_provider_calls += 1
+            raise RunBudgetExhausted("RUN_API_BUDGET_EXHAUSTED")
+        if str(phase).lower() == "initial":
+            self.root_provider_calls += 1
+        else:
+            self.nested_provider_calls += 1
+        self._phases.append(str(phase))
+
+    @property
+    def total_provider_calls(self) -> int:
+        return self.root_provider_calls + self.nested_provider_calls
+
+    def snapshot(self) -> dict[str, Any]:
+        return {
+            "max_provider_calls": self.max_provider_calls,
+            "max_turns": self.max_turns,
+            "max_repair_attempts": self.max_repair_attempts,
+            "max_replan_attempts": self.max_replan_attempts,
+            "root_provider_calls": self.root_provider_calls,
+            "nested_provider_calls": self.nested_provider_calls,
+            "provider_calls": self.total_provider_calls,
+            "blocked_provider_calls": self.blocked_provider_calls,
+            "exhausted": self.exhausted,
+        }
 
 # ---------------------------------------------------------------------------
 # Trace event helpers
@@ -82,6 +134,66 @@ def _filter_tool_events(trace: list[dict[str, Any]]) -> list[dict[str, Any]]:
     ]
 
 
+_CONTROLLED_FAILURES: dict[str, frozenset[str]] = {
+    "FAIL_TOOL_ON_CALL_1": frozenset(
+        {"TOOL_ERROR", "TOOL_EXECUTION_ERROR", "EXECUTION_FAILED", "TOOL_FAILURE"}
+    ),
+    "FAIL_TOOL_ON_CALL_2": frozenset(
+        {"TOOL_ERROR", "TOOL_EXECUTION_ERROR", "EXECUTION_FAILED", "TOOL_FAILURE"}
+    ),
+    "PROVIDER_TIMEOUT_ON_CALL_1": frozenset({"PROVIDER_TIMEOUT"}),
+    "PROVIDER_UNAVAILABLE": frozenset({"PROVIDER_UNAVAILABLE"}),
+    "QUOTA_EXHAUSTED": frozenset({"QUOTA_EXHAUSTED"}),
+    "MALFORMED_RESPONSE": frozenset(
+        {"PROVIDER_MALFORMED_RESPONSE", "MALFORMED_PROVIDER_RESPONSE"}
+    ),
+    "INTERRUPT_AFTER_EFFECT": frozenset({"PROCESS_INTERRUPTED", "INTERRUPTED"}),
+    "CAPABILITY_UNAVAILABLE": frozenset(
+        {"CAPABILITY_UNAVAILABLE", "UNKNOWN_CAPABILITY", "TOOL_NOT_FOUND"}
+    ),
+    "STALE_WORKSPACE_BEFORE_DISPATCH": frozenset(
+        {"STALE_WORKSPACE", "STALE_PLAN", "RUNTIME_TARGET_DIVERGENCE", "PRECONDITION_FAILED"}
+    ),
+    "INVALIDATE_ASSUMPTION": frozenset(
+        {"ASSUMPTION_INVALID", "WRONG_ASSUMPTION", "REPEATED_TOOL_FAILURE"}
+    ),
+    "DUPLICATE_DELIVERY_ATTEMPT": frozenset(
+        {"DUPLICATE_DELIVERY_ATTEMPT", "DUPLICATE_DELIVERY"}
+    ),
+}
+
+
+def _is_infrastructure_failure(outcome: ExecutionOutcome, fault_id: str | None) -> bool:
+    """Classify runtime integrity failures without hiding controlled faults."""
+    if outcome.infrastructure_failure:
+        return True
+    failure_type = str(outcome.failure_type or "").upper()
+    if not failure_type:
+        return False
+    if failure_type.startswith(("MINIMAL_ERROR:", "ODYS_ERROR:", "EXECUTOR_ERROR:")):
+        return True
+    if failure_type in {
+        "AUTH_INVALID",
+        "BILLING_OR_CREDIT_EXHAUSTED",
+        "PROVIDER_TIMEOUT",
+        "PROVIDER_UNAVAILABLE",
+        "QUOTA_EXHAUSTED",
+        "MALFORMED_PROVIDER_RESPONSE",
+        "UNKNOWN_PROVIDER_FAILURE",
+        "MODEL_IDENTITY_MISMATCH",
+        "PROVIDER_ENDPOINT_MISMATCH",
+        "PROVIDER_IDENTITY_MISMATCH",
+        "CREDENTIAL_REQUIRED_BEFORE_RUN",
+    }:
+        return failure_type not in _CONTROLLED_FAILURES.get(fault_id or "", frozenset())
+    if fault_id is None:
+        return True
+    expected = _CONTROLLED_FAILURES.get(fault_id)
+    return expected is not None and failure_type not in expected and failure_type.startswith(
+        ("PROVIDER_", "MINIMAL_", "ODYS_", "EXECUTOR_")
+    )
+
+
 # ---------------------------------------------------------------------------
 # Executor
 # ---------------------------------------------------------------------------
@@ -108,7 +220,6 @@ class P45BenchmarkExecutor:
         provider: Any | None = None,
         provider_identity: dict[str, Any] | None = None,
         expected_model: str | None = None,
-        recovery_runner: Any | None = None,
     ):
         if factory_type not in ("real", "scripted"):
             raise ValueError(
@@ -120,18 +231,58 @@ class P45BenchmarkExecutor:
         self._trace_file = trace_file
         self._provider = provider
         self._provider_identity = dict(provider_identity or {}) or None
-        self._recovery_runner = recovery_runner
         # Runtime objects are retained only until the runner asks for a
-        # validation-rejection recovery.  A runtime may expose the canonical
-        # repair_after_failure seam; tests and dedicated pilots may inject a
-        # recovery_runner using the same narrow contract.
+        # validation-rejection recovery through the explicit runtime
+        # recovery contract.
         self._active_runtimes: dict[str, Any] = {}
+        self._provider_call_offsets: dict[str, int] = {}
+        self._run_budgets: dict[str, RunBudgetLedger] = {}
+        self._frozen_budgets: dict[str, Any] = {}
         self._expected_model = expected_model or (
             self._provider_identity.get("model")
             if self._provider_identity
             else None
         )
         logger.info("P45BenchmarkExecutor created with factory_type=%s", factory_type)
+
+    def configure_frozen_budget(self, budgets: dict[str, Any] | None) -> None:
+        """Resolve the frozen protocol budget without starting execution.
+
+        The runner calls this during construction.  It is intentionally a
+        configuration-only hook so a provider cannot be contacted before the
+        first selected run.
+        """
+        values = dict(budgets or {})
+        max_calls = values.get("max_model_calls")
+        if max_calls is None:
+            raise RuntimeInfrastructureError("FROZEN_PROVIDER_BUDGET_MISSING")
+        self._frozen_budgets = {
+            "max_provider_calls": int(max_calls),
+            "max_turns": int(values["max_turns"]) if values.get("max_turns") is not None else None,
+            # The official bridge already bounds these values; recording
+            # them here prevents a recovery coordinator from inventing a new
+            # budget at the provider boundary.
+            "max_repair_attempts": 1,
+            "max_replan_attempts": 0,
+        }
+
+    def _run_budget(self, run_id: str) -> RunBudgetLedger:
+        ledger = self._run_budgets.get(run_id)
+        if ledger is None:
+            values = self._frozen_budgets
+            if not values:
+                # Direct unit use of P45 predates the official runner hook;
+                # leave that path unlimited while official runs are always
+                # configured from the frozen protocol.
+                values = {
+                    "max_provider_calls": 2**31 - 1,
+                    "max_turns": None,
+                    "max_repair_attempts": 1,
+                    "max_replan_attempts": 0,
+                }
+            ledger = RunBudgetLedger(**values)
+            self._run_budgets[run_id] = ledger
+        return ledger
 
     @property
     def provider_identity(self) -> dict[str, Any] | None:
@@ -177,7 +328,18 @@ class P45BenchmarkExecutor:
         task = request.task
         task_id = task.get("task_id", "unknown")
         run_id = request.run_id
+        self._run_budget(run_id)
         attempt_id = f"{run_id}::attempt-{request.repeat_index}"
+        self._provider_call_offsets.setdefault(
+            run_id,
+            len(getattr(self._provider, "call_records", ()) or ()),
+        )
+        self._bind_provider_context(
+            run_id=run_id,
+            task_id=str(task_id),
+            attempt_id=attempt_id,
+            phase="initial",
+        )
 
         # Mutable trace list accumulated throughout the execution lifecycle.
         trace: list[dict[str, Any]] = []
@@ -297,7 +459,30 @@ class P45BenchmarkExecutor:
                                       runtime_source=runtime_source))
 
             # Execute through the runtime
-            outcome = await runtime.execute(task, request.config)
+            runtime_config = dict(request.config)
+            # These execution-local bindings are not benchmark inputs.  They
+            # make the durable native Attempt and the recovery coordinator
+            # use the same run identity as the official Phase 4 request.
+            runtime_config["run_id"] = request.run_id
+            runtime_config["_workspace_root"] = str(workspace_dir)
+            outcome = await runtime.execute(task, runtime_config)
+            self._attach_provider_accounting(outcome, run_id)
+
+            if _is_infrastructure_failure(outcome, fault_id):
+                outcome.infrastructure_failure = True
+                runtime_failure = outcome.observed_state.get("runtime_failure")
+                detail = (
+                    runtime_failure.get("error_message")
+                    if isinstance(runtime_failure, dict)
+                    else None
+                )
+                outcome.infrastructure_error = (
+                    outcome.infrastructure_error
+                    or (
+                        f"UNEXPECTED_RUNTIME_FAILURE:{outcome.failure_type}"
+                        + (f": {detail}" if detail else "")
+                    )
+                )
 
             # ---- EXECUTION_COMPLETE ----
             trace.append(_trace_event("EXECUTION_COMPLETE", task_id, attempt_id,
@@ -309,7 +494,13 @@ class P45BenchmarkExecutor:
                 try:
                     fixture = self._fixture_registry.get(task_id)
                     observed = fixture.observe(workspace_dir)
-                    if outcome.observed_state:
+                    if isinstance(observed, dict):
+                        # Fixture observations are the authoritative external
+                        # state used by the shared validator. Keep the
+                        # nested copy for audit consumers while exposing the
+                        # same fields at the validator boundary for
+                        # pre/post repair comparison.
+                        outcome.observed_state.update(observed)
                         outcome.observed_state["fixture_observations"] = observed
                     # ---- FIXTURE_OBSERVATIONS ----
                     trace.append(_trace_event("FIXTURE_OBSERVATIONS", task_id, attempt_id,
@@ -365,8 +556,10 @@ class P45BenchmarkExecutor:
                 },
                 failure_type=f"EXECUTOR_ERROR:{type(exc).__name__}",
             )
-        finally:
-            self._reset_fixture(request)
+        # The fixture workspace must survive until the runner has performed
+        # external validation and (for Odys) recovery.  Cleanup is performed
+        # by ``cleanup`` after that boundary; resetting here would make the
+        # recovery path observe a different/empty workspace.
 
     async def recover_after_validation(
         self,
@@ -374,30 +567,131 @@ class P45BenchmarkExecutor:
         outcome: ExecutionOutcome,
         validation: Any,
     ) -> ExecutionOutcome | dict[str, Any] | None:
-        """Delegate rejection recovery to the runtime's canonical seam.
+        """Delegate rejection recovery through the explicit runtime contract."""
+        from evals.reliability.runtime_factory.protocol import RecoverableBenchmarkRuntime
 
-        P45 does not invent a second repair implementation.  It first gives
-        the runtime a chance to use its existing ``repair_after_failure``
-        service, and otherwise uses an explicitly injected adapter (used by
-        the integration pilot).  Returning ``None`` leaves the rejection as
-        a valid, unrecovered benchmark result.
-        """
         runtime = self._active_runtimes.get(request.run_id)
-        handler = getattr(runtime, "repair_after_failure", None)
-        if callable(handler):
-            result = handler(request, outcome, validation)
-            if hasattr(result, "__await__"):
-                result = await result
+        try:
+            if not isinstance(runtime, RecoverableBenchmarkRuntime):
+                if request.config.get("config_id") == "odys_p3":
+                    raise RuntimeInfrastructureError(
+                        "OFFICIAL_RECOVERY_AUTHORITY_UNAVAILABLE"
+                    )
+                return None
+            self._bind_provider_context(
+                run_id=request.run_id,
+                task_id=str(request.task.get("task_id", "unknown")),
+                attempt_id=str(outcome.repair_attempt_id or "recovery"),
+                phase="recovery",
+            )
+            result = await runtime.recover_after_validation(
+                request,
+                outcome,
+                validation,
+            )
+            if result is None:
+                return None
+            repaired = ExecutionOutcome.from_value(result)
+            self._attach_provider_accounting(repaired, request.run_id)
+            workspace_dir = self._workspace_dirs.get(request.run_id)
+            if workspace_dir is not None and self._fixture_registry is not None:
+                fixture = self._fixture_registry.get(request.task["task_id"])
+                observed = fixture.observe(workspace_dir)
+                repaired.observed_state.update(observed)
+                repaired.observed_state["fixture_observations"] = observed
+            return repaired
+        finally:
             self._active_runtimes.pop(request.run_id, None)
-            return result
-        if callable(self._recovery_runner):
-            result = self._recovery_runner(request, outcome, validation)
-            if hasattr(result, "__await__"):
-                result = await result
-            self._active_runtimes.pop(request.run_id, None)
-            return result
+            self._reset_fixture(request)
+            self._run_budgets.pop(request.run_id, None)
+
+    def cleanup(self, request: ExecutionRequest) -> None:
+        """Release one run's workspace after validation/recovery is complete."""
         self._active_runtimes.pop(request.run_id, None)
-        return None
+        self._reset_fixture(request)
+        self._run_budgets.pop(request.run_id, None)
+        self._provider_call_offsets.pop(request.run_id, None)
+
+    def _bind_provider_context(
+        self,
+        *,
+        run_id: str,
+        task_id: str,
+        attempt_id: str,
+        phase: str,
+    ) -> None:
+        binder = getattr(self._provider, "bind_execution_context", None)
+        if callable(binder):
+            binder(
+                run_id=run_id,
+                task_id=task_id,
+                attempt_id=attempt_id,
+                phase=phase,
+            )
+        ledger = self._run_budgets.get(run_id)
+        if ledger is not None:
+            self._bind_provider_budget(ledger)
+
+    def _bind_provider_budget(self, ledger: RunBudgetLedger) -> None:
+        binder = getattr(self._provider, "bind_run_budget", None)
+        if callable(binder):
+            binder(ledger)
+
+    def _attach_provider_accounting(
+        self,
+        outcome: ExecutionOutcome,
+        run_id: str,
+    ) -> None:
+        records = getattr(self._provider, "call_records", None)
+        if not isinstance(records, list):
+            return
+        start = self._provider_call_offsets.get(run_id, 0)
+        run_records = [dict(item) for item in records[start:] if isinstance(item, dict)]
+        actual_records = [
+            item for item in run_records
+            if item.get("provider_call", True) is not False
+        ]
+        outcome.provider_call_records = run_records
+        outcome.provider_calls = len(actual_records)
+        # A provider turn is the authoritative count when the adapter can
+        # observe it.  Keep test/dry adapters' existing count if they expose
+        # no call records at all.
+        outcome.model_calls = len(actual_records)
+
+        attempt_ids = {
+            str(item["attempt_id"])
+            for item in actual_records
+            if item.get("attempt_id")
+        }
+        outcome.provider_attempt_count = len(attempt_ids)
+        outcome.root_attempt_count = 1 if actual_records else 0
+        outcome.nested_attempt_count = max(0, len(attempt_ids) - 1)
+
+        ledger = self._run_budgets.get(run_id)
+        if ledger is not None:
+            if ledger.exhausted:
+                # A root-scoped budget exhaustion is a controlled benchmark
+                # outcome.  It must not be reclassified as an infrastructure
+                # exception or trigger a fresh recovery budget.
+                outcome.budget_exhausted = True
+                outcome.failure_type = "BUDGET_EXHAUSTED"
+                outcome.recovery_required = False
+            outcome.provider_calls = ledger.total_provider_calls
+            outcome.root_attempt_count = 1 if ledger.total_provider_calls else 0
+            outcome.nested_attempt_count = max(
+                outcome.nested_attempt_count,
+                1 if ledger.nested_provider_calls else 0,
+            )
+
+        def _sum_known(field: str) -> int | str:
+            values = [item.get(field) for item in actual_records]
+            if not values or any(not isinstance(value, int) for value in values):
+                return NOT_MEASURED
+            return sum(values)
+
+        outcome.tokens_input = _sum_known("input_tokens")
+        outcome.tokens_output = _sum_known("output_tokens")
+        outcome.total_tokens = _sum_known("total_tokens")
 
     def _setup_fixture(self, request: ExecutionRequest) -> Path:
         """Setup fixture workspace for a task."""

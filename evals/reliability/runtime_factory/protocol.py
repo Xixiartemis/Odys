@@ -38,3 +38,21 @@ class BenchmarkRuntime(Protocol):
             Harness-neutral observations about what happened during execution.
         """
         ...
+
+
+@runtime_checkable
+class RecoverableBenchmarkRuntime(BenchmarkRuntime, Protocol):
+    """Explicit runtime contract for validator-rejection recovery.
+
+    The official runner may invoke this contract only for a configuration
+    whose frozen features enable recovery.  A runtime that does not implement
+    it is not silently treated as a recoverable runtime.
+    """
+
+    async def recover_after_validation(
+        self,
+        request: Any,
+        outcome: ExecutionOutcome,
+        validation: Any,
+    ) -> ExecutionOutcome | dict[str, Any] | None:
+        ...

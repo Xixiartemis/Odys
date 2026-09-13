@@ -535,6 +535,14 @@ class PlanExecutionService:
         # MACRO_REPLAN: invoke canonical macro replan path, NOT local repair
         if scope == RepairScope.MACRO_REPLAN:
             self._record_step_replan_signal(failed_step, provenance.get("run_id", ""))
+            # The official benchmark recovery bridge owns exactly one
+            # bounded repair boundary.  A macro classification is evidence
+            # that this boundary cannot repair locally; entering the normal
+            # planner here would create a second attempt/replan tree and
+            # reset the provider budget.  Preserve the signal and return.
+            if context and context.get("official_benchmark_recovery"):
+                plans.update(plan)
+                return plan
             if await self._maybe_replan(goal, plan, provenance.get("run_id", ""), context):
                 plan = plans.get(plan_id) or plan
             return plan
@@ -676,7 +684,7 @@ class PlanExecutionService:
 
                 transition_step(step, PlanStepStatus.RUNNING, "dispatch", events, plan_id=plan.id)
                 step.execution_context=build_step_dependency_context(plan,step,execution_context)
-                task=Task(project_id=goal.project_id,title=step.title,objective=step.objective,constraints=goal.constraints,acceptance_criteria=step.success_criteria,max_attempts=2); tasks.create(task); step.task_id=task.id
+                task=Task(project_id=goal.project_id,title=step.title,objective=step.objective,constraints=goal.constraints,acceptance_criteria=step.success_criteria,max_attempts=1 if context.get("official_benchmark_recovery") else 2); tasks.create(task); step.task_id=task.id
                 self._emit(EventType.PLAN_STEP_STARTED,{"plan_id":plan.id,"step_id":step.id,"task_id":task.id})
                 plans.update(plan)
                 orch=RecoveringOrchestrator(self.db,executor_factory=lambda s=step,p=plan: self._step_executor(p,s,step.execution_context),executor_type="TaskGraphAgentExecutor" if self.agent_executor_factory else "ToolRegistryExecutor",provider="native-kernel" if self.agent_executor_factory else "tool-registry",model="provider-adapter" if self.agent_executor_factory else "deterministic",harness_version=HARNESS_VERSION,dataset_version="PLANNING-V0.1",experiment_id=experiment_id)
@@ -696,6 +704,19 @@ class PlanExecutionService:
                         failure_class=provenance.get("failure_class"),
                         error_type=provenance.get("failure_type"),
                     )
+                    # The official benchmark owns one explicit recovery
+                    # boundary. Do not let a failed repair recursively enter
+                    # the service's inline-repair/replan loop.
+                    if context.get("official_benchmark_recovery"):
+                        plan.status = PlanStatus.FAILED
+                        plans.update(plan)
+                        self._emit(EventType.REPAIR_COMPLETED, {
+                            "plan_id": plan.id,
+                            "repair_step_ids": [step.id],
+                            "outcome": "FAILED",
+                            "bounded_recovery": True,
+                        })
+                        return plan
                     if scope == RepairScope.AFFECTED_SUBGRAPH:
                         # Exclude the failed step itself — it's already FAILED
                         dependent_ids = affected_ids - {step.id}
@@ -723,7 +744,7 @@ class PlanExecutionService:
                             if await self._maybe_replan(goal, plan, run.id, context):
                                 restart_authoritative_schedule = True; break
                             plans.update(plan); continue
-                if await self._maybe_replan(goal, plan, run.id, context):
+                if not context.get("official_benchmark_recovery") and await self._maybe_replan(goal, plan, run.id, context):
                     restart_authoritative_schedule = True
                     break
                 import json
@@ -746,6 +767,16 @@ class PlanExecutionService:
                         transition_step(step, PlanStepStatus.VERIFIED, "verification_accepted", events, plan_id=plan.id)
                     else:
                         provenance, scope, affected_ids = self._handle_verification_rejection(step, plan, vresult, events)
+                        if context.get("official_benchmark_recovery"):
+                            plan.status = PlanStatus.FAILED
+                            plans.update(plan)
+                            self._emit(EventType.REPAIR_COMPLETED, {
+                                "plan_id": plan.id,
+                                "repair_step_ids": [step.id],
+                                "outcome": "FAILED",
+                                "bounded_recovery": True,
+                            })
+                            return plan
                         if provenance is not None and scope == RepairScope.LOCAL:
                             if self._prepare_inline_local_repair(step, provenance, scope, events, plan.id):
                                 plans.update(plan)

@@ -13,11 +13,40 @@ It uses the full ``NativeAgentKernel`` from ``src/lhas/native/kernel.py``.
 from __future__ import annotations
 
 import time
+import re
 from typing import Any
 
 from evals.reliability.run_phase4 import NOT_MEASURED, ExecutionOutcome
 from evals.reliability.runtime_factory.base import RuntimeFactory
 from evals.reliability.runtime_factory.protocol import BenchmarkRuntime
+
+
+def _safe_runtime_detail(value: Any) -> str | None:
+    """Keep provider diagnostics bounded and secret-free."""
+    if value is None:
+        return None
+    detail = str(value)
+    detail = re.sub(
+        r"(?i)(api[_-]?key|authorization|bearer|token|secret|password)(\s*[:=]\s*)[^,\s]+",
+        r"\1\2<redacted>",
+        detail,
+    )
+    return detail[:512]
+
+
+def _result_failure_type(result: Any) -> str | None:
+    """Preserve actionable provider identity errors across the native kernel."""
+    message = str(getattr(result, "error_message", "") or "")
+    upper = message.upper()
+    for code in (
+        "MODEL_IDENTITY_MISMATCH",
+        "PROVIDER_ENDPOINT_MISMATCH",
+        "PROVIDER_IDENTITY_MISMATCH",
+        "CREDENTIAL_REQUIRED_BEFORE_RUN",
+    ):
+        if code in upper:
+            return code
+    return getattr(result, "error_type", None)
 
 
 class _OdysRuntime:
@@ -28,9 +57,10 @@ class _OdysRuntime:
     features that distinguish ODYS from the minimal baseline.
     """
 
-    def __init__(self, *, kernel: Any, db: Any = None):
+    def __init__(self, *, kernel: Any, db: Any = None, recovery: Any = None):
         self.kernel = kernel
         self.db = db
+        self.recovery = recovery
         # Expose the completion authority so tests can verify its presence
         self.completion = kernel.completion
 
@@ -42,16 +72,25 @@ class _OdysRuntime:
         try:
             from lhas.agent.models import AgentBudget, AgentRequest, AgentRole, AgentStatus
 
-            # Ensure DB records exist
+            run_id = config.get("run_id", "odys-run")
+
+            # Ensure DB records exist before both native execution and the
+            # explicit official recovery coordinator bind the attempt.
             if self.db is not None:
-                self._ensure_db_records(task, config)
+                attempt_id = self._ensure_db_records(task, config)
+                if self.recovery is not None:
+                    self.recovery.prepare(
+                        task=task,
+                        config=config,
+                        run_id=run_id,
+                        attempt_id=attempt_id,
+                    )
 
             max_turns = int(task.get("max_turns", 20))
             max_tool_calls = int(task.get("max_model_calls", 20))
             budget = AgentBudget(max_turns=max_turns, max_tool_calls=max_tool_calls)
             allowed = set(config.get("tool_capability_set", []))
 
-            run_id = config.get("run_id", "odys-run")
             attempt_id = f"{run_id}::attempt-1"
             metadata = {
                 "task_id": task.get("task_id", "unknown"),
@@ -83,7 +122,7 @@ class _OdysRuntime:
             claimed_complete = result.status is AgentStatus.COMPLETED
             failure_type = None
             if result.error_type:
-                failure_type = result.error_type
+                failure_type = _result_failure_type(result)
             elif result.status is AgentStatus.FAILED:
                 failure_type = "UNKNOWN_FAILURE"
 
@@ -106,6 +145,14 @@ class _OdysRuntime:
                     "tool_call_count": result.tool_call_count,
                     "turn_count": result.turn_count,
                     "completion_claim": result.completion_claim,
+                    "runtime_failure": (
+                        {
+                            "error_type": result.error_type,
+                            "error_message": _safe_runtime_detail(result.error_message),
+                        }
+                        if result.error_type
+                        else None
+                    ),
                     "features_active": {
                         "completion_authority": True,
                         "failure_provenance": True,
@@ -130,6 +177,7 @@ class _OdysRuntime:
                 claimed_complete=False,
                 observed_state={
                     "error": f"{type(exc).__name__}: {str(exc)[:500]}",
+                    "error_type": type(exc).__name__,
                     "features_active": {
                         "completion_authority": True,
                         "failure_provenance": True,
@@ -145,9 +193,29 @@ class _OdysRuntime:
                 model_calls=0,
                 attempt_count=1,
                 wall_time_seconds=round(elapsed, 6),
+                infrastructure_failure=True,
+                infrastructure_error=(
+                    f"ODYS_RUNTIME_EXCEPTION:{type(exc).__name__}: "
+                    f"{str(exc)[:500]}"
+                ),
             )
 
-    def _ensure_db_records(self, task: dict[str, Any], config: dict[str, Any]) -> None:
+    async def recover_after_validation(
+        self,
+        request: Any,
+        outcome: ExecutionOutcome,
+        validation: Any,
+    ) -> ExecutionOutcome:
+        """Use the explicit official recovery contract."""
+        if self.recovery is None:
+            raise RuntimeError("OFFICIAL_RECOVERY_AUTHORITY_UNAVAILABLE")
+        return await self.recovery.recover_after_validation(
+            request,
+            outcome,
+            validation,
+        )
+
+    def _ensure_db_records(self, task: dict[str, Any], config: dict[str, Any]) -> str:
         """Create Task, Run, and Attempt records if they don't exist."""
         from lhas.domain.models import Attempt, Project, Run, Task
         from lhas.persistence.repositories import (
@@ -192,6 +260,7 @@ class _OdysRuntime:
         if existing_attempt is None:
             existing_attempt = Attempt(id=attempt_id, run_id=existing_run.id, attempt_number=1, status="RUNNING")
             attempts.create(existing_attempt)
+        return attempt_id
 
 
 class OdysRuntimeFactory(RuntimeFactory):

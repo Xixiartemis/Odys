@@ -502,6 +502,8 @@ async def _run_benchmark(
         executor=executor,
         model=model,
         provider=provider,
+        benchmark_version=profile.benchmark_version,
+        benchmark_config_hash=profile.config_hash,
         trace_path=output_dir / "traces.jsonl",
         require_trace=True,
     )

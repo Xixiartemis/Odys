@@ -91,9 +91,16 @@ def test_validation_execution_and_acceptance_are_separate(tmp_path):
     assert validation["acceptance_status"] == "REJECTED"
     assert validation["final_validator_execution_status"] == "SUCCESS"
     assert validation["final_acceptance_status"] == "ACCEPTED"
+    assert validation["initial_agent_claimed_complete"] is True
+    assert validation["final_agent_claimed_complete"] is True
     assert validation["false_completion_detected"] is True
     assert raw["false_completion"] is True
     assert raw["verified_completion"] is True
+    state_evidence = raw["runtime_environment"]["state_evidence"]
+    assert state_evidence["pre_repair_state_digest"]
+    assert state_evidence["post_repair_state_digest"]
+    assert state_evidence["state_changed_after_repair"] is True
+    assert state_evidence["validator_observed_repaired_state"] is True
 
     validation_events = [
         event

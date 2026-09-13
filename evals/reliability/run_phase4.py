@@ -56,6 +56,14 @@ class ResumeIntegrityError(RuntimeError):
     """Raised when an existing result is not compatible with this protocol."""
 
 
+class RuntimeInfrastructureError(RuntimeError):
+    """Raised when execution cannot produce trustworthy benchmark evidence."""
+
+
+class RunBudgetExhausted(RuntimeError):
+    """Raised before a provider call would exceed the run-scoped budget."""
+
+
 RESUME_IDENTITY_FIELDS = (
     "benchmark_version",
     "protocol_hash",
@@ -403,6 +411,36 @@ class ExecutionOutcome:
     # boundary IDs in runtime_environment.recovery.
     original_failure_attempt_id: str | None = None
     repair_attempt_id: str | None = None
+    # Provider-call accounting is execution evidence, not a frozen metric
+    # definition.  The official adapter fills these from every real provider
+    # request, including calls made by a recovery attempt.
+    provider_calls: int = 0
+    provider_call_records: list[dict[str, Any]] = field(default_factory=list)
+    # Explicit attempt accounting prevents a raw ``attempt_count`` from
+    # hiding provider calls made by nested recovery machinery.
+    root_attempt_count: int = 0
+    nested_attempt_count: int = 0
+    provider_attempt_count: int = 0
+    budget_exhausted: bool = False
+    # Preserve the claim at both validator boundaries.  ``claimed_complete``
+    # remains the final claim for backwards compatibility.
+    initial_claimed_complete: bool | None = None
+    final_claimed_complete: bool | None = None
+    # External-observation evidence around repair.  These digests are based
+    # on the same declared observation view supplied to the validator.
+    expected_effect_ids: list[str] = field(default_factory=list)
+    pre_repair_state_digest: str | None = None
+    post_repair_state_digest: str | None = None
+    validator_observed_state_digest: str | None = None
+    state_changed_after_repair: bool | None = None
+    validator_observed_repaired_state: bool | None = None
+    recovery_action: str | None = None
+    # Runtime/provider integrity failures are not product observations.  The
+    # official runner uses this marker to route the case to invalid.jsonl
+    # instead of letting an implementation exception become VALIDATED_FAIL.
+    infrastructure_failure: bool = False
+    infrastructure_error: str | None = None
+    recovery_trace_authoritative: bool = False
 
     @classmethod
     def from_value(cls, value: "ExecutionOutcome | Mapping[str, Any]") -> "ExecutionOutcome":
@@ -412,6 +450,51 @@ class ExecutionOutcome:
             raise TypeError("execution adapter must return ExecutionOutcome or mapping")
         allowed = {field_name for field_name in cls.__dataclass_fields__}
         return cls(**{key: value[key] for key in allowed if key in value})
+
+
+def _validator_observation_view(
+    outcome: ExecutionOutcome,
+    task: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Return the declared external state that the shared validator reads.
+
+    Runtime internals, traces, and provider metadata are intentionally not
+    part of this view.  If a fixture supplies a concrete observation mapping,
+    it is preferred; otherwise the outcome's declared keys are used.
+    Missing expected keys are represented as ``None`` so a before/after
+    comparison cannot mistake absence for unchanged evidence.
+    """
+    observed = outcome.observed_state if isinstance(outcome.observed_state, Mapping) else {}
+    # Fixture observations are authoritative external state.  They are
+    # merged into the same view the validator receives; only declared
+    # expected-effect values are additionally accepted from the runtime
+    # (for semantics such as a canonical repair scope).  This excludes
+    # traces, provider metadata, counters, and attempt bookkeeping from the
+    # state digest without reducing the validator's truth rules.
+    source: dict[str, Any] = {}
+    fixture_observed = observed.get("fixture_observations")
+    if isinstance(fixture_observed, Mapping):
+        source.update(
+            {
+                str(key): value
+                for key, value in fixture_observed.items()
+            }
+        )
+    expected = task.get("expected_observable_effects", {})
+    if isinstance(expected, Mapping):
+        for key in expected:
+            if key in observed:
+                source[str(key)] = observed[key]
+            else:
+                source.setdefault(str(key), None)
+    if not isinstance(fixture_observed, Mapping) and not isinstance(expected, Mapping):
+        source.update({str(key): value for key, value in observed.items()})
+    return source
+
+
+def _observation_digest(outcome: ExecutionOutcome, task: Mapping[str, Any]) -> str:
+    """Hash only the validator-visible, externally observable state."""
+    return _document_hash(_validator_observation_view(outcome, task))
 
 
 class BenchmarkExecutor(Protocol):
@@ -478,8 +561,9 @@ class ExternalObservableValidator:
     ) -> ValidationOutcome:
         del fixture  # fixture identity is carried by the result; state is external to this adapter.
         expected = task["expected_observable_effects"]
+        observed = _validator_observation_view(outcome, task)
         verified = all(
-            key in outcome.observed_state and _observed_matches(value, outcome.observed_state[key])
+            key in observed and _observed_matches(value, observed[key])
             for key, value in expected.items()
         )
         return ValidationOutcome(
@@ -529,17 +613,27 @@ def _runtime_environment(
     *,
     model: str,
     provider: str,
+    benchmark_version: str | None = None,
+    benchmark_config_hash: str | None = None,
     runtime_source: str | None = None,
     execution_trace_ref: str | None = None,
     trace_event_count: int | None = None,
     validation: Mapping[str, Any] | None = None,
     recovery: Mapping[str, Any] | None = None,
+    execution_accounting: Mapping[str, Any] | None = None,
+    state_evidence: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
+    identity = snapshot.fairness_identity(model=model, provider=provider)
+    if benchmark_version is not None:
+        identity["benchmark_version"] = benchmark_version
+    if benchmark_config_hash is not None:
+        identity["benchmark_config_hash"] = benchmark_config_hash
     environment: dict[str, Any] = {
         "python": platform.python_version(),
         "platform": platform.platform(),
         "runner": "phase4-v1",
-        "identity": snapshot.fairness_identity(model=model, provider=provider),
+        "base_protocol_version": snapshot.protocol["benchmark_version"],
+        "identity": identity,
     }
     # result.schema.json is frozen and rejects new top-level keys.  The
     # runtime_environment object is intentionally extensible, so the trace
@@ -557,6 +651,10 @@ def _runtime_environment(
         environment["validation"] = dict(validation)
     if recovery is not None:
         environment["recovery"] = dict(recovery)
+    if execution_accounting is not None:
+        environment["execution_accounting"] = dict(execution_accounting)
+    if state_evidence is not None:
+        environment["state_evidence"] = dict(state_evidence)
     return environment
 
 
@@ -565,6 +663,33 @@ def _invalid_outcome(exc: BaseException) -> dict[str, Any]:
         "reason": f"{type(exc).__name__}: {exc}",
         "exception_type": type(exc).__name__,
     }
+
+
+def _validate_runner_result(
+    result: dict[str, Any],
+    schema_path: Path,
+    *,
+    benchmark_version: str,
+) -> None:
+    """Validate a result while keeping the frozen base schema unchanged.
+
+    The committed schema describes the frozen ``phase4-v1`` protocol.  A
+    provider/model profile is an execution-bundle identity layered over that
+    protocol, so its version is allowed only when the result also records the
+    frozen base version in ``runtime_environment.base_protocol_version``.
+    The schema file itself is never rewritten or re-hashed.
+    """
+    if benchmark_version == PROTOCOL_NAME:
+        validate_raw_result(result, schema_path)
+        return
+    environment = result.get("runtime_environment")
+    if not isinstance(environment, Mapping) or environment.get("base_protocol_version") != PROTOCOL_NAME:
+        raise ProtocolError("PROFILE_BASE_PROTOCOL_VERSION_MISSING")
+    import jsonschema
+
+    schema = json.loads(schema_path.read_text(encoding="utf-8"))
+    schema["properties"]["benchmark_version"] = {"const": benchmark_version}
+    jsonschema.validate(result, schema)
 
 
 class ResultWriter:
@@ -714,6 +839,19 @@ class TraceOutputError(RuntimeError):
     """Raised when a valid run cannot be represented by the trace contract."""
 
 
+def _normalize_trace_timestamp(value: Any) -> str:
+    """Normalize persisted trace timestamps to canonical UTC ``Z`` form."""
+    if not isinstance(value, str):
+        raise TraceOutputError("TRACE_TIMESTAMP_INVALID")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise TraceOutputError("TRACE_TIMESTAMP_INVALID") from exc
+    if parsed.tzinfo is None:
+        raise TraceOutputError("TRACE_TIMESTAMP_NOT_UTC")
+    return _timestamp(parsed)
+
+
 class TraceWriter:
     """Append-only trace sidecar writer for official execution output."""
 
@@ -748,7 +886,11 @@ class TraceWriter:
                 raise TraceOutputError("TRACE_SCHEMA_INVALID")
             if not isinstance(event["metadata"], Mapping):
                 raise TraceOutputError("TRACE_SCHEMA_INVALID")
-            normalized.append(dict(event))
+            normalized_event = dict(event)
+            normalized_event["timestamp"] = _normalize_trace_timestamp(
+                normalized_event["timestamp"]
+            )
+            normalized.append(normalized_event)
         return normalized
 
     def assert_present(self, run_id: str) -> None:
@@ -765,6 +907,8 @@ class TraceWriter:
         runtime_source: str,
         model_identity: str,
         protocol_hash: str,
+        benchmark_version: str = PROTOCOL_NAME,
+        benchmark_config_hash: str | None = None,
         events: Any,
     ) -> tuple[str, int]:
         normalized = self._validate_events(events)
@@ -779,9 +923,12 @@ class TraceWriter:
             "runtime_source": runtime_source,
             "model_identity": model_identity,
             "protocol_hash": protocol_hash,
+            "benchmark_version": benchmark_version,
             "execution_trace": normalized,
             "trace_event_count": len(normalized),
         }
+        if benchmark_config_hash is not None:
+            record["benchmark_config_hash"] = benchmark_config_hash
         line = json.dumps(record, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n"
         with self.path.open("a", encoding="utf-8", newline="\n") as handle:
             handle.write(line)
@@ -910,6 +1057,8 @@ class Phase4Runner:
         fixture_manager: FixtureManager | None = None,
         model: str = "FROZEN_BY_P4.2",
         provider: str = "FROZEN_BY_P4.2",
+        benchmark_version: str | None = None,
+        benchmark_config_hash: str | None = None,
         repo_root: Path | None = None,
         trace_path: Path | None = None,
         require_trace: bool = False,
@@ -926,17 +1075,35 @@ class Phase4Runner:
         self.injector = FaultInjector(snapshot)
         self.model = model
         self.provider = provider
+        # A profile version identifies the experiment bundle; the frozen
+        # protocol version remains available as base_protocol_version in the
+        # runtime environment and is never changed here.
+        self.benchmark_version = benchmark_version or snapshot.protocol["benchmark_version"]
+        self.benchmark_config_hash = benchmark_config_hash
         self.repo_root = Path(repo_root or Path.cwd()).resolve()
         self.repo_sha = _repo_sha(self.repo_root)
         self.require_trace = require_trace
         self.trace_output = TraceWriter(trace_path) if trace_path is not None else None
+        configure_budget = getattr(self.executor, "configure_frozen_budget", None)
+        if callable(configure_budget):
+            configure_budget(self.snapshot.protocol.get("budgets", {}))
+
+    def _experiment_identity(self) -> dict[str, str]:
+        identity = self.snapshot.fairness_identity(
+            model=self.model,
+            provider=self.provider,
+        )
+        identity["benchmark_version"] = self.benchmark_version
+        if self.benchmark_config_hash is not None:
+            identity["benchmark_config_hash"] = self.benchmark_config_hash
+        return identity
 
     async def run(self, runs: Iterable[RunSpec]) -> dict[str, int]:
         for spec in runs:
             if self.output.has_run(spec.run_id):
                 self.output.assert_resume_compatible(
                     spec.run_id,
-                    self.snapshot.fairness_identity(model=self.model, provider=self.provider),
+                    self._experiment_identity(),
                 )
                 if self.require_trace:
                     assert self.trace_output is not None
@@ -951,10 +1118,15 @@ class Phase4Runner:
         started_clock = time.perf_counter()
         fixture: FixtureHandle | None = None
         fault = self.injector.plan_for(spec.task)
+        diagnostic_trace: list[dict[str, Any]] = []
+        diagnostic_runtime_source: str | None = None
+        diagnostic_validation: ValidationOutcome | None = None
+        diagnostic_trace_status: str | None = None
         try:
             fixture = self.fixtures.prepare(spec.task)
             record: dict[str, Any] | None = None
             execution_error: BaseException | None = None
+            request: ExecutionRequest | None = None
             try:
                 request = ExecutionRequest(
                     run_id=spec.run_id,
@@ -969,8 +1141,20 @@ class Phase4Runner:
                 if inspect.isawaitable(result):
                     result = await result
                 outcome = ExecutionOutcome.from_value(result)
+                if outcome.infrastructure_failure:
+                    raise RuntimeInfrastructureError(
+                        outcome.infrastructure_error
+                        or outcome.failure_type
+                        or "RUNTIME_INFRASTRUCTURE_FAILURE"
+                    )
                 if outcome.wall_time_seconds == NOT_MEASURED:
                     outcome.wall_time_seconds = round(time.perf_counter() - started_clock, 6)
+                if outcome.initial_claimed_complete is None:
+                    outcome.initial_claimed_complete = bool(outcome.claimed_complete)
+                outcome.expected_effect_ids = [
+                    str(key)
+                    for key in (spec.task.get("expected_observable_effects", {}) or {})
+                ]
                 # This is the first (initial) validator observation.  A
                 # rejection is data, not an executor exception.
                 initial_validation = self.validator.validate(spec.task, fixture, outcome)
@@ -997,6 +1181,27 @@ class Phase4Runner:
                     claimed_complete=outcome.claimed_complete,
                     phase="initial",
                 )
+                diagnostic_runtime_source = runtime_source
+                diagnostic_validation = initial_validation
+                # This is the observed rejection boundary at which recovery
+                # is requested.  Recording it before invoking recovery keeps
+                # an infrastructure-failed run diagnostically useful without
+                # inventing any post-failure lifecycle events.
+                if (
+                    initial_validation.acceptance_status == "REJECTED"
+                    and _recovery_enabled(spec.config)
+                ):
+                    trace.append(
+                        _trace_event(
+                            "FAILURE_DETECTED",
+                            task_id=spec.task["task_id"],
+                            attempt_id=initial_attempt_id,
+                            status="detected",
+                            failure_type=initial_validation.failure_type
+                            or "VALIDATOR_REJECTION",
+                        )
+                    )
+                diagnostic_trace = list(trace)
 
                 # Recovery is an explicit executor capability.  The runner
                 # owns the validator boundary and orchestration events; the
@@ -1017,6 +1222,11 @@ class Phase4Runner:
                 if recovery is not None:
                     outcome, validation, trace = recovery
                     runtime_source = outcome.runtime_source or runtime_source
+                else:
+                    outcome.final_claimed_complete = bool(outcome.claimed_complete)
+                    outcome.validator_observed_state_digest = _observation_digest(
+                        outcome, spec.task
+                    )
                 finished = _utc_now()
                 if self.require_trace:
                     if self.trace_output is None:
@@ -1029,6 +1239,8 @@ class Phase4Runner:
                         runtime_source=runtime_source,
                         model_identity=self.model,
                         protocol_hash=self.snapshot.protocol_hash,
+                        benchmark_version=self.benchmark_version,
+                        benchmark_config_hash=self.benchmark_config_hash,
                         events=trace,
                     )
                 record = self._record(
@@ -1052,10 +1264,21 @@ class Phase4Runner:
                 await self.fixtures.reset(fixture)
             except Exception as exc:
                 execution_error = execution_error or exc
+            finally:
+                cleanup = getattr(self.executor, "cleanup", None)
+                if callable(cleanup) and request is not None:
+                    try:
+                        cleanup(request)
+                    except Exception as exc:
+                        execution_error = execution_error or exc
             if execution_error is not None:
                 raise execution_error
             assert record is not None
-            validate_raw_result(record, self.snapshot.root / "schemas" / "result.schema.json")
+            _validate_runner_result(
+                record,
+                self.snapshot.root / "schemas" / "result.schema.json",
+                benchmark_version=self.benchmark_version,
+            )
             self.output.write_raw(record)
         except Exception as exc:
             if "immutable result collision" in str(exc).lower():
@@ -1072,9 +1295,50 @@ class Phase4Runner:
                     }
                 )
                 return
+            diagnostic_trace_ref: str | None = None
+            diagnostic_trace_event_count: int | None = None
+            if self.require_trace and self.trace_output is not None and diagnostic_trace:
+                try:
+                    diagnostic_trace_ref, diagnostic_trace_event_count = self.trace_output.append(
+                        run_id=spec.run_id,
+                        task_id=spec.task["task_id"],
+                        config=spec.config["config_id"],
+                        repeat=spec.repeat_index,
+                        runtime_source=diagnostic_runtime_source or "unknown",
+                        model_identity=self.model,
+                        protocol_hash=self.snapshot.protocol_hash,
+                        benchmark_version=self.benchmark_version,
+                        benchmark_config_hash=self.benchmark_config_hash,
+                        events=diagnostic_trace,
+                    )
+                    diagnostic_trace_status = "PARTIAL_DIAGNOSTIC_TRACE"
+                except Exception as trace_exc:
+                    diagnostic_trace_status = (
+                        f"TRACE_PERSISTENCE_FAILED:{type(trace_exc).__name__}"
+                    )
+            elif self.require_trace:
+                diagnostic_trace_status = "UNAVAILABLE_BEFORE_TRACE_INITIALIZATION"
             finished = _utc_now()
-            invalid = self._invalid_record(spec, fixture, fault, started, finished, exc)
-            validate_raw_result(invalid, self.snapshot.root / "schemas" / "result.schema.json")
+            invalid = self._invalid_record(
+                spec,
+                fixture,
+                fault,
+                started,
+                finished,
+                exc,
+                benchmark_version=self.benchmark_version,
+                benchmark_config_hash=self.benchmark_config_hash,
+                runtime_source=diagnostic_runtime_source,
+                execution_trace_ref=diagnostic_trace_ref,
+                trace_event_count=diagnostic_trace_event_count,
+                validation=diagnostic_validation,
+                diagnostic_trace_status=diagnostic_trace_status,
+            )
+            _validate_runner_result(
+                invalid,
+                self.snapshot.root / "schemas" / "result.schema.json",
+                benchmark_version=self.benchmark_version,
+            )
             self.output.write_invalid(invalid)
 
     @staticmethod
@@ -1108,9 +1372,27 @@ class Phase4Runner:
             return None
         if not _recovery_enabled(spec.config):
             return None
+        # Budget exhaustion is already the terminal result of the single
+        # root-scoped execution budget.  Never start recovery with a fresh
+        # attempt budget after this boundary.
+        if outcome.budget_exhausted or str(outcome.failure_type or "").upper() == "BUDGET_EXHAUSTED":
+            outcome.recovery_required = False
+            outcome.recovery_attempted = False
+            return None
         recover = getattr(self.executor, "recover_after_validation", None)
         if not callable(recover):
             return None
+
+        outcome.initial_claimed_complete = bool(
+            outcome.initial_claimed_complete
+            if outcome.initial_claimed_complete is not None
+            else outcome.claimed_complete
+        )
+        outcome.expected_effect_ids = [
+            str(key)
+            for key in (spec.task.get("expected_observable_effects", {}) or {})
+        ]
+        outcome.pre_repair_state_digest = _observation_digest(outcome, spec.task)
 
         recovery_result = recover(request, outcome, initial_validation)
         if inspect.isawaitable(recovery_result):
@@ -1118,11 +1400,30 @@ class Phase4Runner:
         if recovery_result is None:
             return None
         repaired = ExecutionOutcome.from_value(recovery_result)
+        if not repaired.provider_call_records and outcome.provider_call_records:
+            repaired.provider_call_records = [
+                dict(item) for item in outcome.provider_call_records
+            ]
+            repaired.provider_calls = outcome.provider_calls
+        if repaired.provider_call_records:
+            # P45's provider slice already contains initial + recovery calls.
+            repaired.model_calls = max(
+                int(repaired.model_calls), int(outcome.model_calls)
+            )
+        else:
+            repaired.model_calls = int(outcome.model_calls) + int(repaired.model_calls)
+        repaired.tool_calls = int(outcome.tool_calls) + int(repaired.tool_calls)
 
-        repair_attempt_id = str(
+        repair_scope = str(repaired.repair_scope or "")
+        is_macro_replan = repair_scope.upper() == "MACRO_REPLAN"
+        repair_attempt_value = (
             repaired.repair_attempt_id
-            or repaired.observed_state.get("repair_attempt_id", "")
-            or f"{spec.run_id}::repair-attempt-1"
+            or repaired.observed_state.get("repair_attempt_id")
+        )
+        repair_attempt_id = (
+            str(repair_attempt_value)
+            if repair_attempt_value
+            else (None if is_macro_replan else f"{spec.run_id}::repair-attempt-1")
         )
         repaired.original_failure_attempt_id = str(
             repaired.original_failure_attempt_id
@@ -1132,32 +1433,63 @@ class Phase4Runner:
         repaired.repair_attempt_id = repair_attempt_id
         repaired.recovery_required = True
         repaired.recovery_attempted = True
-        repaired.repair_attempts = max(1, int(repaired.repair_attempts))
-        repaired.attempt_count = max(
-            int(outcome.attempt_count) + int(repaired.attempt_count),
-            int(outcome.attempt_count) + 1,
+        repaired.repair_attempts = (
+            0 if is_macro_replan else max(1, int(repaired.repair_attempts))
+        )
+        repaired.attempt_count = (
+            int(outcome.attempt_count) + int(repaired.attempt_count)
+            if is_macro_replan is False
+            else int(outcome.attempt_count)
         )
         repaired.runtime_source = repaired.runtime_source or outcome.runtime_source
+        repaired.initial_claimed_complete = outcome.initial_claimed_complete
+        repaired.expected_effect_ids = list(outcome.expected_effect_ids)
+        repaired.pre_repair_state_digest = outcome.pre_repair_state_digest
+        repaired.root_attempt_count = max(
+            int(repaired.root_attempt_count), int(outcome.root_attempt_count), 1
+        )
+        if not is_macro_replan:
+            repaired.nested_attempt_count = max(
+                int(repaired.nested_attempt_count),
+                int(outcome.nested_attempt_count),
+                1,
+            )
+        repaired.provider_attempt_count = max(
+            int(repaired.provider_attempt_count),
+            int(outcome.provider_attempt_count),
+        )
 
         repair_trace = repaired.execution_trace or repaired.observed_state.get(
             "execution_trace", []
         )
         merged_trace = list(trace)
-        merged_trace.append(
-            _trace_event(
-                "FAILURE_DETECTED",
-                task_id=spec.task["task_id"],
-                attempt_id=initial_attempt_id,
-                status="detected",
-                failure_type=initial_validation.failure_type or "VALIDATOR_REJECTION",
+        if not any(
+            isinstance(event, Mapping)
+            and event.get("event_type") == "FAILURE_DETECTED"
+            for event in merged_trace
+        ):
+            merged_trace.append(
+                _trace_event(
+                    "FAILURE_DETECTED",
+                    task_id=spec.task["task_id"],
+                    attempt_id=initial_attempt_id,
+                    status="detected",
+                    failure_type=initial_validation.failure_type
+                    or "VALIDATOR_REJECTION",
+                )
             )
-        )
         repair_events = [
             dict(event)
             for event in repair_trace
             if isinstance(event, Mapping)
         ] if isinstance(repair_trace, list) else []
         repair_event_types = {event.get("event_type") for event in repair_events}
+        if repaired.recovery_trace_authoritative:
+            required_recovery_events = {"StepFailureProvenance"}
+            if not is_macro_replan:
+                required_recovery_events.update({"REPAIR_STARTED", "REPAIR_COMPLETED"})
+            if not required_recovery_events.issubset(repair_event_types):
+                raise RuntimeInfrastructureError("RECOVERY_TRACE_NOT_AUTHORITATIVE")
         if "StepFailureProvenance" not in repair_event_types:
             merged_trace.append(
                 _trace_event(
@@ -1170,12 +1502,13 @@ class Phase4Runner:
                     failure_type=initial_validation.failure_type or "VALIDATOR_REJECTION",
                 )
             )
-        if "REPAIR_STARTED" not in repair_event_types:
+        repair_event_attempt_id = repair_attempt_id or initial_attempt_id
+        if not is_macro_replan and "REPAIR_STARTED" not in repair_event_types:
             merged_trace.append(
                 _trace_event(
                     "REPAIR_STARTED",
                     task_id=spec.task["task_id"],
-                    attempt_id=repair_attempt_id,
+                    attempt_id=repair_event_attempt_id,
                     status="started",
                     original_failure_attempt_id=initial_attempt_id,
                     repair_attempt_id=repair_attempt_id,
@@ -1183,12 +1516,12 @@ class Phase4Runner:
                 )
             )
         merged_trace.extend(repair_events)
-        if "REPAIR_COMPLETED" not in repair_event_types:
+        if not is_macro_replan and "REPAIR_COMPLETED" not in repair_event_types:
             merged_trace.append(
                 _trace_event(
                     "REPAIR_COMPLETED",
                     task_id=spec.task["task_id"],
-                    attempt_id=repair_attempt_id,
+                    attempt_id=repair_event_attempt_id,
                     status="completed",
                     original_failure_attempt_id=initial_attempt_id,
                     repair_attempt_id=repair_attempt_id,
@@ -1202,7 +1535,7 @@ class Phase4Runner:
             _trace_event(
                 "VALIDATION_RESULT",
                 task_id=spec.task["task_id"],
-                attempt_id=repair_attempt_id,
+                attempt_id=repair_event_attempt_id,
                 status=final_validation.acceptance_status.casefold(),
                 metadata=_validation_metadata(
                     final_validation,
@@ -1211,12 +1544,43 @@ class Phase4Runner:
                 ),
             )
         )
+        repaired.final_claimed_complete = bool(repaired.claimed_complete)
+        repaired.post_repair_state_digest = _observation_digest(repaired, spec.task)
+        repaired.validator_observed_state_digest = (
+            repaired.post_repair_state_digest
+            if final_validation.validator_execution_status == "SUCCESS"
+            else None
+        )
+        repaired.state_changed_after_repair = (
+            repaired.pre_repair_state_digest
+            != repaired.post_repair_state_digest
+        )
+        repaired.validator_observed_repaired_state = bool(
+            repaired.validator_observed_state_digest
+            and final_validation.validator_execution_status == "SUCCESS"
+        )
+        validation_event = merged_trace[-1]
+        validation_event["metadata"].update(
+            {
+                "initial_agent_claimed_complete": bool(
+                    repaired.initial_claimed_complete
+                ),
+                "final_agent_claimed_complete": bool(
+                    repaired.final_claimed_complete
+                ),
+                "pre_repair_state_digest": repaired.pre_repair_state_digest,
+                "post_repair_state_digest": repaired.post_repair_state_digest,
+                "validator_observed_state_digest": repaired.validator_observed_state_digest,
+                "state_changed_after_repair": repaired.state_changed_after_repair,
+                "validator_observed_repaired_state": repaired.validator_observed_repaired_state,
+            }
+        )
         if final_validation.acceptance_status == "ACCEPTED":
             merged_trace.append(
                 _trace_event(
                     "STEP_VERIFIED",
                     task_id=spec.task["task_id"],
-                    attempt_id=repair_attempt_id,
+                    attempt_id=repair_event_attempt_id,
                     status="verified",
                     original_failure_attempt_id=initial_attempt_id,
                     repair_attempt_id=repair_attempt_id,
@@ -1226,7 +1590,7 @@ class Phase4Runner:
                 _trace_event(
                     "VERIFICATION_PASSED",
                     task_id=spec.task["task_id"],
-                    attempt_id=repair_attempt_id,
+                    attempt_id=repair_event_attempt_id,
                     status="passed",
                     original_failure_attempt_id=initial_attempt_id,
                     repair_attempt_id=repair_attempt_id,
@@ -1238,7 +1602,7 @@ class Phase4Runner:
                 _trace_event(
                     "VERIFICATION_FAILED",
                     task_id=spec.task["task_id"],
-                    attempt_id=repair_attempt_id,
+                    attempt_id=repair_event_attempt_id,
                     status="failed",
                     original_failure_attempt_id=initial_attempt_id,
                     repair_attempt_id=repair_attempt_id,
@@ -1248,7 +1612,8 @@ class Phase4Runner:
         repaired.execution_trace = merged_trace
         repaired.observed_state["execution_trace"] = merged_trace
         repaired.observed_state["original_failure_attempt_id"] = initial_attempt_id
-        repaired.observed_state["repair_attempt_id"] = repair_attempt_id
+        if repair_attempt_id is not None:
+            repaired.observed_state["repair_attempt_id"] = repair_attempt_id
         return repaired, final_validation, merged_trace
 
     def _record(
@@ -1267,6 +1632,8 @@ class Phase4Runner:
         runtime_source: str | None = None,
         execution_trace_ref: str | None = None,
         trace_event_count: int | None = None,
+        benchmark_version: str | None = None,
+        benchmark_config_hash: str | None = None,
     ) -> dict[str, Any]:
         initial_validation = initial_validation or validation
         if false_completion_detected is None:
@@ -1293,10 +1660,44 @@ class Phase4Runner:
             "final_validator_execution_status": validation.validator_execution_status,
             "final_acceptance_status": validation.acceptance_status,
             "false_completion_detected": bool(false_completion_detected),
+            "initial_agent_claimed_complete": bool(
+                outcome.initial_claimed_complete
+                if outcome.initial_claimed_complete is not None
+                else outcome.claimed_complete
+            ),
+            "final_agent_claimed_complete": bool(
+                outcome.final_claimed_complete
+                if outcome.final_claimed_complete is not None
+                else outcome.claimed_complete
+            ),
+            # Backwards-compatible alias for consumers of the P410 schema.
             "agent_claimed_complete": bool(outcome.claimed_complete),
         }
+        accounting = {
+            "provider_calls": int(outcome.provider_calls),
+            "model_calls": int(outcome.model_calls),
+            "root_attempt_count": int(outcome.root_attempt_count),
+            "nested_attempt_count": int(outcome.nested_attempt_count),
+            "provider_attempt_count": int(outcome.provider_attempt_count),
+            "budget_exhausted": bool(outcome.budget_exhausted),
+            "provider_call_records": [
+                dict(item) for item in outcome.provider_call_records
+            ],
+            "tokens_input": outcome.tokens_input,
+            "tokens_output": outcome.tokens_output,
+            "total_tokens": outcome.total_tokens,
+        }
+        state_evidence = {
+            "expected_effect_ids": list(outcome.expected_effect_ids),
+            "pre_repair_state_digest": outcome.pre_repair_state_digest,
+            "post_repair_state_digest": outcome.post_repair_state_digest,
+            "validator_observed_state_digest": outcome.validator_observed_state_digest,
+            "state_changed_after_repair": outcome.state_changed_after_repair,
+            "validator_observed_repaired_state": outcome.validator_observed_repaired_state,
+        }
+        recovery_identity["recovery_action"] = outcome.recovery_action
         return {
-            "benchmark_version": PROTOCOL_NAME,
+            "benchmark_version": benchmark_version or self.benchmark_version,
             "benchmark_run_id": spec.run_id,
             "task_id": spec.task["task_id"],
             "family": spec.task["family"],
@@ -1312,11 +1713,17 @@ class Phase4Runner:
                 self.snapshot,
                 model=self.model,
                 provider=self.provider,
+                benchmark_version=benchmark_version or self.benchmark_version,
+                benchmark_config_hash=benchmark_config_hash
+                if benchmark_config_hash is not None
+                else self.benchmark_config_hash,
                 runtime_source=runtime_source,
                 execution_trace_ref=execution_trace_ref,
                 trace_event_count=trace_event_count,
                 validation=validation_identity,
                 recovery=recovery_identity,
+                execution_accounting=accounting,
+                state_evidence=state_evidence,
             ),
             "validator_id": self.snapshot.protocol["shared_validator_id"],
             "fault_id": fault.fault_id,
@@ -1361,9 +1768,58 @@ class Phase4Runner:
         started: datetime,
         finished: datetime,
         exc: BaseException,
+        *,
+        benchmark_version: str | None = None,
+        benchmark_config_hash: str | None = None,
+        runtime_source: str | None = None,
+        execution_trace_ref: str | None = None,
+        trace_event_count: int | None = None,
+        validation: ValidationOutcome | None = None,
+        diagnostic_trace_status: str | None = None,
     ) -> dict[str, Any]:
+        validation_identity: dict[str, Any] = {
+            "validator_execution_status": "NOT_EXECUTED",
+            "acceptance_status": "NOT_EVALUATED",
+            "final_validator_execution_status": "NOT_EXECUTED",
+            "final_acceptance_status": "NOT_EVALUATED",
+            "false_completion_detected": False,
+            "agent_claimed_complete": False,
+        }
+        if validation is not None:
+            validation_identity.update(
+                {
+                    "validator_execution_status": validation.validator_execution_status,
+                    "acceptance_status": validation.acceptance_status,
+                    "false_completion_detected": False,
+                }
+            )
+        recovery_identity = {
+            "recovery_required": False,
+            "recovery_attempted": False,
+            "recovery_success": False,
+            "repair_scope": None,
+            "repair_attempts": 0,
+            "original_failure_attempt_id": None,
+            "repair_attempt_id": None,
+        }
+        runtime_environment = _runtime_environment(
+            self.snapshot,
+            model=self.model,
+            provider=self.provider,
+            benchmark_version=benchmark_version or self.benchmark_version,
+            benchmark_config_hash=benchmark_config_hash
+            if benchmark_config_hash is not None
+            else self.benchmark_config_hash,
+            runtime_source=runtime_source,
+            execution_trace_ref=execution_trace_ref,
+            trace_event_count=trace_event_count,
+            validation=validation_identity,
+            recovery=recovery_identity,
+        )
+        if diagnostic_trace_status is not None:
+            runtime_environment["diagnostic_trace_status"] = diagnostic_trace_status
         return {
-            "benchmark_version": PROTOCOL_NAME,
+            "benchmark_version": benchmark_version or self.benchmark_version,
             "benchmark_run_id": spec.run_id,
             "task_id": spec.task["task_id"],
             "family": spec.task["family"],
@@ -1375,28 +1831,7 @@ class Phase4Runner:
             "protocol_hash": self.snapshot.protocol_hash,
             "model": self.model,
             "provider": self.provider,
-            "runtime_environment": _runtime_environment(
-                self.snapshot,
-                model=self.model,
-                provider=self.provider,
-                validation={
-                    "validator_execution_status": "NOT_EXECUTED",
-                    "acceptance_status": "NOT_EVALUATED",
-                    "final_validator_execution_status": "NOT_EXECUTED",
-                    "final_acceptance_status": "NOT_EVALUATED",
-                    "false_completion_detected": False,
-                    "agent_claimed_complete": False,
-                },
-                recovery={
-                    "recovery_required": False,
-                    "recovery_attempted": False,
-                    "recovery_success": False,
-                    "repair_scope": None,
-                    "repair_attempts": 0,
-                    "original_failure_attempt_id": None,
-                    "repair_attempt_id": None,
-                },
-            ),
+            "runtime_environment": runtime_environment,
             "validator_id": self.snapshot.protocol["shared_validator_id"],
             "fault_id": fault.fault_id,
             "fault_type": fault.fault_type,

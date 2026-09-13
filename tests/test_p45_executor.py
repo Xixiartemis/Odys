@@ -180,7 +180,9 @@ class TestP45FixtureCleanup:
     async def test_workspace_cleaned_after_execution(self, executor, snapshot):
         request = _make_request(snapshot, "CI-01", "minimal")
         await executor.execute(request)
-        # After execution, workspace dirs should be cleaned up
+        # Official validation/recovery owns the boundary after execute;
+        # explicit cleanup releases the workspace once that boundary closes.
+        executor.cleanup(request)
         assert len(executor._workspace_dirs) == 0
 
 
