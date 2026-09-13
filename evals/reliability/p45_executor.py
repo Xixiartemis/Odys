@@ -34,6 +34,7 @@ from evals.reliability.run_phase4 import (
     ExecutionOutcome,
     ExecutionRequest,
     NOT_MEASURED,
+    ROOT_API_BUDGET_FAILURE,
     RuntimeInfrastructureError,
     RunBudgetExhausted,
 )
@@ -57,6 +58,7 @@ class RunBudgetLedger:
     root_provider_calls: int = 0
     nested_provider_calls: int = 0
     blocked_provider_calls: int = 0
+    repair_attempts: int = 0
     exhausted: bool = False
     _phases: list[str] = field(default_factory=list)
 
@@ -65,7 +67,10 @@ class RunBudgetLedger:
         if self.exhausted or self.total_provider_calls >= self.max_provider_calls:
             self.exhausted = True
             self.blocked_provider_calls += 1
-            raise RunBudgetExhausted("RUN_API_BUDGET_EXHAUSTED")
+            raise RunBudgetExhausted(
+                "RUN_API_BUDGET_EXHAUSTED",
+                budget_type=ROOT_API_BUDGET_FAILURE,
+            )
         if str(phase).lower() == "initial":
             self.root_provider_calls += 1
         else:
@@ -76,6 +81,26 @@ class RunBudgetLedger:
     def total_provider_calls(self) -> int:
         return self.root_provider_calls + self.nested_provider_calls
 
+    @property
+    def remaining_provider_calls(self) -> int:
+        return max(0, int(self.max_provider_calls) - self.total_provider_calls)
+
+    def can_start_repair(self) -> bool:
+        """Return whether one bounded repair can use this same ledger."""
+        return bool(
+            not self.exhausted
+            and self.repair_attempts < self.max_repair_attempts
+            and self.remaining_provider_calls > 0
+        )
+
+    def reserve_repair(self) -> bool:
+        """Reserve the single repair slot without allocating a new budget."""
+        if not self.can_start_repair():
+            return False
+        self.repair_attempts += 1
+        self._phases.append("repair_attempt")
+        return True
+
     def snapshot(self) -> dict[str, Any]:
         return {
             "max_provider_calls": self.max_provider_calls,
@@ -85,7 +110,9 @@ class RunBudgetLedger:
             "root_provider_calls": self.root_provider_calls,
             "nested_provider_calls": self.nested_provider_calls,
             "provider_calls": self.total_provider_calls,
+            "remaining_provider_calls": self.remaining_provider_calls,
             "blocked_provider_calls": self.blocked_provider_calls,
+            "repair_attempts": self.repair_attempts,
             "exhausted": self.exhausted,
         }
 
@@ -283,6 +310,14 @@ class P45BenchmarkExecutor:
             ledger = RunBudgetLedger(**values)
             self._run_budgets[run_id] = ledger
         return ledger
+
+    def run_budget_snapshot(self, run_id: str) -> dict[str, Any] | None:
+        ledger = self._run_budgets.get(run_id)
+        return ledger.snapshot() if ledger is not None else None
+
+    def can_attempt_recovery(self, run_id: str) -> bool:
+        ledger = self._run_budgets.get(run_id)
+        return bool(ledger is not None and ledger.can_start_repair())
 
     @property
     def provider_identity(self) -> dict[str, Any] | None:
@@ -572,6 +607,9 @@ class P45BenchmarkExecutor:
 
         runtime = self._active_runtimes.get(request.run_id)
         try:
+            ledger = self._run_budgets.get(request.run_id)
+            if ledger is not None and not ledger.reserve_repair():
+                return None
             if not isinstance(runtime, RecoverableBenchmarkRuntime):
                 if request.config.get("config_id") == "odys_p3":
                     raise RuntimeInfrastructureError(
@@ -674,7 +712,8 @@ class P45BenchmarkExecutor:
                 # outcome.  It must not be reclassified as an infrastructure
                 # exception or trigger a fresh recovery budget.
                 outcome.budget_exhausted = True
-                outcome.failure_type = "BUDGET_EXHAUSTED"
+                outcome.budget_failure_type = ROOT_API_BUDGET_FAILURE
+                outcome.failure_type = ROOT_API_BUDGET_FAILURE
                 outcome.recovery_required = False
             outcome.provider_calls = ledger.total_provider_calls
             outcome.root_attempt_count = 1 if ledger.total_provider_calls else 0

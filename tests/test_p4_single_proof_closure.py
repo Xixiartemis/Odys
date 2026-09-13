@@ -126,7 +126,9 @@ def test_04_budget_snapshot_exposes_root_nested_and_blocked_counts():
         "root_provider_calls": 1,
         "nested_provider_calls": 0,
         "provider_calls": 1,
+        "remaining_provider_calls": 0,
         "blocked_provider_calls": 1,
+        "repair_attempts": 0,
         "exhausted": True,
     }
 

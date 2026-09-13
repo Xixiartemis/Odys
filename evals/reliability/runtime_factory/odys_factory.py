@@ -16,7 +16,11 @@ import time
 import re
 from typing import Any
 
-from evals.reliability.run_phase4 import NOT_MEASURED, ExecutionOutcome
+from evals.reliability.run_phase4 import (
+    ATTEMPT_LOCAL_BUDGET_FAILURES,
+    ExecutionOutcome,
+    NOT_MEASURED,
+)
 from evals.reliability.runtime_factory.base import RuntimeFactory
 from evals.reliability.runtime_factory.protocol import BenchmarkRuntime
 
@@ -47,6 +51,40 @@ def _result_failure_type(result: Any) -> str | None:
         if code in upper:
             return code
     return getattr(result, "error_type", None)
+
+
+def _classify_budget_failure(
+    result: Any,
+    *,
+    max_turns: int,
+    max_tool_calls: int,
+) -> str | None:
+    """Classify native generic budget failure using observed counters."""
+    raw = str(getattr(result, "error_type", "") or "").upper()
+    if raw in ATTEMPT_LOCAL_BUDGET_FAILURES or raw in {
+        "ROOT_API_BUDGET_EXHAUSTED",
+        "WALL_TIME_BUDGET_EXHAUSTED",
+    }:
+        return raw
+    if raw != "BUDGET_EXHAUSTED":
+        return None
+    detail = str(getattr(result, "error_message", "") or "").upper()
+    if "TOOL_CALL_BUDGET" in detail or (
+        max_tool_calls > 0
+        and int(getattr(result, "tool_call_count", 0) or 0) >= max_tool_calls
+    ):
+        return "TOOL_CALL_BUDGET_EXHAUSTED"
+    if "TURN_BUDGET" in detail or (
+        max_turns > 0
+        and int(getattr(result, "turn_count", 0) or 0) >= max_turns
+    ):
+        return "TURN_BUDGET_EXHAUSTED"
+    if int(getattr(result, "turn_count", 0) or 0) or int(
+        getattr(result, "tool_call_count", 0) or 0
+    ):
+        return "ATTEMPT_BUDGET_EXHAUSTED"
+    # Preserve the legacy result when no typed evidence exists.
+    return "BUDGET_EXHAUSTED"
 
 
 class _OdysRuntime:
@@ -121,8 +159,13 @@ class _OdysRuntime:
             # Map AgentResult to ExecutionOutcome
             claimed_complete = result.status is AgentStatus.COMPLETED
             failure_type = None
+            budget_failure_type = _classify_budget_failure(
+                result,
+                max_turns=max_turns,
+                max_tool_calls=max_tool_calls,
+            )
             if result.error_type:
-                failure_type = _result_failure_type(result)
+                failure_type = budget_failure_type or _result_failure_type(result)
             elif result.status is AgentStatus.FAILED:
                 failure_type = "UNKNOWN_FAILURE"
 
@@ -153,6 +196,7 @@ class _OdysRuntime:
                         if result.error_type
                         else None
                     ),
+                    "budget_failure_type": budget_failure_type,
                     "features_active": {
                         "completion_authority": True,
                         "failure_provenance": True,
@@ -161,6 +205,7 @@ class _OdysRuntime:
                     },
                 },
                 failure_type=failure_type,
+                budget_failure_type=budget_failure_type,
                 recovery_required=recovery_required,
                 recovery_attempted=recovery_attempted,
                 recovery_success=recovery_success,

@@ -35,7 +35,7 @@ from typing import Any
 
 from lhas.native.models import RuntimeTarget
 from lhas.native.provider import OpenAIChatProviderAdapter
-from evals.reliability.run_phase4 import RunBudgetExhausted
+from evals.reliability.run_phase4 import ROOT_API_BUDGET_FAILURE, RunBudgetExhausted
 
 
 # These values are the P4.6 freeze inputs.  They are deliberately kept in
@@ -227,7 +227,9 @@ class RealLLMProvider:
                         {
                             "provider_call": False,
                             "status": "BUDGET_BLOCKED",
-                            "error_type": "BUDGET_EXHAUSTED",
+                            "error_type": getattr(
+                                exc, "budget_type", ROOT_API_BUDGET_FAILURE
+                            ),
                             "finished_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
                             "input_tokens": "NOT_MEASURED",
                             "output_tokens": "NOT_MEASURED",

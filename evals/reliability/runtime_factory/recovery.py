@@ -11,7 +11,11 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-from evals.reliability.run_phase4 import ExecutionOutcome
+from evals.reliability.run_phase4 import (
+    ATTEMPT_LOCAL_BUDGET_FAILURES,
+    ExecutionOutcome,
+    ROOT_API_BUDGET_FAILURE,
+)
 
 
 class OfficialRecoveryContractError(RuntimeError):
@@ -271,10 +275,21 @@ class OfficialOdysRecoveryCoordinator:
         failure_type_value = str(
             outcome.failure_type or FailureType.VERIFICATION_REJECTED.value
         )
-        try:
-            failure_type = FailureType(failure_type_value)
-        except ValueError:
-            failure_type = FailureType.VERIFICATION_REJECTED
+        budget_failure_type = str(
+            outcome.budget_failure_type or failure_type_value
+        ).upper()
+        if budget_failure_type in ATTEMPT_LOCAL_BUDGET_FAILURES:
+            # The native kernel reports the exact attempt-local budget
+            # boundary; the existing P3 policy classifies it as a normal
+            # executable tool failure so local recovery can proceed.
+            failure_type = FailureType.TOOL_ERROR
+        elif budget_failure_type == ROOT_API_BUDGET_FAILURE:
+            failure_type = FailureType.BUDGET_EXHAUSTED
+        else:
+            try:
+                failure_type = FailureType(failure_type_value)
+            except ValueError:
+                failure_type = FailureType.VERIFICATION_REJECTED
         if failure_type in {
             FailureType.QUOTA_EXHAUSTED,
             FailureType.BILLING_OR_CREDIT_EXHAUSTED,
@@ -318,6 +333,7 @@ class OfficialOdysRecoveryCoordinator:
                     validation, "acceptance_status", "REJECTED"
                 ),
                 "agent_claimed_complete": bool(outcome.claimed_complete),
+                "budget_failure_type": budget_failure_type,
             },
             attempt_id=context["attempt_id"],
             run_id=request.run_id,
@@ -341,6 +357,7 @@ class OfficialOdysRecoveryCoordinator:
                 "attempt_id": context["attempt_id"],
                 "failure_class": failure_class.value,
                 "failure_type": failure_type.value,
+                "budget_failure_type": budget_failure_type,
                 "repair_scope_hint": RepairScopeHint(scope.value).value,
             },
         )
@@ -421,6 +438,11 @@ class OfficialOdysRecoveryCoordinator:
             recovery_trace_authoritative=True,
             recovery_action=scope.value,
             replan_count=int(repaired_plan.replan_count),
+            budget_failure_type=(
+                budget_failure_type
+                if budget_failure_type in ATTEMPT_LOCAL_BUDGET_FAILURES
+                else None
+            ),
         )
 
     @staticmethod

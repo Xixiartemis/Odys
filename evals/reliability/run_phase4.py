@@ -60,8 +60,29 @@ class RuntimeInfrastructureError(RuntimeError):
     """Raised when execution cannot produce trustworthy benchmark evidence."""
 
 
+ROOT_API_BUDGET_FAILURE = "ROOT_API_BUDGET_EXHAUSTED"
+WALL_TIME_BUDGET_FAILURE = "WALL_TIME_BUDGET_EXHAUSTED"
+ATTEMPT_LOCAL_BUDGET_FAILURES = frozenset(
+    {
+        "TURN_BUDGET_EXHAUSTED",
+        "TOOL_CALL_BUDGET_EXHAUSTED",
+        "ATTEMPT_BUDGET_EXHAUSTED",
+        WALL_TIME_BUDGET_FAILURE,
+    }
+)
+
+
 class RunBudgetExhausted(RuntimeError):
     """Raised before a provider call would exceed the run-scoped budget."""
+
+    def __init__(
+        self,
+        message: str = "RUN_API_BUDGET_EXHAUSTED",
+        *,
+        budget_type: str = ROOT_API_BUDGET_FAILURE,
+    ) -> None:
+        self.budget_type = budget_type
+        super().__init__(message)
 
 
 RESUME_IDENTITY_FIELDS = (
@@ -422,6 +443,10 @@ class ExecutionOutcome:
     nested_attempt_count: int = 0
     provider_attempt_count: int = 0
     budget_exhausted: bool = False
+    # Typed budget provenance separates an attempt-local kernel boundary from
+    # exhaustion of the root provider/API ledger.  ``budget_exhausted`` stays
+    # a root-ledger terminal flag for backwards compatibility.
+    budget_failure_type: str | None = None
     # Preserve the claim at both validator boundaries.  ``claimed_complete``
     # remains the final claim for backwards compatibility.
     initial_claimed_complete: bool | None = None
@@ -1372,16 +1397,55 @@ class Phase4Runner:
             return None
         if not _recovery_enabled(spec.config):
             return None
-        # Budget exhaustion is already the terminal result of the single
-        # root-scoped execution budget.  Never start recovery with a fresh
-        # attempt budget after this boundary.
-        if outcome.budget_exhausted or str(outcome.failure_type or "").upper() == "BUDGET_EXHAUSTED":
+        failure_type = str(
+            outcome.budget_failure_type or outcome.failure_type or ""
+        ).upper()
+        # A root-ledger exhaustion is terminal.  The generic value is kept as
+        # a compatibility boundary for older adapters; new official runtime
+        # outcomes use ROOT_API_BUDGET_FAILURE explicitly.
+        if (
+            outcome.budget_exhausted
+            or failure_type in {ROOT_API_BUDGET_FAILURE, "BUDGET_EXHAUSTED"}
+        ):
+            outcome.budget_failure_type = ROOT_API_BUDGET_FAILURE
+            outcome.failure_type = ROOT_API_BUDGET_FAILURE
+            outcome.budget_exhausted = True
             outcome.recovery_required = False
             outcome.recovery_attempted = False
             return None
         recover = getattr(self.executor, "recover_after_validation", None)
         if not callable(recover):
             return None
+
+        # Attempt-local exhaustion is recoverable only when the executor can
+        # prove that the same root ledger still has capacity and one bounded
+        # repair attempt remains.  No new ledger is created here.
+        if failure_type in ATTEMPT_LOCAL_BUDGET_FAILURES:
+            can_attempt = getattr(self.executor, "can_attempt_recovery", None)
+            if callable(can_attempt):
+                allowed = can_attempt(spec.run_id)
+                if inspect.isawaitable(allowed):
+                    allowed = await allowed
+                if not allowed:
+                    snapshot = getattr(self.executor, "run_budget_snapshot", None)
+                    budget = snapshot(spec.run_id) if callable(snapshot) else None
+                    if inspect.isawaitable(budget):
+                        budget = await budget
+                    if isinstance(budget, Mapping) and (
+                        bool(budget.get("exhausted"))
+                        or (
+                            isinstance(budget.get("max_provider_calls"), int)
+                            and int(budget.get("provider_calls", 0))
+                            >= int(budget["max_provider_calls"])
+                        )
+                    ):
+                        outcome.budget_failure_type = ROOT_API_BUDGET_FAILURE
+                        outcome.failure_type = ROOT_API_BUDGET_FAILURE
+                        outcome.budget_exhausted = True
+                    outcome.recovery_required = False
+                    outcome.recovery_attempted = False
+                    return None
+            outcome.recovery_required = True
 
         outcome.initial_claimed_complete = bool(
             outcome.initial_claimed_complete
@@ -1443,6 +1507,9 @@ class Phase4Runner:
         )
         repaired.runtime_source = repaired.runtime_source or outcome.runtime_source
         repaired.initial_claimed_complete = outcome.initial_claimed_complete
+        repaired.budget_failure_type = (
+            repaired.budget_failure_type or outcome.budget_failure_type
+        )
         repaired.expected_effect_ids = list(outcome.expected_effect_ids)
         repaired.pre_repair_state_digest = outcome.pre_repair_state_digest
         repaired.root_attempt_count = max(
@@ -1680,6 +1747,7 @@ class Phase4Runner:
             "nested_attempt_count": int(outcome.nested_attempt_count),
             "provider_attempt_count": int(outcome.provider_attempt_count),
             "budget_exhausted": bool(outcome.budget_exhausted),
+            "budget_failure_type": outcome.budget_failure_type,
             "provider_call_records": [
                 dict(item) for item in outcome.provider_call_records
             ],
