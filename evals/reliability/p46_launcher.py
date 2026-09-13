@@ -328,6 +328,13 @@ def compute_summary(output_dir: Path, *, planned_runs: int | None = None) -> dic
             recovery = environment.get("recovery")
             if isinstance(recovery, Mapping) and "recovery_required_after_validation" in recovery:
                 return recovery.get("recovery_required_after_validation") is True
+            validation = environment.get("validation")
+            if (
+                isinstance(validation, Mapping)
+                and validation.get("acceptance_status") == "ACCEPTED"
+                and record.get("recovery_attempted") is not True
+            ):
+                return False
         # Backwards-compatible interpretation for pre-closure records.
         return record.get("recovery_required") is True
 

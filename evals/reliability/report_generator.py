@@ -54,6 +54,13 @@ def compute_metrics(runs: list[dict[str, Any]]) -> dict[str, float | str]:
             recovery = environment.get("recovery")
             if isinstance(recovery, dict) and "recovery_required_after_validation" in recovery:
                 return recovery.get("recovery_required_after_validation") is True
+            validation = environment.get("validation")
+            if (
+                isinstance(validation, dict)
+                and validation.get("acceptance_status") == "ACCEPTED"
+                and record.get("recovery_attempted") is not True
+            ):
+                return False
         # Backwards-compatible interpretation for records created before the
         # validation-boundary field existed.
         return record.get("recovery_required") is True

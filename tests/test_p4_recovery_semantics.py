@@ -95,3 +95,25 @@ def test_report_metrics_honor_validation_boundary_field():
     assert metrics["recovery_execution_rate"] == "NOT_MEASURED"
     assert metrics["recovery_success_rate"] == "NOT_MEASURED"
     assert metrics["lost_work_rate"] == "NOT_MEASURED"
+
+
+def test_legacy_accepted_record_is_not_recovery_eligible():
+    record = {
+        "validity": "VALIDATED_PASS",
+        "verified_completion": True,
+        "recovery_required": True,
+        "recovery_attempted": False,
+        "recovery_success": False,
+        "lost_work_units": 0,
+        "duplicate_side_effect_count": 0,
+        "model_cost": "NOT_MEASURED",
+        "runtime_environment": {
+            "validation": {
+                "acceptance_status": "ACCEPTED",
+            }
+        },
+    }
+
+    metrics = compute_metrics([record])
+    assert metrics["recovery_execution_rate"] == "NOT_MEASURED"
+    assert metrics["recovery_success_rate"] == "NOT_MEASURED"
