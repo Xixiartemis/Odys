@@ -47,7 +47,18 @@ def compute_metrics(runs: list[dict[str, Any]]) -> dict[str, float | str]:
     dict with the six historical metrics plus the P410 semantic metrics.
     """
     valid_runs = [r for r in runs if r.get("validity") in ("VALIDATED_PASS", "VALIDATED_FAIL")]
-    recovery_eligible = [r for r in valid_runs if r.get("recovery_required") is True]
+
+    def recovery_required_after_validation(record: dict[str, Any]) -> bool:
+        environment = record.get("runtime_environment")
+        if isinstance(environment, dict):
+            recovery = environment.get("recovery")
+            if isinstance(recovery, dict) and "recovery_required_after_validation" in recovery:
+                return recovery.get("recovery_required_after_validation") is True
+        # Backwards-compatible interpretation for records created before the
+        # validation-boundary field existed.
+        return record.get("recovery_required") is True
+
+    recovery_eligible = [r for r in valid_runs if recovery_required_after_validation(r)]
     verified = [r for r in valid_runs if r.get("verified_completion") is True]
     def validation_identity(record: dict[str, Any]) -> dict[str, Any]:
         environment = record.get("runtime_environment")

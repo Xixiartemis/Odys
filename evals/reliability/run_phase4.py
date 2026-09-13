@@ -1055,6 +1055,27 @@ def _normalize_validation_trace(
                 ),
             )
         )
+    if (
+        validation.acceptance_status == "ACCEPTED"
+        and not any(
+            isinstance(event, Mapping)
+            and event.get("event_type") == "VERIFICATION_PASSED"
+            for event in normalized
+        )
+    ):
+        normalized.append(
+            _trace_event(
+                "VERIFICATION_PASSED",
+                task_id=task_id,
+                attempt_id=attempt_id,
+                status="passed",
+                metadata=_validation_metadata(
+                    validation,
+                    claimed_complete=claimed_complete,
+                    phase=phase,
+                ),
+            )
+        )
     return normalized
 
 
@@ -1709,8 +1730,19 @@ class Phase4Runner:
                 and initial_validation.acceptance_status == "REJECTED"
             )
         initial_attempt_id = initial_attempt_id or outcome.original_failure_attempt_id
+        recovery_candidate = bool(outcome.recovery_required)
+        recovery_required_after_validation = bool(
+            initial_validation.acceptance_status == "REJECTED"
+            and (recovery_candidate or outcome.recovery_attempted)
+        )
         recovery_identity = {
-            "recovery_required": bool(outcome.recovery_required),
+            # The runtime may detect a potentially recoverable execution
+            # failure before the shared external validator runs.  Keep that
+            # signal, but do not call it a required recovery when validation
+            # already accepted the observable state (for example ESR-04).
+            "recovery_candidate": recovery_candidate,
+            "recovery_required_after_validation": recovery_required_after_validation,
+            "recovery_required": recovery_required_after_validation,
             "recovery_attempted": bool(outcome.recovery_attempted),
             "recovery_success": bool(outcome.recovery_success),
             "repair_scope": outcome.repair_scope,
@@ -1804,7 +1836,7 @@ class Phase4Runner:
             # boundary evidence.
             "false_completion": bool(false_completion_detected),
             "failure_type": validation.failure_type,
-            "recovery_required": bool(outcome.recovery_required),
+            "recovery_required": recovery_required_after_validation,
             "recovery_attempted": bool(outcome.recovery_attempted),
             "recovery_success": bool(outcome.recovery_success),
             "repair_scope": outcome.repair_scope,

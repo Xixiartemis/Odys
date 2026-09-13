@@ -321,7 +321,19 @@ def compute_summary(output_dir: Path, *, planned_runs: int | None = None) -> dic
         )
 
     false_completions = sum(1 for r in valid_records if _false_completion_detected(r))
-    recovery_eligible = sum(1 for r in valid_records if r.get("recovery_required"))
+
+    def _recovery_required_after_validation(record: Mapping[str, Any]) -> bool:
+        environment = record.get("runtime_environment")
+        if isinstance(environment, Mapping):
+            recovery = environment.get("recovery")
+            if isinstance(recovery, Mapping) and "recovery_required_after_validation" in recovery:
+                return recovery.get("recovery_required_after_validation") is True
+        # Backwards-compatible interpretation for pre-closure records.
+        return record.get("recovery_required") is True
+
+    recovery_eligible = sum(
+        1 for r in valid_records if _recovery_required_after_validation(r)
+    )
     recovery_attempted = sum(1 for r in valid_records if r.get("recovery_attempted"))
     recovery_successes = sum(
         1
@@ -346,7 +358,7 @@ def compute_summary(output_dir: Path, *, planned_runs: int | None = None) -> dic
     runs_with_lost_work = sum(
         1
         for r in valid_records
-        if r.get("recovery_required")
+        if _recovery_required_after_validation(r)
         and r.get("lost_work_units") not in (None, NOT_MEASURED, 0)
     )
 
