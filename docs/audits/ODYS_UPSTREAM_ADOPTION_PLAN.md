@@ -52,7 +52,9 @@ path. Fourteen offline adversarial tests and the final 1215-test suite passed.
 Late provider/child results are rejected, post-cancel Safe CLI mutation is
 prevented, local ceilings cannot outlive the root, cancellation is idempotent,
 and terminal evidence survives EventStore reopen. Remote workers and universal
-external-side-effect receipts are not covered; P0-B remains open.
+external-side-effect receipts are not covered by this P0-A section; P0-B is
+closed for the declared local/bounded receipt scope, while unsupported
+external effects remain explicitly excluded and fail closed.
 
 The implementation base is audit-doc commit
 `1724b4aca55d81de1abe5254e35f8b90772f682a`; the exact implementation commit
@@ -68,6 +70,10 @@ Every external side-effect adapter must declare whether it returns a stable
 operation ID/receipt, is idempotent by key, or is outside the official scope.
 
 Why: local staged workspace evidence is not a universal exactly-once protocol.
+The runtime now records typed receipt facts for local effects and supports
+declared idempotent/receipt-backed adapters only when their contracts prove
+lookup or stable-key reconciliation. Unknown external commit state requires
+explicit policy or human intervention.
 
 Required tests: crash before observation, crash after side effect, replay,
 reconciliation, and explicit `NOT_MEASURED` for unsupported side effects.
@@ -214,9 +220,10 @@ An upstream primitive is admissible only when all are true:
 ## Recommended next gate
 
 Do not start another official benchmark version solely to exercise an upstream
-component. First close P0-A and P0-B with a small offline integration suite,
-then run a non-official substrate pilot. Only after the pilot has durable
-evidence should any new benchmark protocol version be proposed.
+component. P0-A and P0-B are now closed for their declared local/bounded
+scope with an offline integration suite; any substrate pilot must preserve
+that scope and fail closed for unsupported effects. Only after a pilot has
+durable evidence should any new benchmark protocol version be proposed.
 
 ## Sources
 

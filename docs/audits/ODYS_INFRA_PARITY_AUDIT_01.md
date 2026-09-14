@@ -395,8 +395,37 @@ does not duplicate a self-referential commit hash inside its own evidence.
 
 P0-A is closed for the local/bounded execution path covered above. Remote
 worker cancellation, universal external-side-effect receipts, and a general
-parallel scheduler remain outside this gate. The latter receipt boundary is
-P0-B and remains open; no P0-B claim is made here.
+parallel scheduler remain outside this gate. P0-B is closed only for the
+declared runtime scope below; no general distributed exactly-once claim is
+made.
+
+## P0-B side-effect receipt implementation evidence
+
+The runtime now owns a typed \`SideEffectReceipt\` projection and an append-only
+receipt event lifecycle independent of the Phase 4 runner. Receipt identity is
+bound to Odys \`task_id\` (when available), \`run_id\`, \`attempt_id\`, \`step_id\`,
+and \`tool_call_id\`; benchmark adapters may project this evidence but do not
+own its semantics. \`CapabilityDefinition\` and \`ToolContractDecision\` declare
+effect class, idempotency support, receipt support, reconciliation support,
+and replay safety.
+
+The supported runtime classes are \`NONE\`, \`LOCAL_REVERSIBLE\`,
+\`LOCAL_DURABLE\`, \`EXTERNAL_IDEMPOTENT\`, \`EXTERNAL_RECEIPT\`, and
+\`EXTERNAL_UNVERIFIABLE\`. Local workspace mutation records before/after
+digests. A committed receipt remains durable when observation is absent, and
+reopen/reconciliation distinguishes committed, reconciled-no-effect, and
+unknown commit state. Unknown external state returns a human-required
+decision; the receipt layer never performs an automatic retry. A deterministic
+idempotent fake demonstrates stable operation identity and one effect for
+multiple requests with the same key.
+
+The offline P0-B gate has 13 focused tests covering receipt persistence,
+crash-before/after-commit boundaries, local reconciliation, idempotency,
+receipt lookup, unknown external state, cancellation/deadline preservation,
+secret filtering, ToolContract declarations, and NativeToolDispatcher
+projection. P0-B is therefore closed for local/bounded declared adapters and
+the deterministic external test double. \`EXTERNAL_UNVERIFIABLE\` is excluded
+from automatic replay and from any exactly-once claim.
 
 ## Benchmark restart rule
 
@@ -505,5 +534,5 @@ P0A_ADVERSARIAL_TESTS=14 passed
 P0A_AFFECTED_REGRESSION_TESTS=162 passed
 P0A_FINAL_FULL_SUITE=1215 passed
 P0A_STATUS=CLOSED_FOR_LOCAL_BOUNDED_SCOPE
-P0B_STATUS=OPEN
+P0B_STATUS=CLOSED_FOR_DECLARED_RUNTIME_SCOPE
 ```

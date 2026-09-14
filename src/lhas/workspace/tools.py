@@ -96,6 +96,20 @@ def _failure(error_type: str, message: str, *, allowed_prefixes=None, diagnostic
     )
 
 
+def _commit_receipt(request, output: object) -> None:
+    """Record local commit before the dispatcher can observe the result."""
+    manager = request.side_effect_receipt_manager
+    receipt_id = request.side_effect_receipt_id
+    if manager is None or receipt_id is None or not isinstance(output, dict):
+        return
+    manager.mark_committed(
+        receipt_id,
+        result=output,
+        workspace_before_digest=output.get("before_sha256"),
+        workspace_after_digest=output.get("after_sha256"),
+    )
+
+
 def _result(fn):
     async def run(self, request):
         try:
@@ -168,7 +182,9 @@ class WorkspaceEditTool:
         self.allow_safe_normalization = allow_safe_normalization
     async def execute(self, request):
         try:
-            return ToolResult(status=ToolResultStatus.SUCCESS, output=await self.workspace.edit_file(**request.arguments, allow_safe_normalization=self.allow_safe_normalization))
+            output = await self.workspace.edit_file(**request.arguments, allow_safe_normalization=self.allow_safe_normalization)
+            _commit_receipt(request, output)
+            return ToolResult(status=ToolResultStatus.SUCCESS, output=output)
         except WorkspacePathEscape:
             return _failure("WORKSPACE_PATH_ESCAPE", "path outside workspace")
         except BinaryFileError:
@@ -186,7 +202,9 @@ class WorkspaceEditLinesTool:
     def __init__(self, workspace): self.workspace = workspace
     async def execute(self, request):
         try:
-            return ToolResult(status=ToolResultStatus.SUCCESS, output=await self.workspace.edit_lines(**request.arguments))
+            output = await self.workspace.edit_lines(**request.arguments)
+            _commit_receipt(request, output)
+            return ToolResult(status=ToolResultStatus.SUCCESS, output=output)
         except WorkspacePathEscape:
             return _failure("WORKSPACE_PATH_ESCAPE", "path outside workspace")
         except BinaryFileError:
@@ -216,7 +234,9 @@ class WorkspaceRestoreTool:
     def __init__(self, workspace): self.workspace = workspace
     async def execute(self, request):
         try:
-            return ToolResult(status=ToolResultStatus.SUCCESS, output=await self.workspace.restore_file(**request.arguments))
+            output = await self.workspace.restore_file(**request.arguments)
+            _commit_receipt(request, output)
+            return ToolResult(status=ToolResultStatus.SUCCESS, output=output)
         except WorkspacePathEscape:
             return _failure("WORKSPACE_PATH_ESCAPE", "path outside workspace")
         except FileNotFoundError:

@@ -39,6 +39,7 @@ from lhas.domain.enums import EventType
 from lhas.domain.models import utcnow
 from lhas.execution_control import ExecutionControlError, ExecutionControlToken, ExecutionLayerTimeout, await_with_control
 from lhas.inner_agent.tool_adapter import ToolAwareObserver, _args_signature, safe_tool_summary
+from lhas.side_effects import EffectClass, ReceiptStatus, SideEffectReceiptManager
 from lhas.native.models import (
     ExecutionSnapshot,
     InvocationState,
@@ -142,6 +143,7 @@ class NativeToolDispatcher:
         tool_contract: ToolContract | None = None,
         fault_injector: Any = None,
         mutation_probe: Callable[[], Awaitable[bool]] | None = None,
+        receipt_manager: SideEffectReceiptManager | None = None,
     ):
         self.db = db
         self.registry = registry
@@ -152,6 +154,9 @@ class NativeToolDispatcher:
         self.observer = ToolAwareObserver()
         self.invocations = ToolInvocationRepository(db)
         self.events = EventStore(db)
+        # Runtime-level receipt authority.  It is not owned by benchmark
+        # adapters; callers may inject the same service into other runtimes.
+        self.receipts = receipt_manager or SideEffectReceiptManager(db, event_store=self.events)
 
         # P2.3: CapabilityRegistry + ToolContract integration.
         # When no explicit CapabilityRegistry is provided, use the explicit
@@ -245,6 +250,20 @@ class NativeToolDispatcher:
             return SideEffectClass.WORKSPACE_MUTATION if name.startswith("workspace.") else SideEffectClass.EXTERNAL
         return SideEffectClass.READ_ONLY
 
+    @staticmethod
+    def _effect_class(name: str, definition: Any | None, concrete_spec: Any | None = None) -> EffectClass:
+        declared = getattr(definition, "effect_class", EffectClass.NONE)
+        if declared is not EffectClass.NONE:
+            return declared
+        # Legacy concrete tools may still expose side_effect=True.  Treat
+        # those as locally durable until a semantic capability opts into
+        # stronger external idempotency/receipt facts.  This preserves the
+        # existing mutation probe contract while remaining conservative for
+        # genuinely external adapters, which must declare their class.
+        if concrete_spec is not None and getattr(concrete_spec, "side_effect", False):
+            return EffectClass.LOCAL_REVERSIBLE if name.startswith("workspace.") else EffectClass.LOCAL_DURABLE
+        return EffectClass.NONE
+
     async def dispatch(
         self,
         call: ProviderToolCall,
@@ -331,6 +350,36 @@ class NativeToolDispatcher:
         if concrete_spec is not None and concrete_spec.requires_human_approval:
             return self._finish_denied(invocation, "HUMAN_APPROVAL_REQUIRED")
 
+        effect_class = self._effect_class(call.name, definition, concrete_spec)
+        receipt = None
+        if effect_class is not EffectClass.NONE:
+            step_id = (
+                snapshot.taskgraph_position
+                or request.metadata.get("step_id")
+                or f"attempt:{snapshot.attempt_id}"
+            )
+            target = {
+                "workspace_ref": request.metadata.get("workspace_ref"),
+                "path": call.arguments.get("path") if isinstance(call.arguments, dict) else None,
+                "capability": call.name,
+            }
+            receipt = self.receipts.begin(
+                operation_id=invocation.id,
+                task_id=snapshot.task_id,
+                run_id=snapshot.run_id,
+                attempt_id=snapshot.attempt_id,
+                step_id=str(step_id),
+                tool_call_id=call.id[:128],
+                tool_name=concrete_spec.name if concrete_spec is not None else call.name,
+                effect_class=effect_class,
+                target=target,
+                request={"capability": call.name, "arguments": call.arguments},
+                idempotency_key=request.metadata.get("idempotency_key"),
+                workspace_before_digest=request.metadata.get("workspace_before_digest"),
+                sanitized_metadata={"task_id": snapshot.task_id, "workspace_ref": request.metadata.get("workspace_ref")},
+            )
+            self.receipts.mark_dispatch_started(receipt.receipt_id)
+
         invocation.state = InvocationState.STARTED
         invocation.started_at = utcnow()
         self.invocations.update(invocation)
@@ -363,6 +412,9 @@ class NativeToolDispatcher:
                 else None
             ),
             execution_control=execution_control,
+            side_effect_receipt_manager=self.receipts if receipt is not None else None,
+            side_effect_receipt_id=receipt.receipt_id if receipt is not None else None,
+            step_id=str(snapshot.taskgraph_position or request.metadata.get("step_id") or f"attempt:{snapshot.attempt_id}"),
             metadata=request.metadata,
         )
         runtime_context = self._runtime_context(snapshot)
@@ -392,6 +444,20 @@ class NativeToolDispatcher:
             execution_control.check()
 
         self.fault_injector.hit(NativeFaultPoint.AFTER_TOOL_EXECUTED, invocation=invocation, result=result)
+        if receipt is not None:
+            if result.status is ToolResultStatus.SUCCESS:
+                result_output = result.output if isinstance(result.output, dict) else None
+                self.receipts.mark_committed(
+                    receipt.receipt_id,
+                    result=result.output,
+                    workspace_before_digest=(result_output or {}).get("before_sha256"),
+                    workspace_after_digest=(result_output or {}).get("after_sha256"),
+                )
+            else:
+                # A failed response after dispatch does not prove that no
+                # external effect happened. Preserve uncertainty instead of
+                # allowing a blind replay.
+                self.receipts.mark_unknown(receipt.receipt_id, error_class=result.error_type or "TOOL_FAILURE")
         duration_ms = int((time.monotonic() - started) * 1000)
         summary = self.observer.decorate(
             call.name,
@@ -451,6 +517,16 @@ class NativeToolDispatcher:
                 "bounded_output": _safe_value(output, 12_000),
             },
         )
+        if receipt is not None:
+            current_receipt = self.receipts.receipts.get(receipt.receipt_id)
+            if current_receipt is not None and current_receipt.status is ReceiptStatus.COMMITTED:
+                current_receipt = self.receipts.mark_observed(receipt.receipt_id, result=result.output)
+            if current_receipt is not None:
+                model_observation["side_effect_receipt"] = {
+                    "receipt_id": current_receipt.receipt_id,
+                    "effect_class": current_receipt.effect_class.value,
+                    "status": current_receipt.status.value,
+                }
         self.fault_injector.hit(NativeFaultPoint.AFTER_TOOL_OBSERVED, invocation=invocation)
         return model_observation
 
@@ -469,10 +545,15 @@ class NativeToolDispatcher:
         observations: list[dict[str, Any]] = []
         mutation_present: bool | None = None
         for invocation in self.invocations.unfinished_for_attempt(attempt_id):
+            receipt = self.receipts.receipts.get_by_operation(invocation.id)
             if invocation.state is InvocationState.REQUESTED:
                 decision = ReconciliationDecision.SAFE_TO_RETRY
             elif invocation.side_effect_class is SideEffectClass.READ_ONLY:
                 decision = ReconciliationDecision.SAFE_TO_RETRY
+            elif receipt is not None and receipt.status in {ReceiptStatus.COMMITTED, ReceiptStatus.OBSERVED}:
+                decision = ReconciliationDecision.DO_NOT_RETRY
+            elif receipt is not None and receipt.status is ReceiptStatus.COMMIT_STATE_UNKNOWN:
+                decision = ReconciliationDecision.UNKNOWN
             else:
                 if mutation_present is None and self.mutation_probe is not None:
                     try:
@@ -484,6 +565,12 @@ class NativeToolDispatcher:
                     if mutation_present is True or invocation.observed_mutation
                     else ReconciliationDecision.RECONCILE_FIRST
                 )
+                if receipt is not None and invocation.side_effect_class is not SideEffectClass.READ_ONLY:
+                    receipt = self.receipts.reconcile(receipt.receipt_id, effect_present=mutation_present)
+                    if receipt.status in {ReceiptStatus.COMMITTED, ReceiptStatus.OBSERVED}:
+                        decision = ReconciliationDecision.DO_NOT_RETRY
+                    elif receipt.status is ReceiptStatus.COMMIT_STATE_UNKNOWN:
+                        decision = ReconciliationDecision.UNKNOWN
             invocation.state = InvocationState.RECONCILED
             invocation.reconciliation = decision
             invocation.finished_at = utcnow()
