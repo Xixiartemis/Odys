@@ -38,6 +38,7 @@ from evals.reliability.run_phase4 import (
     RuntimeInfrastructureError,
     RunBudgetExhausted,
 )
+from evals.reliability.attempt_boundary import AttemptTerminalFaultInjector
 
 logger = logging.getLogger(__name__)
 
@@ -162,6 +163,9 @@ def _filter_tool_events(trace: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 _CONTROLLED_FAILURES: dict[str, frozenset[str]] = {
+    "JOB_READY_ATTEMPT_TERMINAL_FAILURE": frozenset(
+        {"TOOL_ERROR", "ATTEMPT_TERMINAL"}
+    ),
     "FAIL_TOOL_ON_CALL_1": frozenset(
         {"TOOL_ERROR", "TOOL_EXECUTION_ERROR", "EXECUTION_FAILED", "TOOL_FAILURE"}
     ),
@@ -493,6 +497,29 @@ class P45BenchmarkExecutor:
             trace.append(_trace_event("RUNTIME_CREATED", task_id, attempt_id,
                                       runtime_source=runtime_source))
 
+            # A frozen attempt-terminal fault is installed at the same native
+            # pre-dispatch boundary for both runtime factories.  It is
+            # one-shot and restored before the runner can invoke recovery, so
+            # a repair attempt is not accidentally faulted as well.
+            terminal_injector = (
+                AttemptTerminalFaultInjector(request.fault)
+                if request.fault.fault_type == "attempt_terminal"
+                else None
+            )
+            injector_targets: list[tuple[Any, Any]] = []
+            if terminal_injector is not None:
+                for owner in (
+                    getattr(runtime, "kernel", None),
+                    getattr(runtime, "dispatcher", None),
+                    getattr(getattr(runtime, "kernel", None), "dispatcher", None),
+                ):
+                    if owner is None or not hasattr(owner, "fault_injector"):
+                        continue
+                    if any(existing is owner for existing, _ in injector_targets):
+                        continue
+                    injector_targets.append((owner, getattr(owner, "fault_injector")))
+                    owner.fault_injector = terminal_injector
+
             # Execute through the runtime
             runtime_config = dict(request.config)
             # These execution-local bindings are not benchmark inputs.  They
@@ -500,8 +527,20 @@ class P45BenchmarkExecutor:
             # use the same run identity as the official Phase 4 request.
             runtime_config["run_id"] = request.run_id
             runtime_config["_workspace_root"] = str(workspace_dir)
-            outcome = await runtime.execute(task, runtime_config)
+            try:
+                outcome = await runtime.execute(task, runtime_config)
+            finally:
+                for owner, original_injector in injector_targets:
+                    owner.fault_injector = original_injector
             self._attach_provider_accounting(outcome, run_id)
+            if terminal_injector is not None and terminal_injector.fired:
+                outcome.observed_state.setdefault("fault_fired", True)
+                outcome.observed_state.setdefault(
+                    "fault_fired_point", terminal_injector.fired_point
+                )
+                outcome.observed_state.setdefault(
+                    "attempt_terminal", True
+                )
 
             if _is_infrastructure_failure(outcome, fault_id):
                 outcome.infrastructure_failure = True
@@ -522,7 +561,17 @@ class P45BenchmarkExecutor:
             # ---- EXECUTION_COMPLETE ----
             trace.append(_trace_event("EXECUTION_COMPLETE", task_id, attempt_id,
                                       claimed_complete=outcome.claimed_complete,
-                                      failure_type=outcome.failure_type))
+                                      failure_type=outcome.failure_type,
+                                      attempt_terminal=(
+                                          terminal_injector is not None
+                                          and terminal_injector.fired
+                                      ),
+                                      terminal_failure_type=(
+                                          "ATTEMPT_TERMINAL"
+                                          if terminal_injector is not None
+                                          and terminal_injector.fired
+                                          else None
+                                      )))
 
             # Observe fixture state
             if self._fixture_registry is not None:

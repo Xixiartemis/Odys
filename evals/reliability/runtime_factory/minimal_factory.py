@@ -136,6 +136,34 @@ class _MinimalRuntime:
 
         except Exception as exc:
             elapsed = time.monotonic() - started
+            from evals.reliability.attempt_boundary import AttemptTerminalFailure
+
+            if isinstance(exc, AttemptTerminalFailure):
+                return ExecutionOutcome(
+                    claimed_complete=False,
+                    observed_state={
+                        "agent_status": "FAILED",
+                        "turn_count": 1,
+                        "tool_call_count": 0,
+                        "completion_claim": bool(
+                            locals().get("response", None)
+                            and getattr(locals()["response"], "completion_claim", False)
+                        ),
+                        "attempt_terminal": True,
+                        "terminal_failure_type": exc.terminal_type,
+                        "features_active": {},
+                    },
+                    failure_type=exc.failure_type,
+                    recovery_required=False,
+                    recovery_attempted=False,
+                    recovery_success=False,
+                    repair_scope=None,
+                    tool_calls=0,
+                    model_calls=1,
+                    attempt_count=1,
+                    wall_time_seconds=round(elapsed, 6),
+                    infrastructure_failure=False,
+                )
             return ExecutionOutcome(
                 claimed_complete=False,
                 observed_state={
