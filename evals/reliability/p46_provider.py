@@ -55,6 +55,50 @@ FROZEN_SYSTEM_PROMPT_HASH = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca49
 FROZEN_TOOL_POLICY_HASH = "c6fb217770dcc6b5da23982cc9f9d70f19f4b45c2e343344bbdddd2f74e46f2b"
 
 
+def _build_benchmark_capability_contract(registry, allowed):
+    """Build the explicit contract for concrete benchmark backends.
+
+    The frozen semantic catalog describes the staged-workspace ``workspace.edit``
+    contract (old_text/new_text), while the benchmark filesystem backend is a
+    deliberate whole-file writer (path/content).  A real benchmark adapter
+    must declare that concrete binding explicitly; otherwise ToolContract
+    correctly rejects every model edit before the backend can execute it.
+    Only capabilities actually exposed by this benchmark registry are mapped,
+    and undeclared capabilities remain fail-closed.
+    """
+    from lhas.capability_registry import CapabilityRegistry, default_capabilities
+    from lhas.tools.contract import ToolContract
+    from tests.helpers import make_test_capability_definition
+
+    allowed = set(allowed)
+    default_by_id = {definition.id: definition for definition in default_capabilities()}
+    definitions = []
+    for capability_id, definition in default_by_id.items():
+        if capability_id in allowed:
+            try:
+                backend = registry.resolve(capability_id).capability
+            except KeyError:
+                definitions.append(definition)
+            else:
+                definitions.append(definition.model_copy(update={
+                    "description": backend.description,
+                    "input_schema": backend.input_schema,
+                    "output_schema": backend.output_schema,
+                }))
+        else:
+            definitions.append(definition)
+
+    for capability_id in sorted(allowed - set(default_by_id)):
+        make_definition = make_test_capability_definition(
+            capability_id,
+            output_schema={},
+        )
+        definitions.append(make_definition)
+
+    capability_registry = CapabilityRegistry(registry, definitions=definitions)
+    return capability_registry, ToolContract(capability_registry, registry)
+
+
 class ProviderIdentityError(RuntimeError):
     """Raised when the real benchmark provider cannot be proven frozen."""
 
@@ -500,11 +544,9 @@ def _build_real_minimal_components(
     """Build provider, dispatcher, and db for the minimal runtime."""
     import tempfile
 
-    from lhas.capability_registry import default_capabilities
     from lhas.native.tools import NativeToolDispatcher
     from lhas.persistence.database import Database
     from lhas.tools.registry import ToolRegistry
-    from tests.helpers import make_test_capability_definition, make_test_capability_registry
 
     tmp_dir = tempfile.mkdtemp(prefix="odys-p46-minimal-")
     db = Database(Path(tmp_dir) / "p46-minimal.db")
@@ -521,13 +563,7 @@ def _build_real_minimal_components(
     else:
         registry = ToolRegistry()
 
-    default_ids = {d.id for d in default_capabilities()}
-    extra_defs = [
-        make_test_capability_definition(cap_id, output_schema={})
-        for cap_id in allowed
-        if cap_id not in default_ids
-    ]
-    cap_reg, contract = make_test_capability_registry(registry, extra_defs)
+    cap_reg, contract = _build_benchmark_capability_contract(registry, allowed)
 
     dispatcher = NativeToolDispatcher(
         db=db,
@@ -549,7 +585,6 @@ def _build_real_odys_kernel(
     """Build a full NativeAgentKernel with real LLM provider."""
     import tempfile
 
-    from lhas.capability_registry import default_capabilities
     from lhas.native.completion import CompletionAuthority
     from lhas.native.kernel import NativeAgentKernel
     from lhas.native.models import NoOpNativeFaultInjector
@@ -557,11 +592,7 @@ def _build_real_odys_kernel(
     from lhas.native.tools import NativeToolDispatcher
     from lhas.persistence.database import Database
     from lhas.tools.registry import ToolRegistry
-    from tests.helpers import (
-        PassingCommandValidator,
-        make_test_capability_definition,
-        make_test_capability_registry,
-    )
+    from tests.helpers import PassingCommandValidator
 
     tmp_dir = tempfile.mkdtemp(prefix="odys-p46-benchmark-")
     db = Database(Path(tmp_dir) / "p46-benchmark.db")
@@ -578,13 +609,7 @@ def _build_real_odys_kernel(
     else:
         registry = ToolRegistry()
 
-    default_ids = {d.id for d in default_capabilities()}
-    extra_defs = [
-        make_test_capability_definition(cap_id, output_schema={})
-        for cap_id in allowed
-        if cap_id not in default_ids
-    ]
-    cap_reg, contract = make_test_capability_registry(registry, extra_defs)
+    cap_reg, contract = _build_benchmark_capability_contract(registry, allowed)
 
     dispatcher = NativeToolDispatcher(
         db=db,

@@ -26,6 +26,55 @@ from lhas.tools.protocol import ToolRequest, ToolResultStatus
 from lhas.tools.invocation import invoke_via_contract
 from lhas.tools.contract import ToolContract
 
+
+def _native_tool_contract_evidence(result_payload: dict[str, Any]) -> dict[str, Any]:
+    """Project only successful native ToolContract outputs as trusted evidence.
+
+    A native agent's final text remains an ``AGENT_CLAIM``.  The native kernel
+    also records bounded observations returned by the ToolContract, however;
+    those observations are independently produced by the concrete tool and
+    are safe for the existing WorkflowVerifier evidence gate.  Failed tool
+    observations and all model text are deliberately excluded.
+    """
+    native = result_payload.get("raw")
+    safe_trace = native.get("safe_trace") if isinstance(native, dict) else None
+    if not isinstance(safe_trace, list):
+        return {}
+    evidence: dict[str, Any] = {}
+    for observation in safe_trace:
+        if not isinstance(observation, dict) or observation.get("status") != "SUCCESS":
+            continue
+        bounded_output = observation.get("bounded_output")
+        if isinstance(bounded_output, dict):
+            evidence.update(bounded_output)
+    return evidence
+
+
+def _step_evidence_record(
+    *,
+    step: Any,
+    result_payload: dict[str, Any],
+    output: Any,
+    usage: Any,
+    default_provenance: str,
+) -> dict[str, Any]:
+    """Build execution evidence without promoting agent text to trust."""
+    artifacts = dict(result_payload.get("artifacts") or {})
+    native_tool_evidence = _native_tool_contract_evidence(result_payload)
+    artifacts.update(native_tool_evidence)
+    return {
+        "capability": step.capability,
+        "output": output,
+        "artifacts": artifacts,
+        "usage": usage or {},
+        "provenance": (
+            "TOOL_CONTRACT_EVIDENCE"
+            if native_tool_evidence
+            else default_provenance
+        ),
+    }
+
+
 class _ToolExecutor:
     name = "ToolRegistryExecutor"
     def __init__(self, registry, step, db, context, tool_contract):
@@ -460,7 +509,13 @@ class PlanExecutionService:
                     except json.JSONDecodeError: pass
                 attempts = AttemptRepository(self.db).list_for_run(run.id)
                 raw = json.loads(attempts[-1].executor_result or "{}") if attempts and attempts[-1].executor_result else {}
-                record = {"capability": step.capability, "output": step.output, "artifacts": raw.get("artifacts", {}), "usage": raw.get("usage", {}), "provenance": self._evidence_provenance}
+                record = _step_evidence_record(
+                    step=step,
+                    result_payload=raw,
+                    output=step.output,
+                    usage=raw.get("usage", {}),
+                    default_provenance=self._evidence_provenance,
+                )
                 execution_context["steps"][step.id] = record
                 execution_context[step.capability] = record
                 step.execution_context = dict(execution_context)
@@ -753,7 +808,13 @@ class PlanExecutionService:
                     try: step.output=json.loads(step.output)
                     except json.JSONDecodeError: pass
                 attempts=AttemptRepository(self.db).list_for_run(run.id); raw=json.loads(attempts[-1].executor_result or "{}") if attempts and attempts[-1].executor_result else {}
-                rec={"capability":step.capability,"output":step.output,"artifacts":raw.get("artifacts",{}),"usage":raw.get("usage",{}),"provenance":self._evidence_provenance}; execution_context["steps"][step.id]=rec
+                rec = _step_evidence_record(
+                    step=step,
+                    result_payload=raw,
+                    output=step.output,
+                    usage=raw.get("usage", {}),
+                    default_provenance=self._evidence_provenance,
+                ); execution_context["steps"][step.id] = rec
                 persisted_context=build_step_dependency_context(plan,step,execution_context); persisted_context["steps"][step.id]=rec; step.execution_context=persisted_context
 
                 # P3.1: run success → CLAIMED_COMPLETE
