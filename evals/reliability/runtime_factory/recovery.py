@@ -86,6 +86,13 @@ class _KernelTaskExecutor:
             allowed_capabilities=set(
                 task.get("required_capabilities", [])
                 or context.get("allowed_capabilities", [])
+                or (
+                    context.get("repair_context", {}).get(
+                        "required_capabilities", []
+                    )
+                    if isinstance(context.get("repair_context"), Mapping)
+                    else []
+                )
             ),
             budget=budget,
             metadata=metadata,
@@ -372,6 +379,24 @@ class OfficialOdysRecoveryCoordinator:
                 "official_benchmark_recovery": True,
                 "bounded_recovery": True,
                 "repair_scope": scope.value,
+                "timeout_seconds": float(
+                    request.task.get("timeout_seconds", 60.0)
+                ),
+                "repair_context": {
+                    "failure_provenance": provenance.model_dump(mode="json"),
+                    "observed_state": dict(outcome.observed_state),
+                    "expected_observable_effects": dict(
+                        step.expected_effects
+                    ),
+                    "required_capabilities": list(
+                        step.required_capabilities
+                    ),
+                    "repair_scope": scope.value,
+                    "instruction": (
+                        "Repair the rejected external state using the listed "
+                        "capability before claiming completion."
+                    ),
+                },
             },
         )
         repaired_step = next(
@@ -415,6 +440,10 @@ class OfficialOdysRecoveryCoordinator:
         # tasks.  It is the canonical scope decision produced by the
         # planning authority, not a fabricated success flag.
         state["repair_scope"] = scope.value.lower()
+        repair_tool_calls = 0
+        invocations = getattr(self.kernel.dispatcher, "invocations", None)
+        if invocations is not None and repair_attempt_id:
+            repair_tool_calls = len(invocations.list_for_attempt(repair_attempt_id))
         verified = repaired_step.status is PlanStepStatus.VERIFIED
         is_macro_replan = scope == RepairScope.MACRO_REPLAN
         return ExecutionOutcome(
@@ -430,6 +459,7 @@ class OfficialOdysRecoveryCoordinator:
             # segment. A local/subgraph repair contributes exactly one new
             # attempt; a macro replan contributes no provider attempt here.
             attempt_count=0 if is_macro_replan else 1,
+            tool_calls=repair_tool_calls,
             execution_trace=trace,
             original_failure_attempt_id=str(original_attempt_id),
             repair_attempt_id=(

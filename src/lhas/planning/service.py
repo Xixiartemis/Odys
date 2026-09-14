@@ -1,3 +1,4 @@
+from collections.abc import Mapping
 from typing import Any
 from lhas.domain.enums import EventType, ExecutionStatus
 from lhas import HARNESS_VERSION
@@ -132,6 +133,16 @@ class _TaskGraphAgentExecutor:
         completed=[item.id for item in self.plan.steps if item.status in {PlanStepStatus.COMPLETED, PlanStepStatus.VERIFIED}]
         pending=[item.id for item in self.plan.steps if item.id != self.step.id and item.status in {PlanStepStatus.PENDING,PlanStepStatus.READY,PlanStepStatus.RUNNING}]
         context={**request.context,"taskgraph":{"plan_id":self.plan.id,"active_node":self.step.id,"completed_nodes":completed,"pending_nodes":pending,"depends_on":list(self.step.depends_on)}}
+        runtime_context = self.step.execution_context.get("runtime", {})
+        if isinstance(runtime_context, Mapping):
+            repair_context = runtime_context.get("repair_context")
+            if isinstance(repair_context, Mapping):
+                context["repair_context"] = dict(repair_context)
+            if self.step.required_capabilities:
+                context.setdefault(
+                    "allowed_capabilities",
+                    list(self.step.required_capabilities),
+                )
         return await self.executor.execute(request.model_copy(update={"context":context}))
     async def resume(self, request): return await self.execute(request)
     async def cancel(self, run_id): return await self.executor.cancel(run_id)
@@ -407,6 +418,10 @@ class PlanExecutionService:
         signal_repo.create(signal)
         self._emit(EventType.REPLAN_SIGNAL_CREATED, {"signal_id": signal.id, "reason": signal.reason, "failed_node_id": step.id})
     async def _maybe_replan(self, goal, plan, run_id: str, context: dict[str, Any]) -> bool:
+        # Official benchmark recovery has one bounded repair boundary. A
+        # replan here would create another durable attempt tree.
+        if context.get("official_benchmark_recovery"):
+            return False
         attempts = AttemptRepository(self.db).list_for_run(run_id)
         signals = []
         repo = ReplanSignalRepository(self.db)
@@ -739,7 +754,7 @@ class PlanExecutionService:
 
                 transition_step(step, PlanStepStatus.RUNNING, "dispatch", events, plan_id=plan.id)
                 step.execution_context=build_step_dependency_context(plan,step,execution_context)
-                task=Task(project_id=goal.project_id,title=step.title,objective=step.objective,constraints=goal.constraints,acceptance_criteria=step.success_criteria,max_attempts=1 if context.get("official_benchmark_recovery") else 2); tasks.create(task); step.task_id=task.id
+                task=Task(project_id=goal.project_id,title=step.title,objective=step.objective,constraints=goal.constraints,acceptance_criteria=step.success_criteria,max_attempts=1 if context.get("official_benchmark_recovery") else 2,timeout_seconds=float(context.get("timeout_seconds", 60.0))); tasks.create(task); step.task_id=task.id
                 self._emit(EventType.PLAN_STEP_STARTED,{"plan_id":plan.id,"step_id":step.id,"task_id":task.id})
                 plans.update(plan)
                 orch=RecoveringOrchestrator(self.db,executor_factory=lambda s=step,p=plan: self._step_executor(p,s,step.execution_context),executor_type="TaskGraphAgentExecutor" if self.agent_executor_factory else "ToolRegistryExecutor",provider="native-kernel" if self.agent_executor_factory else "tool-registry",model="provider-adapter" if self.agent_executor_factory else "deterministic",harness_version=HARNESS_VERSION,dataset_version="PLANNING-V0.1",experiment_id=experiment_id)

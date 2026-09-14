@@ -41,6 +41,7 @@ class _MinimalRuntime:
         self.provider = provider
         self.dispatcher = dispatcher
         self.db = db
+        self.provider_timeout_seconds = 30.0
         # Deliberately NO completion authority, no recovery loop, no
         # failure provenance, no selective repair.
         self.completion = None
@@ -93,7 +94,7 @@ class _MinimalRuntime:
             raw = await self.provider.generate(
                 context=context,
                 tools=self.dispatcher.tool_schemas() if self.dispatcher else [],
-                timeout_seconds=30.0,
+                timeout_seconds=self.provider_timeout_seconds,
             )
 
             # Parse the response

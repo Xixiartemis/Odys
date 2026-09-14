@@ -492,6 +492,9 @@ class P45BenchmarkExecutor:
 
             runtime = factory.create_runtime(request.config)
             self._active_runtimes[request.run_id] = runtime
+            root_timeout_seconds, provider_timeout_seconds = (
+                self._configure_runtime_deadlines(runtime, task)
+            )
 
             # ---- RUNTIME_CREATED ----
             trace.append(_trace_event("RUNTIME_CREATED", task_id, attempt_id,
@@ -533,6 +536,8 @@ class P45BenchmarkExecutor:
                 for owner, original_injector in injector_targets:
                     owner.fault_injector = original_injector
             self._attach_provider_accounting(outcome, run_id)
+            outcome.root_timeout_seconds = root_timeout_seconds
+            outcome.provider_timeout_seconds = provider_timeout_seconds
             if terminal_injector is not None and terminal_injector.fired:
                 outcome.observed_state.setdefault("fault_fired", True)
                 outcome.observed_state.setdefault(
@@ -680,6 +685,14 @@ class P45BenchmarkExecutor:
                 return None
             repaired = ExecutionOutcome.from_value(result)
             self._attach_provider_accounting(repaired, request.run_id)
+            if repaired.root_timeout_seconds is None:
+                repaired.root_timeout_seconds = float(
+                    request.task.get("timeout_seconds", 60.0)
+                )
+            if repaired.provider_timeout_seconds is None:
+                repaired.provider_timeout_seconds = min(
+                    max(repaired.root_timeout_seconds, 0.1), 300.0
+                )
             workspace_dir = self._workspace_dirs.get(request.run_id)
             if workspace_dir is not None and self._fixture_registry is not None:
                 fixture = self._fixture_registry.get(request.task["task_id"])
@@ -724,6 +737,26 @@ class P45BenchmarkExecutor:
         if callable(binder):
             binder(ledger)
 
+    @staticmethod
+    def _configure_runtime_deadlines(
+        runtime: Any, task: dict[str, Any]
+    ) -> tuple[float, float]:
+        """Propagate task timeout to provider-backed runtimes.
+
+        The task timeout is the root recovery budget. NativeAgentKernel keeps
+        its existing 300-second per-provider safety ceiling; make that
+        distinction explicit instead of silently retaining its 120-second
+        default.
+        """
+        root_timeout = float(task.get("timeout_seconds", 60.0))
+        if root_timeout <= 0:
+            raise RuntimeInfrastructureError("INVALID_TASK_TIMEOUT")
+        provider_timeout = min(max(root_timeout, 0.1), 300.0)
+        for owner in (runtime, getattr(runtime, "kernel", None)):
+            if owner is not None and hasattr(owner, "provider_timeout_seconds"):
+                owner.provider_timeout_seconds = provider_timeout
+        return root_timeout, provider_timeout
+
     def _attach_provider_accounting(
         self,
         outcome: ExecutionOutcome,
@@ -753,6 +786,10 @@ class P45BenchmarkExecutor:
         outcome.provider_attempt_count = len(attempt_ids)
         outcome.root_attempt_count = 1 if actual_records else 0
         outcome.nested_attempt_count = max(0, len(attempt_ids) - 1)
+        outcome.provider_call_reservations = len(actual_records)
+        outcome.blocked_provider_calls = sum(
+            1 for item in run_records if item.get("provider_call", True) is False
+        )
 
         ledger = self._run_budgets.get(run_id)
         if ledger is not None:
@@ -764,11 +801,10 @@ class P45BenchmarkExecutor:
                 outcome.budget_failure_type = ROOT_API_BUDGET_FAILURE
                 outcome.failure_type = ROOT_API_BUDGET_FAILURE
                 outcome.recovery_required = False
-            outcome.provider_calls = ledger.total_provider_calls
-            outcome.root_attempt_count = 1 if ledger.total_provider_calls else 0
-            outcome.nested_attempt_count = max(
-                outcome.nested_attempt_count,
-                1 if ledger.nested_provider_calls else 0,
+            outcome.provider_call_reservations = ledger.total_provider_calls
+            outcome.blocked_provider_calls = ledger.blocked_provider_calls
+            outcome.unrecorded_provider_reservations = max(
+                0, ledger.total_provider_calls - len(actual_records)
             )
 
         def _sum_known(field: str) -> int | str:

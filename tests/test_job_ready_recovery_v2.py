@@ -50,7 +50,10 @@ def _repair_response() -> dict:
 
 
 def _provider(responses):
-    return RealLLMProvider(model=CHEAP_MODEL, api_key="offline-job-ready-v2-test-secret", base_url=FROZEN_ENDPOINT, provider_id=FROZEN_PROVIDER, client=_FakeClient(responses), expected_model=CHEAP_MODEL)
+    client = _FakeClient(responses)
+    provider = RealLLMProvider(model=CHEAP_MODEL, api_key="offline-job-ready-v2-test-secret", base_url=FROZEN_ENDPOINT, provider_id=FROZEN_PROVIDER, client=client, expected_model=CHEAP_MODEL)
+    provider.offline_requests = client.chat.completions.calls
+    return provider
 
 
 def _run(tmp_path, snapshot, config: str, responses):
@@ -124,3 +127,44 @@ def test_v2_uses_shared_external_validator_and_canonical_target():
     assert isinstance(ExternalObservableValidator(), ExternalObservableValidator)
     assert hashlib.sha256(TARGET_CONTENT.encode("utf-8")).hexdigest() == TARGET_HASH
     assert BROKEN_CONTENT != TARGET_CONTENT
+
+
+def test_v2_recovery_is_bounded_and_projects_real_execution_evidence(tmp_path):
+    snapshot = load_snapshot()
+    counts, raw, trace, _output, provider = _run(
+        tmp_path,
+        snapshot,
+        "odys_p3",
+        [_initial_tool_response(), _repair_response(), _response(content="State repaired and verified.")],
+    )
+
+    assert counts == {"valid": 1, "invalid": 0}
+    accounting = raw["runtime_environment"]["execution_accounting"]
+    assert accounting["provider_calls"] == 3
+    assert accounting["model_calls"] == 3
+    assert accounting["provider_call_reservations"] == 3
+    assert accounting["unrecorded_provider_reservations"] == 0
+    assert accounting["root_timeout_seconds"] == 900.0
+    assert accounting["provider_timeout_seconds"] == 300.0
+    assert raw["tool_calls"] == 1
+
+    actual_repair_records = [
+        item for item in provider.call_records if item.get("phase") == "repair"
+    ]
+    assert len(actual_repair_records) == 2
+    assert len({item["attempt_id"] for item in actual_repair_records}) == 1
+    assert accounting["nested_attempt_count"] == 1
+    assert accounting["provider_attempt_count"] == 2
+
+    event_types = [event["event_type"] for event in trace["execution_trace"]]
+    assert "REPLAN_REJECTED" not in event_types
+    assert event_types.index("REPAIR_STARTED") < event_types.index("REPAIR_COMPLETED")
+
+    repair_messages = [
+        message.get("content", "")
+        for call in provider.offline_requests[1:]
+        for message in call.get("messages", [])
+    ]
+    assert any("repair_context" in message for message in repair_messages)
+    assert any("failure_provenance" in message for message in repair_messages)
+    assert any("expected_observable_effects" in message for message in repair_messages)

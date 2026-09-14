@@ -57,6 +57,7 @@ class NativeContextAssembler:
             ContextSource("acceptance", runtime.get("acceptance_criteria", []), ContextPriority.REQUIRED, 8_000),
             ContextSource("taskgraph", graph, ContextPriority.HIGH, 8_000),
             ContextSource("execution_state", execution, ContextPriority.HIGH, 18_000),
+            ContextSource("repair_context", runtime.get("repair_context", {}), ContextPriority.HIGH, 12_000),
             ContextSource("validation_failures", [item.model_dump(mode="json") for item in (validation_failures or [])][-5:], ContextPriority.HIGH, 8_000),
             ContextSource("replan_signals", [item.model_dump(mode="json") for item in (replan_signals or [])][-10:], ContextPriority.HIGH, 8_000),
             ContextSource("selected_memory", runtime.get("selected_memory", runtime.get("memory", [])), ContextPriority.NORMAL, 6_000),

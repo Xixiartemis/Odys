@@ -437,6 +437,11 @@ class ExecutionOutcome:
     # request, including calls made by a recovery attempt.
     provider_calls: int = 0
     provider_call_records: list[dict[str, Any]] = field(default_factory=list)
+    # A budget reservation is not proof that transport occurred. Keep the
+    # reservation and transport views separate for cancelled/blocked calls.
+    provider_call_reservations: int = 0
+    blocked_provider_calls: int = 0
+    unrecorded_provider_reservations: int = 0
     # Explicit attempt accounting prevents a raw ``attempt_count`` from
     # hiding provider calls made by nested recovery machinery.
     root_attempt_count: int = 0
@@ -466,6 +471,10 @@ class ExecutionOutcome:
     infrastructure_failure: bool = False
     infrastructure_error: str | None = None
     recovery_trace_authoritative: bool = False
+    # Runtime observations: the root task deadline may exceed the kernel's
+    # per-provider safety ceiling.
+    root_timeout_seconds: float | None = None
+    provider_timeout_seconds: float | None = None
 
     @classmethod
     def from_value(cls, value: "ExecutionOutcome | Mapping[str, Any]") -> "ExecutionOutcome":
@@ -1490,6 +1499,11 @@ class Phase4Runner:
                 dict(item) for item in outcome.provider_call_records
             ]
             repaired.provider_calls = outcome.provider_calls
+            repaired.provider_call_reservations = outcome.provider_call_reservations
+            repaired.blocked_provider_calls = outcome.blocked_provider_calls
+            repaired.unrecorded_provider_reservations = (
+                outcome.unrecorded_provider_reservations
+            )
         if repaired.provider_call_records:
             # P45's provider slice already contains initial + recovery calls.
             repaired.model_calls = max(
@@ -1531,6 +1545,10 @@ class Phase4Runner:
         repaired.budget_failure_type = (
             repaired.budget_failure_type or outcome.budget_failure_type
         )
+        if repaired.root_timeout_seconds is None:
+            repaired.root_timeout_seconds = outcome.root_timeout_seconds
+        if repaired.provider_timeout_seconds is None:
+            repaired.provider_timeout_seconds = outcome.provider_timeout_seconds
         repaired.expected_effect_ids = list(outcome.expected_effect_ids)
         repaired.pre_repair_state_digest = outcome.pre_repair_state_digest
         repaired.root_attempt_count = max(
@@ -1778,6 +1796,15 @@ class Phase4Runner:
             "root_attempt_count": int(outcome.root_attempt_count),
             "nested_attempt_count": int(outcome.nested_attempt_count),
             "provider_attempt_count": int(outcome.provider_attempt_count),
+            "provider_call_reservations": int(
+                outcome.provider_call_reservations or outcome.provider_calls
+            ),
+            "blocked_provider_calls": int(outcome.blocked_provider_calls),
+            "unrecorded_provider_reservations": int(
+                outcome.unrecorded_provider_reservations
+            ),
+            "root_timeout_seconds": outcome.root_timeout_seconds,
+            "provider_timeout_seconds": outcome.provider_timeout_seconds,
             "budget_exhausted": bool(outcome.budget_exhausted),
             "budget_failure_type": outcome.budget_failure_type,
             "provider_call_records": [
