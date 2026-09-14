@@ -53,8 +53,9 @@ Late provider/child results are rejected, post-cancel Safe CLI mutation is
 prevented, local ceilings cannot outlive the root, cancellation is idempotent,
 and terminal evidence survives EventStore reopen. Remote workers and universal
 external-side-effect receipts are not covered by this P0-A section; P0-B is
-closed for the declared local/bounded receipt scope, while unsupported
-external effects remain explicitly excluded and fail closed.
+closed for the declared local/bounded receipt scope, while unverifiable
+external effects remain explicitly classifiable, excluded from automatic
+replay, and fail closed when commit state is unknown.
 
 The implementation base is audit-doc commit
 `1724b4aca55d81de1abe5254e35f8b90772f682a`; the exact implementation commit

@@ -63,8 +63,20 @@ Local reversible/durable effects are supported with workspace digest
 reconciliation. `EXTERNAL_IDEMPOTENT` and `EXTERNAL_RECEIPT` are supported only
 when their adapter proves the corresponding lookup/key contract. An
 `EXTERNAL_UNVERIFIABLE` commit state is preserved as unknown and cannot be
-automatically replayed. This is receipt-backed/idempotent/reconciled handling,
-not a distributed exactly-once guarantee.
+automatically replayed. The effect class and evidence remain classifiable;
+unknown commit state is fail-closed and may require human or policy
+escalation. This is receipt-backed/idempotent/reconciled handling, not a
+distributed exactly-once guarantee.
+
+## P0 parity proof
+
+An offline service-style boundary was proven independently of Phase4Runner:
+the boundary creates an `ExecutionControlToken`, passes it to
+`NativeAgentKernel.run`, and the kernel binds it to the provider. A blocking
+in-memory provider reached `ROOT_DEADLINE_EXCEEDED` under the root deadline
+and `USER_CANCEL` under root cancellation, with provider cancellation and
+durable terminal events in both cases. The focused P0-A/P0-B suites plus the
+dedicated parity proof suite provide the evidence; no real provider was used.
 
 ## Gate interpretation
 

@@ -424,8 +424,54 @@ crash-before/after-commit boundaries, local reconciliation, idempotency,
 receipt lookup, unknown external state, cancellation/deadline preservation,
 secret filtering, ToolContract declarations, and NativeToolDispatcher
 projection. P0-B is therefore closed for local/bounded declared adapters and
-the deterministic external test double. \`EXTERNAL_UNVERIFIABLE\` is excluded
-from automatic replay and from any exactly-once claim.
+the deterministic external test double. \`EXTERNAL_UNVERIFIABLE\` is not
+nonexistent or unsupported: its effect class and evidence remain
+classifiable. Automatic replay is prohibited, and unknown commit state fails
+closed and may require human or policy escalation. No exactly-once claim is
+made.
+
+### Non-Phase4 root proof
+
+## P0 Closure Evidence
+
+P0-A implementation SHA: `64cbec889300de08c8190c82f5e219d075fd7654`
+P0-B implementation SHA: `8eef0917a40ed538b44c923f6c556c61e8546752`
+P0 proof SHA: reported as `FINAL_SHA` after the final exact-SHA verification;
+it is intentionally not embedded self-referentially in this commit.
+
+Evidence counts on the final proof tree: P0-A focused `14 passed`, P0-B
+focused `13 passed`, dedicated non-Phase4 parity `9 passed`, combined P0
+focused `36 passed`, broader runtime/P44/P45 targeted closure `226 passed`,
+and full suite `1237 passed`. The declared closure scope is the local/bounded
+Odys path: provider, tool, Safe CLI/process, MCP, recovery, child execution,
+and declared receipt-backed/idempotent adapters plus the deterministic fake.
+Remote workers, arbitrary external side effects, distributed exactly-once,
+session continuation, general sandbox lifecycle, and general parallel
+scheduling remain outside this gate.
+
+For the declared scope, `P0_BLOCKER_COUNT=0`. P1 remains visible: provider
+session/continuation identity, sandbox/process lifecycle, provenance-preserving
+context compaction, bounded concurrency scheduling, and complete usage
+normalization. P2 remains visible: telemetry export, optional foreign-runtime
+adapters, richer trace tooling, and license/notice inventory.
+
+The final offline parity proof adds a non-Phase4 service-style root boundary.
+That boundary creates an `ExecutionControlToken` and passes it to the real
+`NativeAgentKernel`; the kernel binds the same token to the provider. A
+blocking in-memory provider proves both terminal paths without importing or
+using `Phase4Runner`: root deadline returns `CANCELLED /
+ROOT_DEADLINE_EXCEEDED`, and root cancellation returns `CANCELLED /
+USER_CANCEL`. The provider task is cancelled and the corresponding durable
+terminal event is emitted in both cases. Direct callers that omit an explicit
+token also use the kernel's conservative non-benchmark fallback token.
+
+The focused P0-A and P0-B suites pass together with this proof suite. P0-A
+continues to cover provider, tool, Safe CLI/process, MCP, recovery, child,
+ceiling, race, and EventStore evidence; P0-B covers receipt persistence,
+reopen/reconciliation, idempotency, unknown external state, cancellation,
+and runtime projection. The exact proof commit is reported as `FINAL_SHA`
+after the final exact-SHA full-suite run; no self-referential SHA is embedded
+in the evidence.
 
 ## Benchmark restart rule
 
