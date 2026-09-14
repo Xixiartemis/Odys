@@ -586,7 +586,10 @@ def _build_real_odys_kernel(
     import tempfile
 
     from lhas.native.completion import CompletionAuthority
-    from lhas.native.kernel import NativeAgentKernel
+    from lhas.native.kernel import (
+        NativeAgentKernel,
+        OFFICIAL_PROVIDER_TIMEOUT_SECONDS,
+    )
     from lhas.native.models import NoOpNativeFaultInjector
     from lhas.native.parser import ModelResponseParser
     from lhas.native.tools import NativeToolDispatcher
@@ -633,6 +636,7 @@ def _build_real_odys_kernel(
         dispatcher=dispatcher,
         completion_authority=completion_authority,
         parser=ModelResponseParser(),
+        provider_timeout_seconds=OFFICIAL_PROVIDER_TIMEOUT_SECONDS,
         fault_injector=NoOpNativeFaultInjector(),
     )
 

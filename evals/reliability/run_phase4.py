@@ -475,6 +475,10 @@ class ExecutionOutcome:
     # per-provider safety ceiling.
     root_timeout_seconds: float | None = None
     provider_timeout_seconds: float | None = None
+    # Bounded, secret-free evidence projected from durable native tool events.
+    # This remains execution evidence under runtime_environment rather than a
+    # frozen benchmark metric or result-schema field.
+    tool_invocation_evidence: list[dict[str, Any]] = field(default_factory=list)
 
     @classmethod
     def from_value(cls, value: "ExecutionOutcome | Mapping[str, Any]") -> "ExecutionOutcome":
@@ -1512,6 +1516,10 @@ class Phase4Runner:
         else:
             repaired.model_calls = int(outcome.model_calls) + int(repaired.model_calls)
         repaired.tool_calls = int(outcome.tool_calls) + int(repaired.tool_calls)
+        if not repaired.tool_invocation_evidence and outcome.tool_invocation_evidence:
+            repaired.tool_invocation_evidence = [
+                dict(item) for item in outcome.tool_invocation_evidence
+            ]
 
         repair_scope = str(repaired.repair_scope or "")
         is_macro_replan = repair_scope.upper() == "MACRO_REPLAN"
@@ -1809,6 +1817,9 @@ class Phase4Runner:
             "budget_failure_type": outcome.budget_failure_type,
             "provider_call_records": [
                 dict(item) for item in outcome.provider_call_records
+            ],
+            "tool_invocations": [
+                dict(item) for item in outcome.tool_invocation_evidence
             ],
             "tokens_input": outcome.tokens_input,
             "tokens_output": outcome.tokens_output,

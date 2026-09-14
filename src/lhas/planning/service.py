@@ -594,6 +594,22 @@ class PlanExecutionService:
         if failed_step is None:
             raise KeyError(f"step not found: {failed_step_id}")
 
+        # The official benchmark has one explicit recovery boundary.  A
+        # second entry would create another durable repair Run/Attempt and
+        # make a bounded repair look like an unbounded retry loop.
+        if (
+            context
+            and context.get("official_benchmark_recovery")
+            and plan.metadata.get("official_repair_execution_started")
+        ):
+            self._emit(EventType.REPAIR_COMPLETED, {
+                "plan_id": plan.id,
+                "repair_step_ids": [failed_step_id],
+                "outcome": "REENTRY_BLOCKED",
+                "bounded_recovery": True,
+            })
+            return plan
+
         # Compute repair scope using the canonical authority
         provenance = failed_step.evidence.get("failure_provenance", {})
         scope, affected_ids = compute_repair_scope(
@@ -687,6 +703,22 @@ class PlanExecutionService:
         execution_context={"runtime":{**context,"goal_id":goal.id},"steps":{}}
         # Phase 3.3 — Repair mode: invalidate repair targets to PENDING
         if repair_step_ids:
+            if (
+                context.get("official_benchmark_recovery")
+                and plan.metadata.get("official_repair_execution_started")
+            ):
+                self._emit(EventType.REPAIR_COMPLETED, {
+                    "plan_id": plan.id,
+                    "repair_step_ids": sorted(repair_step_ids),
+                    "outcome": "REENTRY_BLOCKED",
+                    "bounded_recovery": True,
+                })
+                plan.status = PlanStatus.FAILED
+                plans.update(plan)
+                return plan
+            if context.get("official_benchmark_recovery"):
+                plan.metadata["official_repair_execution_started"] = True
+                plans.update(plan)
             self._emit(EventType.REPAIR_STARTED, {"plan_id": plan.id, "repair_step_ids": sorted(repair_step_ids)})
             _TERMINAL_REPAIRABLE = {PlanStepStatus.FAILED, PlanStepStatus.CLASSIFIED_FAILURE, PlanStepStatus.BLOCKED, PlanStepStatus.STALE, PlanStepStatus.PRECONDITION_FAILED}
             # Reset repair targets to PENDING

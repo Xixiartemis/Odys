@@ -744,9 +744,8 @@ class P45BenchmarkExecutor:
         """Propagate task timeout to provider-backed runtimes.
 
         The task timeout is the root recovery budget. NativeAgentKernel keeps
-        its existing 300-second per-provider safety ceiling; make that
-        distinction explicit instead of silently retaining its 120-second
-        default.
+        a 300-second per-provider safety ceiling; make that distinction
+        explicit instead of silently retaining a constructor default.
         """
         root_timeout = float(task.get("timeout_seconds", 60.0))
         if root_timeout <= 0:

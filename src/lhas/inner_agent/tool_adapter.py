@@ -36,6 +36,7 @@ def safe_tool_summary(name: str, args: dict[str, Any], result) -> dict[str, Any]
         summary.update({key: output.get(key) for key in (
             "path", "before_sha256", "after_sha256", "match_mode",
             "candidate_count", "matched_start_line", "matched_end_line",
+            "checksum", "bytes_written", "lines_written",
         ) if key in output})
     elif name == "workspace.diff":
         summary.update({key: output.get(key) for key in ("changed_files", "files_changed", "lines_added", "lines_removed", "truncated") if key in output})

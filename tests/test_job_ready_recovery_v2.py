@@ -15,6 +15,8 @@ from evals.reliability.job_ready_recovery_v2 import (
 from evals.reliability.p45_executor import P45BenchmarkExecutor
 from evals.reliability.p46_provider import CHEAP_MODEL, FROZEN_ENDPOINT, FROZEN_PROVIDER, RealLLMProvider
 from evals.reliability.run_phase4 import ExternalObservableValidator, select_runs
+from lhas.native.models import ModelContext
+from lhas.native.provider import OpenAIChatProviderAdapter
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -35,6 +37,11 @@ class _FakeClient:
     def __init__(self, responses):
         self.base_url = FROZEN_ENDPOINT
         self.chat = type("Chat", (), {"completions": _FakeCompletions(responses)})()
+        self.options: dict = {}
+
+    def with_options(self, **kwargs):
+        self.options = dict(kwargs)
+        return self
 
 
 def _response(*, content: str, tool_calls: list[dict] | None = None) -> dict:
@@ -105,6 +112,18 @@ def test_v2_odys_repairs_after_typed_terminal_failure(tmp_path):
     assert raw["recovery_success"] is True
     assert raw["repair_attempts"] == 1
     assert raw["runtime_environment"]["execution_accounting"]["provider_calls"] <= 20
+    accounting = raw["runtime_environment"]["execution_accounting"]
+    tool_invocations = accounting["tool_invocations"]
+    assert len(tool_invocations) == 1
+    tool = tool_invocations[0]
+    assert tool["capability"] == "workspace.edit"
+    assert tool["arguments_sanitized"]["path"] == "state.json"
+    assert tool["arguments_sanitized"]["content_sha256"] == hashlib.sha256(
+        TARGET_CONTENT.encode("utf-8")
+    ).hexdigest()
+    assert tool["result_status"] == "SUCCESS"
+    assert tool["bounded_output"]["checksum"] == TARGET_HASH
+    assert tool["observed_mutation"] is True
     evidence = raw["runtime_environment"]["state_evidence"]
     assert evidence["pre_repair_state_digest"] != evidence["post_repair_state_digest"]
     assert evidence["validator_observed_state_digest"] == evidence["post_repair_state_digest"]
@@ -114,6 +133,9 @@ def test_v2_odys_repairs_after_typed_terminal_failure(tmp_path):
     required = ["TASK_STARTED", "FAULT_INJECTED", "EXECUTION_COMPLETE", "VALIDATION_RESULT", "FAILURE_DETECTED", "StepFailureProvenance", "REPAIR_STARTED", "REPAIR_COMPLETED", "STEP_VERIFIED", "VERIFICATION_PASSED"]
     assert all(item in types for item in required)
     assert types.index("FAULT_INJECTED") < types.index("EXECUTION_COMPLETE") < types.index("FAILURE_DETECTED") < types.index("REPAIR_STARTED") < types.index("REPAIR_COMPLETED") < types.index("VERIFICATION_PASSED")
+    tool_trace = [event for event in events if event["event_type"] == "TOOL_CALL_OBSERVED"]
+    assert len(tool_trace) == 1
+    assert tool_trace[0]["metadata"]["bounded_output"]["checksum"] == TARGET_HASH
     validations = [event for event in events if event["event_type"] == "VALIDATION_RESULT"]
     assert validations[0]["metadata"]["acceptance_status"] == "REJECTED"
     assert validations[-1]["metadata"]["acceptance_status"] == "ACCEPTED"
@@ -127,6 +149,36 @@ def test_v2_uses_shared_external_validator_and_canonical_target():
     assert isinstance(ExternalObservableValidator(), ExternalObservableValidator)
     assert hashlib.sha256(TARGET_CONTENT.encode("utf-8")).hexdigest() == TARGET_HASH
     assert BROKEN_CONTENT != TARGET_CONTENT
+
+
+def test_v2_provider_transport_receives_the_canonical_call_deadline():
+    client = _FakeClient([_response(content="offline")])
+    adapter = OpenAIChatProviderAdapter(
+        model=CHEAP_MODEL,
+        api_key="offline-job-ready-v2-test-secret",
+        base_url=FROZEN_ENDPOINT,
+        client=client,
+        provider_id=FROZEN_PROVIDER,
+    )
+    context = ModelContext(messages=[], chars_used=0, budget_chars=100)
+
+    asyncio.run(adapter.generate(context=context, tools=[], timeout_seconds=37.5))
+
+    assert client.options == {"timeout": 37.5}
+
+
+def test_v2_official_odys_factory_starts_with_explicit_provider_ceiling():
+    from evals.reliability.p46_provider import RealLLMOdysRuntimeFactory
+    from lhas.native.kernel import OFFICIAL_PROVIDER_TIMEOUT_SECONDS
+
+    snapshot = load_snapshot()
+    config = snapshot.configs["odys_p3"]
+    runtime = RealLLMOdysRuntimeFactory(
+        provider=_provider([]),
+        workspace_root=Path.cwd(),
+    ).create_runtime(config)
+
+    assert runtime.kernel.provider_timeout_seconds == OFFICIAL_PROVIDER_TIMEOUT_SECONDS
 
 
 def test_v2_recovery_is_bounded_and_projects_real_execution_evidence(tmp_path):

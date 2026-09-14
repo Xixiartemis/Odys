@@ -32,6 +32,13 @@ from lhas.native.runtime import ProviderFailureClassifier, ProviderHealthReposit
 from lhas.persistence.event_store import EventStore
 
 
+# The native kernel retains a conservative default for non-benchmark callers.
+# Official benchmark factories pass the explicit per-provider ceiling below;
+# the benchmark root deadline is owned by P45 and is not replaced by this
+# value.
+OFFICIAL_PROVIDER_TIMEOUT_SECONDS = 300.0
+
+
 class NativeAgentKernel:
     """Own every turn boundary and accept completion only after validation."""
 

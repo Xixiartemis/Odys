@@ -55,6 +55,7 @@ from lhas.tools.protocol import ToolRequest, ToolResult, ToolResultStatus
 
 
 _SECRET = re.compile(r"(?i)(api[_-]?key|authorization|token|secret|password)\s*[:=]\s*[^\s,;]+")
+_SECRET_KEY = re.compile(r"(?i)(api[_-]?key|authorization|token|secret|password|credential)")
 
 
 def _safe_value(value: Any, limit: int = 12_000) -> Any:
@@ -65,8 +66,51 @@ def _safe_value(value: Any, limit: int = 12_000) -> Any:
     if isinstance(value, list):
         return [_safe_value(item, max(256, limit // 20)) for item in value[:100]]
     if isinstance(value, dict):
-        return {str(key)[:128]: _safe_value(item, max(256, limit // 20)) for key, item in list(value.items())[:100]}
+        return {
+            str(key)[:128]: (
+                "[REDACTED]"
+                if _SECRET_KEY.search(str(key))
+                else _safe_value(item, max(256, limit // 20))
+            )
+            for key, item in list(value.items())[:100]
+        }
     return _safe_value(str(value), limit)
+
+
+def _safe_tool_arguments(capability: str, arguments: Any) -> dict[str, Any]:
+    """Return bounded forensic arguments without persisting arbitrary input.
+
+    The invocation fingerprint remains the identity for the complete request.
+    For diagnostics, only workspace-edit routing fields are projected; file
+    contents are represented by a digest and length so a secret in a proposed
+    edit cannot become durable event data.  Other tools expose their argument
+    names only, which is enough to diagnose schema/shape drift without copying
+    arbitrary model input into the event store.
+    """
+    if not isinstance(arguments, dict):
+        return {"argument_type": type(arguments).__name__}
+
+    safe: dict[str, Any] = {
+        "argument_keys": sorted(str(key)[:128] for key in arguments),
+    }
+    if capability in {"workspace.edit", "workspace.edit_lines"}:
+        if "path" in arguments:
+            safe["path"] = _safe_value(arguments["path"], 512)
+        for key in ("start_line", "end_line"):
+            if key in arguments:
+                safe[key] = _safe_value(arguments[key], 64)
+        if "content" in arguments:
+            content = str(arguments["content"])
+            safe["content_sha256"] = hashlib.sha256(content.encode("utf-8")).hexdigest()
+            safe["content_length"] = len(content)
+        for key in ("replacement", "line", "lines"):
+            if key not in arguments:
+                continue
+            value = arguments[key]
+            encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            safe[f"{key}_sha256"] = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+            safe[f"{key}_count"] = len(value) if isinstance(value, list) else 1
+    return safe
 
 
 def _build_runtime_capability_registry(registry) -> CapabilityRegistry:
@@ -253,7 +297,18 @@ class NativeToolDispatcher:
             task_id=snapshot.task_id,
             run_id=snapshot.run_id,
             attempt_id=snapshot.attempt_id,
-            payload={"invocation_id": invocation.id, "capability": invocation.capability, "ordinal": invocation.ordinal, "args_sha256": invocation.args_fingerprint},
+            payload={
+                "invocation_id": invocation.id,
+                "capability": invocation.capability,
+                "ordinal": invocation.ordinal,
+                "args_sha256": invocation.args_fingerprint,
+                # This is a bounded forensic projection.  Arbitrary model
+                # arguments remain out of the durable event and invocation
+                # models; workspace edit contents are represented by hashes.
+                "arguments_sanitized": _safe_tool_arguments(
+                    call.name, call.arguments
+                ),
+            },
         )
         self.fault_injector.hit(NativeFaultPoint.AFTER_TOOL_REQUESTED, invocation=invocation)
 
@@ -325,6 +380,15 @@ class NativeToolDispatcher:
         invocation.observed_mutation = bool(
             summary.get("meaningful_mutation")
             or (before and after and before != after)
+            or (
+                call.name in {"workspace.edit", "workspace.edit_lines"}
+                and result.status is ToolResultStatus.SUCCESS
+                and isinstance(output, dict)
+                and any(
+                    key in output
+                    for key in ("checksum", "bytes_written", "lines_written")
+                )
+            )
             or (call.name == "platform.delegate" and result.status is ToolResultStatus.SUCCESS)
         )
         invocation.state = InvocationState.FINISHED
@@ -348,6 +412,7 @@ class NativeToolDispatcher:
                 "duration_ms": duration_ms,
                 "observed_mutation": invocation.observed_mutation,
                 "summary": invocation.result_summary,
+                "bounded_output": _safe_value(output, 12_000),
             },
         )
         self.fault_injector.hit(NativeFaultPoint.AFTER_TOOL_OBSERVED, invocation=invocation)

@@ -91,9 +91,17 @@ class OpenAIChatProviderAdapter:
             kwargs.update({"tools": tools, "tool_choice": "auto"})
         if self.extra_body:
             kwargs["extra_body"] = self.extra_body
+        effective_timeout = max(0.1, float(timeout_seconds))
+        # Keep the SDK transport timeout aligned with the caller's canonical
+        # per-provider deadline.  Test doubles do not implement with_options,
+        # so the existing injected-client path remains unchanged.
+        request_client = self.client
+        with_options = getattr(self.client, "with_options", None)
+        if callable(with_options):
+            request_client = with_options(timeout=effective_timeout)
         raw = await asyncio.wait_for(
-            self.client.chat.completions.create(**kwargs),
-            timeout=max(0.1, float(timeout_seconds)),
+            request_client.chat.completions.create(**kwargs),
+            timeout=effective_timeout,
         )
         return self._normalize_response(raw)
 

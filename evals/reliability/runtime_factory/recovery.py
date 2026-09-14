@@ -22,6 +22,63 @@ class OfficialRecoveryContractError(RuntimeError):
     """Raised when the official recovery context cannot be proven."""
 
 
+def _tool_invocation_evidence(events: Any, attempt_id: str) -> list[dict[str, Any]]:
+    """Join durable native request/observation events for one attempt.
+
+    Only dispatcher-produced bounded projections are returned.  Raw model
+    messages and raw tool arguments are never read from provider state here;
+    the request projection has already removed arbitrary argument values.
+    """
+    requested: dict[str, dict[str, Any]] = {}
+    observed: dict[str, dict[str, Any]] = {}
+    order: list[str] = []
+    for event in events.list_for_attempt(attempt_id):
+        payload = dict(event.payload or {})
+        invocation_id = payload.get("invocation_id")
+        if not invocation_id:
+            continue
+        invocation_id = str(invocation_id)
+        if event.event_type.value == "NATIVE_TOOL_REQUESTED":
+            requested[invocation_id] = payload
+            if invocation_id not in order:
+                order.append(invocation_id)
+        elif event.event_type.value == "NATIVE_TOOL_OBSERVED":
+            observed[invocation_id] = payload
+            if invocation_id not in order:
+                order.append(invocation_id)
+
+    return [
+        {
+            "invocation_id": invocation_id,
+            "attempt_id": attempt_id,
+            "ordinal": requested.get(invocation_id, {}).get(
+                "ordinal", observed.get(invocation_id, {}).get("ordinal")
+            ),
+            "capability": requested.get(invocation_id, {}).get(
+                "capability", observed.get(invocation_id, {}).get("capability")
+            ),
+            "arguments_sanitized": requested.get(invocation_id, {}).get(
+                "arguments_sanitized", {}
+            ),
+            "args_sha256": requested.get(invocation_id, {}).get("args_sha256"),
+            "result_status": observed.get(invocation_id, {}).get("status"),
+            "error_type": observed.get(invocation_id, {}).get("error_type"),
+            "result_summary": (
+                observed.get(invocation_id, {}).get("summary")
+                if isinstance(observed.get(invocation_id, {}).get("summary"), Mapping)
+                else {}
+            ),
+            "bounded_output": observed.get(invocation_id, {}).get(
+                "bounded_output", {}
+            ),
+            "observed_mutation": bool(
+                observed.get(invocation_id, {}).get("observed_mutation", False)
+            ),
+        }
+        for invocation_id in order
+    ]
+
+
 def _event_timestamp_utc(value: Any) -> str:
     """Serialize DB event timestamps as UTC without local-time reinterpretation.
 
@@ -444,6 +501,11 @@ class OfficialOdysRecoveryCoordinator:
         invocations = getattr(self.kernel.dispatcher, "invocations", None)
         if invocations is not None and repair_attempt_id:
             repair_tool_calls = len(invocations.list_for_attempt(repair_attempt_id))
+        tool_evidence = (
+            _tool_invocation_evidence(events, str(repair_attempt_id))
+            if repair_attempt_id
+            else []
+        )
         verified = repaired_step.status is PlanStepStatus.VERIFIED
         is_macro_replan = scope == RepairScope.MACRO_REPLAN
         return ExecutionOutcome(
@@ -460,6 +522,7 @@ class OfficialOdysRecoveryCoordinator:
             # attempt; a macro replan contributes no provider attempt here.
             attempt_count=0 if is_macro_replan else 1,
             tool_calls=repair_tool_calls,
+            tool_invocation_evidence=tool_evidence,
             execution_trace=trace,
             original_failure_attempt_id=str(original_attempt_id),
             repair_attempt_id=(
@@ -491,15 +554,20 @@ class OfficialOdysRecoveryCoordinator:
             "REPAIR_COMPLETED": "REPAIR_COMPLETED",
             "REPLAN_ACCEPTED": "REPLAN_ACCEPTED",
             "REPLAN_REJECTED": "REPLAN_REJECTED",
+            "NATIVE_TOOL_REQUESTED": "TOOL_CALL_REQUESTED",
+            "NATIVE_TOOL_OBSERVED": "TOOL_CALL_OBSERVED",
         }
         output: list[dict[str, Any]] = []
         for event in events.list_all():
             if event.id in before_ids or event.event_type.value not in mapped:
                 continue
             payload = dict(event.payload or {})
-            if payload.get("plan_id") != plan_id:
-                continue
             event_type = mapped[event.event_type.value]
+            if event_type in {"TOOL_CALL_REQUESTED", "TOOL_CALL_OBSERVED"}:
+                if str(event.attempt_id or "") != str(repair_attempt_id):
+                    continue
+            elif payload.get("plan_id") != plan_id:
+                continue
             event_attempt_id = str(
                 payload.get("repair_attempt_id")
                 or payload.get("attempt_id")
