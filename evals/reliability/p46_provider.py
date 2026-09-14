@@ -35,6 +35,7 @@ from typing import Any
 
 from lhas.native.models import RuntimeTarget
 from lhas.native.provider import OpenAIChatProviderAdapter
+from lhas.execution_control import ExecutionControlError, ExecutionControlToken
 from evals.reliability.run_phase4 import ROOT_API_BUDGET_FAILURE, RunBudgetExhausted
 
 
@@ -165,6 +166,7 @@ class RealLLMProvider:
         self.call_records: list[dict[str, Any]] = []
         self._execution_context: dict[str, str] = {}
         self._run_budget: Any = None
+        self._execution_control: ExecutionControlToken | None = None
 
         # Build extra_body for deterministic completions
         extra_body: dict[str, Any] = {}
@@ -224,6 +226,11 @@ class RealLLMProvider:
         """Bind the one run-scoped provider budget used by all phases."""
         self._run_budget = ledger
 
+    def bind_execution_control(self, control: ExecutionControlToken | None) -> None:
+        """Propagate the one root control token to the transport adapter."""
+        self._execution_control = control
+        self._inner.bind_execution_control(control)
+
     @property
     def budget_exhausted(self) -> bool:
         return bool(self._run_budget is not None and self._run_budget.exhausted)
@@ -262,6 +269,8 @@ class RealLLMProvider:
             **self._execution_context,
         }
         try:
+            if self._execution_control is not None:
+                self._execution_control.check()
             if self._run_budget is not None:
                 phase = self._execution_context.get("phase", "initial")
                 try:
@@ -287,6 +296,8 @@ class RealLLMProvider:
                 tools=tools,
                 timeout_seconds=timeout_seconds,
             )
+            if self._execution_control is not None:
+                self._execution_control.check()
             actual_model = normalized.get("model") if isinstance(normalized, dict) else None
             if actual_model != self.model:
                 raise ProviderIdentityError(

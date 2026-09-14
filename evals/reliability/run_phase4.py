@@ -29,6 +29,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Iterable, Mapping, Protocol
 
+from lhas.execution_control import ExecutionControlToken
+
 from evals.reliability.phase4_v1.validate import (
     ProtocolError,
     canonical_json,
@@ -394,6 +396,7 @@ class ExecutionRequest:
     fixture: FixtureHandle
     fault: FaultPlan
     fault_context: FaultContext
+    execution_control: ExecutionControlToken | None = None
 
 
 @dataclass
@@ -697,10 +700,14 @@ def _runtime_environment(
 
 
 def _invalid_outcome(exc: BaseException) -> dict[str, Any]:
-    return {
+    output = {
         "reason": f"{type(exc).__name__}: {exc}",
         "exception_type": type(exc).__name__,
     }
+    failure_type = getattr(exc, "failure_type", None)
+    if failure_type:
+        output["failure_type"] = str(failure_type)
+    return output
 
 
 def _validate_runner_result(
@@ -1177,6 +1184,11 @@ class Phase4Runner:
         started_clock = time.perf_counter()
         fixture: FixtureHandle | None = None
         fault = self.injector.plan_for(spec.task)
+        control = ExecutionControlToken(
+            spec.run_id,
+            attempt_id=f"{spec.run_id}::attempt-{spec.repeat_index}",
+            timeout_seconds=float(spec.task.get("timeout_seconds", 60.0)),
+        )
         diagnostic_trace: list[dict[str, Any]] = []
         diagnostic_runtime_source: str | None = None
         diagnostic_validation: ValidationOutcome | None = None
@@ -1195,11 +1207,15 @@ class Phase4Runner:
                     fixture=fixture,
                     fault=fault,
                     fault_context=FaultContext(fault),
+                    execution_control=control,
                 )
                 result = self.executor.execute(request)
                 if inspect.isawaitable(result):
                     result = await result
                 outcome = ExecutionOutcome.from_value(result)
+                # A terminal root control boundary is infrastructure state,
+                # never a validator input and never a recoverable task result.
+                control.check()
                 if outcome.infrastructure_failure:
                     raise RuntimeInfrastructureError(
                         outcome.infrastructure_error
@@ -1217,6 +1233,7 @@ class Phase4Runner:
                 # This is the first (initial) validator observation.  A
                 # rejection is data, not an executor exception.
                 initial_validation = self.validator.validate(spec.task, fixture, outcome)
+                control.check()
                 validation = initial_validation
                 finished = _utc_now()
                 trace_ref: str | None = None
@@ -1495,6 +1512,8 @@ class Phase4Runner:
         recovery_result = recover(request, outcome, initial_validation)
         if inspect.isawaitable(recovery_result):
             recovery_result = await recovery_result
+        if request.execution_control is not None:
+            request.execution_control.check()
         if recovery_result is None:
             return None
         repaired = ExecutionOutcome.from_value(recovery_result)
@@ -1976,7 +1995,7 @@ class Phase4Runner:
             "claimed_complete": False,
             "verified_completion": False,
             "false_completion": False,
-            "failure_type": None,
+            "failure_type": getattr(exc, "failure_type", None),
             "recovery_required": False,
             "recovery_attempted": False,
             "recovery_success": False,

@@ -365,6 +365,39 @@ upstream benchmark number or protocol is imported.
 - richer trace viewers and replay tooling;
 - license/notice inventory for any redistributed upstream component.
 
+## P0-A implementation evidence
+
+The P0-A implementation is now present on top of the frozen audit-doc commit
+`1724b4aca55d81de1abe5254e35f8b90772f682a`. Odys owns one
+`ExecutionControlToken` for the root run; it carries the monotonic absolute
+deadline, cancellation state/reason/timestamp, and optional attempt/parent
+lineage. Component values are local ceilings and are clamped to root
+remaining time.
+
+The token is propagated through the audited bounded path:
+
+`Phase4Runner` → `P45BenchmarkExecutor` → runtime factory → native/provider
+and tool dispatch → Safe CLI/process and MCP transport → recovery and child
+execution. Terminal control checks reject late provider/child results and
+prevent post-cancel workflow advancement. Durable cancellation/deadline events
+retain run/attempt, reason, source, timestamp, deadline, and parent lineage.
+
+Offline adversarial coverage is `14 passed`, including provider, tool,
+Windows Safe CLI process termination, MCP, recovery, child propagation,
+local-ceiling-versus-root precedence, idempotent cancellation, and EventStore
+reopen evidence. The affected regression set is `162 passed`; the final
+project suite is `1215 passed` under the repository pytest launcher. No real
+provider was executed.
+
+`IMPLEMENTATION_SHA` is the single implementation commit reported as
+`NEW_EXECUTION_SHA` in the closeout. The implementation tree intentionally
+does not duplicate a self-referential commit hash inside its own evidence.
+
+P0-A is closed for the local/bounded execution path covered above. Remote
+worker cancellation, universal external-side-effect receipts, and a general
+parallel scheduler remain outside this gate. The latter receipt boundary is
+P0-B and remains open; no P0-B claim is made here.
+
 ## Benchmark restart rule
 
 `BENCHMARK_RESTART_ALLOWED=NO` for an unrestricted long-horizon or parallel
@@ -466,4 +499,11 @@ SOURCE_MODIFIED=NO
 IMPLEMENTATION_COMMIT_CREATED=NO
 INFRA_PARITY_GATE_V1=REQUEST_REVIEW
 BENCHMARK_RESTART_ALLOWED=NO (unrestricted long-horizon/parallel scope)
+
+P0A_IMPLEMENTATION_BASE_SHA=1724b4aca55d81de1abe5254e35f8b90772f682a
+P0A_ADVERSARIAL_TESTS=14 passed
+P0A_AFFECTED_REGRESSION_TESTS=162 passed
+P0A_FINAL_FULL_SUITE=1215 passed
+P0A_STATUS=CLOSED_FOR_LOCAL_BOUNDED_SCOPE
+P0B_STATUS=OPEN
 ```

@@ -154,7 +154,13 @@ class _KernelTaskExecutor:
             budget=budget,
             metadata=metadata,
         )
-        result = await self.kernel.run(agent_request)
+        control = getattr(request, "execution_control", None)
+        if control is None and isinstance(getattr(request, "context", None), Mapping):
+            control = request.context.get("_execution_control")
+        if control is not None:
+            control.check()
+        agent_request.execution_control = control
+        result = await self.kernel.run(agent_request, execution_control=control)
         completed = result.status is AgentStatus.COMPLETED
         return ExecutionResult(
             status=ExecutionStatus.SUCCESS if completed else ExecutionStatus.FAILURE,
@@ -203,6 +209,7 @@ class OfficialOdysRecoveryCoordinator:
         self.kernel = kernel
         self.registry = registry
         self._contexts: dict[str, dict[str, Any]] = {}
+        self.execution_control = None
         executor = _KernelTaskExecutor(
             kernel,
             provider=getattr(kernel, "provider", None),
@@ -219,7 +226,13 @@ class OfficialOdysRecoveryCoordinator:
             capability_registry=capability_registry,
             tool_contract=tool_contract,
             workflow_verifier=WorkflowVerifier(db),
+            execution_control=self.execution_control,
         )
+
+    def bind_execution_control(self, control: Any) -> None:
+        """Bind the parent root authority to the existing repair service."""
+        self.execution_control = control
+        self.service.execution_control = control
 
     def prepare(
         self,
@@ -325,6 +338,9 @@ class OfficialOdysRecoveryCoordinator:
             compute_repair_scope,
         )
 
+        control = getattr(request, "execution_control", None)
+        if control is not None:
+            control.check()
         context = self._contexts.pop(request.run_id, None)
         if context is None:
             raise OfficialRecoveryContractError("RECOVERY_CONTEXT_MISSING")
@@ -407,6 +423,8 @@ class OfficialOdysRecoveryCoordinator:
         step.evidence["failure_provenance"] = provenance.model_dump(mode="json")
         step.evidence["original_failure_attempt_id"] = context["attempt_id"]
         plans.update(plan)
+        if control is not None:
+            control.check()
         events = EventStore(self.db)
         before_ids = {
             event.id for event in events.list_all() if event.id is not None
@@ -425,6 +443,9 @@ class OfficialOdysRecoveryCoordinator:
                 "repair_scope_hint": RepairScopeHint(scope.value).value,
             },
         )
+
+        if control is not None:
+            control.check()
 
         repaired_plan = await self.service.repair_after_failure(
             plan.id,
@@ -454,11 +475,14 @@ class OfficialOdysRecoveryCoordinator:
                         "capability before claiming completion."
                     ),
                 },
+                "_execution_control": getattr(request, "execution_control", None),
             },
         )
         repaired_step = next(
             item for item in repaired_plan.steps if item.id == step.id
         )
+        if control is not None:
+            control.check()
         original_attempt_id = repaired_step.evidence.get(
             "original_failure_attempt_id", context["attempt_id"]
         )

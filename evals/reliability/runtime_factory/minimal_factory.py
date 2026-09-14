@@ -18,6 +18,7 @@ from __future__ import annotations
 import time
 from typing import Any
 
+from lhas.execution_control import ExecutionControlError, ExecutionControlToken, ExecutionLayerTimeout, await_with_control
 from evals.reliability.run_phase4 import NOT_MEASURED, ExecutionOutcome
 from evals.reliability.runtime_factory.base import RuntimeFactory
 from evals.reliability.runtime_factory.protocol import BenchmarkRuntime
@@ -42,6 +43,7 @@ class _MinimalRuntime:
         self.dispatcher = dispatcher
         self.db = db
         self.provider_timeout_seconds = 30.0
+        self._execution_control: ExecutionControlToken | None = None
         # Deliberately NO completion authority, no recovery loop, no
         # failure provenance, no selective repair.
         self.completion = None
@@ -50,6 +52,15 @@ class _MinimalRuntime:
         """Run one benchmark task through the minimal execution path."""
         started = time.monotonic()
         features = config.get("features", {})
+        control = config.get("_execution_control")
+        if control is not None and not isinstance(control, ExecutionControlToken):
+            raise TypeError("_execution_control must be an ExecutionControlToken")
+        self._execution_control = control
+        if control is not None:
+            control.check()
+            binder = getattr(self.provider, "bind_execution_control", None)
+            if callable(binder):
+                binder(control)
 
         try:
             # Build a minimal agent request
@@ -91,10 +102,16 @@ class _MinimalRuntime:
                 replan_signals=[],
             )
 
-            raw = await self.provider.generate(
-                context=context,
-                tools=self.dispatcher.tool_schemas() if self.dispatcher else [],
-                timeout_seconds=self.provider_timeout_seconds,
+            raw = await await_with_control(
+                self.provider.generate(
+                    context=context,
+                    tools=self.dispatcher.tool_schemas() if self.dispatcher else [],
+                    timeout_seconds=self.provider_timeout_seconds,
+                ),
+                control=control,
+                local_ceiling=self.provider_timeout_seconds,
+                timeout_failure_type="PROVIDER_TIMEOUT",
+                source="provider",
             )
 
             # Parse the response
@@ -110,7 +127,16 @@ class _MinimalRuntime:
 
                 snapshot = _MinimalSnapshot(metadata)
                 for call in response.tool_calls:
-                    observation = await self.dispatcher.dispatch(call, request, snapshot)
+                    observation = await await_with_control(
+                        self.dispatcher.dispatch(
+                            call,
+                            request,
+                            snapshot,
+                            execution_control=control,
+                        ),
+                        control=control,
+                        source="tool",
+                    )
                     tool_outcomes.append(observation)
 
             elapsed = time.monotonic() - started
@@ -138,6 +164,26 @@ class _MinimalRuntime:
         except Exception as exc:
             elapsed = time.monotonic() - started
             from evals.reliability.attempt_boundary import AttemptTerminalFailure
+
+            if isinstance(exc, ExecutionControlError):
+                return ExecutionOutcome(
+                    claimed_complete=False,
+                    observed_state={
+                        "agent_status": "CANCELLED",
+                        "execution_control": exc.evidence(),
+                        "features_active": {},
+                    },
+                    failure_type=exc.failure_type,
+                    recovery_required=False,
+                    recovery_attempted=False,
+                    recovery_success=False,
+                    repair_scope=None,
+                    tool_calls=0,
+                    model_calls=0,
+                    attempt_count=1,
+                    wall_time_seconds=round(elapsed, 6),
+                    infrastructure_failure=False,
+                )
 
             if isinstance(exc, AttemptTerminalFailure):
                 return ExecutionOutcome(

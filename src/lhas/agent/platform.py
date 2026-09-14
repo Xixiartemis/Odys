@@ -120,7 +120,7 @@ class _KernelTool:
     @property
     def capability(self): return CapabilitySpec(name=self.name,description=f"AgentKernel {self.role.value.lower()} step")
     async def execute(self,request:ToolRequest):
-        result=await self.kernel.run(AgentRequest(agent_id=f"{self.role.value.lower()}-{request.task_id}",role=self.role,objective=str(request.arguments.get("goal",self.name)),context=request.context,messages=[],allowed_capabilities={self.name},toolsets=set(),metadata={"task_id":request.task_id,"run_id":request.run_id,"attempt_id":request.attempt_id}))
+        result=await self.kernel.run(AgentRequest(agent_id=f"{self.role.value.lower()}-{request.task_id}",role=self.role,objective=str(request.arguments.get("goal",self.name)),context=request.context,messages=[],allowed_capabilities={self.name},toolsets=set(),metadata={"task_id":request.task_id,"run_id":request.run_id,"attempt_id":request.attempt_id},execution_control=request.execution_control), execution_control=request.execution_control)
         status=ToolResultStatus.SUCCESS if result.status is AgentStatus.COMPLETED else ToolResultStatus.FAILURE
         return ToolResult(status=status,output={"summary":result.final_output,"completion_claim":result.completion_claim},artifacts=result.artifacts,error_type=result.error_type,usage=result.usage)
 
@@ -130,7 +130,7 @@ class _DelegationTool:
     @property
     def capability(self): return CapabilitySpec(name="platform.delegate",description="Create a durable child Task, Run and Attempt")
     async def execute(self,request:ToolRequest):
-        result=await self.service.delegate(DelegationRequest(parent_agent_id=f"worker-{request.task_id}",parent_task_id=request.task_id,parent_run_id=request.run_id,goal="Collect bounded platform evidence through skill, knowledge, and MCP channels",context={"dependency_steps":request.context.get("steps",{})},role=AgentRole.RESEARCHER,toolsets={"skills","memory","knowledge","mcp"},skills=["coding/code-review"],spawn_depth=1))
+        result=await self.service.delegate(DelegationRequest(parent_agent_id=f"worker-{request.task_id}",parent_task_id=request.task_id,parent_run_id=request.run_id,goal="Collect bounded platform evidence through skill, knowledge, and MCP channels",context={"dependency_steps":request.context.get("steps",{})},role=AgentRole.RESEARCHER,toolsets={"skills","memory","knowledge","mcp"},skills=["coding/code-review"],spawn_depth=1), execution_control=request.execution_control)
         return ToolResult(status=ToolResultStatus.SUCCESS if result.status.value=="COMPLETED" else ToolResultStatus.FAILURE,output=result.model_dump(mode="json"),artifacts=result.artifacts)
 
 
@@ -183,7 +183,7 @@ class OfflineAgentPlatform:
         async def child_handler(request:AgentRequest):
             traces=[]
             async def call(capability,args):
-                result=await invoke_via_contract(_contract,ToolRequest(tool_call_id=new_id(),task_id=str(request.metadata["task_id"]),run_id=str(request.metadata["run_id"]),attempt_id=str(request.metadata["attempt_id"]),capability_id=capability,tool_name=capability,arguments=args,context=request.context,metadata={"role":request.role.value}))
+                result=await invoke_via_contract(_contract,ToolRequest(tool_call_id=new_id(),task_id=str(request.metadata["task_id"]),run_id=str(request.metadata["run_id"]),attempt_id=str(request.metadata["attempt_id"]),capability_id=capability,tool_name=capability,arguments=args,context=request.context,metadata={"role":request.role.value},execution_control=request.execution_control))
                 traces.append({"capability":capability,"status":result.status.value,"error_type":result.error_type})
                 return result
             skill=await call("skills.view",{"name":"coding/code-review"})

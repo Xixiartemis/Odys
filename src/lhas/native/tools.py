@@ -37,6 +37,7 @@ from lhas.capability_registry import (
 )
 from lhas.domain.enums import EventType
 from lhas.domain.models import utcnow
+from lhas.execution_control import ExecutionControlError, ExecutionControlToken, ExecutionLayerTimeout, await_with_control
 from lhas.inner_agent.tool_adapter import ToolAwareObserver, _args_signature, safe_tool_summary
 from lhas.native.models import (
     ExecutionSnapshot,
@@ -249,7 +250,11 @@ class NativeToolDispatcher:
         call: ProviderToolCall,
         request: AgentRequest,
         snapshot: ExecutionSnapshot,
+        *,
+        execution_control: ExecutionControlToken | None = None,
     ) -> dict[str, Any]:
+        if execution_control is not None:
+            execution_control.check()
         invocation_id = self._identity(snapshot.attempt_id, call.id)
         existing = self.invocations.get(invocation_id)
         if existing is not None:
@@ -311,6 +316,8 @@ class NativeToolDispatcher:
             },
         )
         self.fault_injector.hit(NativeFaultPoint.AFTER_TOOL_REQUESTED, invocation=invocation)
+        if execution_control is not None:
+            execution_control.check()
 
         # --- Policy boundary (NativeToolDispatcher owns these) ---
         if definition is None:
@@ -329,6 +336,8 @@ class NativeToolDispatcher:
         self.invocations.update(invocation)
         self.events.append(EventType.NATIVE_TOOL_STARTED, task_id=snapshot.task_id, run_id=snapshot.run_id, attempt_id=snapshot.attempt_id, payload={"invocation_id": invocation.id, "capability": invocation.capability})
         self.fault_injector.hit(NativeFaultPoint.AFTER_TOOL_STARTED, invocation=invocation)
+        if execution_control is not None:
+            execution_control.check()
         started = time.monotonic()
 
         # --- ToolContract boundary: ALL execution goes through contract ---
@@ -346,14 +355,41 @@ class NativeToolDispatcher:
             tool_name=tool_name,
             arguments=call.arguments,
             context=request.context,
+            timeout_seconds=(
+                execution_control.effective_timeout(
+                    getattr(definition, "timeout_seconds", None)
+                )
+                if execution_control is not None
+                else None
+            ),
+            execution_control=execution_control,
             metadata=request.metadata,
         )
         runtime_context = self._runtime_context(snapshot)
 
         try:
-            result = await self.tool_contract.invoke(contract_request, runtime_context)
+            result = await await_with_control(
+                self.tool_contract.invoke(contract_request, runtime_context),
+                control=execution_control,
+                local_ceiling=getattr(definition, "timeout_seconds", None),
+                timeout_failure_type="TOOL_TIMEOUT",
+                source="tool",
+            )
+        except ExecutionLayerTimeout as exc:
+            result = ToolResult(
+                status=ToolResultStatus.FAILURE,
+                error_type=exc.failure_type,
+                error_message=exc.reason,
+            )
+        except ExecutionControlError:
+            # Leave a STARTED invocation durable for reconciliation; no
+            # post-cancel observation may advance runtime truth.
+            raise
         except Exception as exc:
             result = ToolResult(status=ToolResultStatus.FAILURE, error_type="TOOL_EXECUTION_ERROR", error_message=str(exc)[:512])
+
+        if execution_control is not None:
+            execution_control.check()
 
         self.fault_injector.hit(NativeFaultPoint.AFTER_TOOL_EXECUTED, invocation=invocation, result=result)
         duration_ms = int((time.monotonic() - started) * 1000)

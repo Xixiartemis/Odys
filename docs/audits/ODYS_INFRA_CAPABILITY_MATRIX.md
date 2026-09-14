@@ -13,8 +13,8 @@ L3 authoritative durable path for the stated scope.
 | Events/observability | L2 | `EventStore`, native snapshots/invocations, JSONL traces | L3 | L2 | L3 | OH SDK `EventLog`; Pi session events | adopt shapes/exporters | P1 | NO | OH SDK `57f5cc9`; Pi `71dca871` | EventStore remains state-adjacent audit truth |
 | Session persistence/resume | L2 | `RecoveringOrchestrator.resume_run`; E6 tests | L3 | L3 | L3 | OH `LocalConversation`; Hermes SQLite | add identity-aware session adapter | P1 | NO | OH SDK `57f5cc9`; Hermes `bf867d3` | no provider-internal restore claim |
 | Checkpoint/restore | L2 | `checkpoint.py:78`; CP-3 reconstruction | L2 | L3 | L2 | Hermes shadow Git checkpoints | optional workspace adapter | P1 | NO | Hermes `bf867d3` | local fixture scope only |
-| Cancellation | L1 | executor `cancel`; native status marker | L3 | L2 | L3 | Pi AbortSignal; OH CancellationToken | implement root propagation | P0 | NO | Pi `71dca871`; OH SDK `57f5cc9` | active provider/tool/process stop unproven globally |
-| Timeout/deadline | L2 | P45 root timeout + 300s provider ceiling; tool/MCP limits | L2 | L2 | L3 | OH conversation/run limits; Pi AbortSignal | unify absolute deadline | P0 | NO | OH SDK `57f5cc9`; Pi `71dca871` | local ceilings are not one root deadline |
+| Cancellation | L3 | `ExecutionControlToken`; provider/tool/Safe CLI/MCP/recovery/child propagation; 14 offline adversarial tests | L3 | L2 | L3 | Pi AbortSignal; OH CancellationToken | Odys-owned root propagation | NONE | NO | Pi `71dca871`; OH SDK `57f5cc9` | local/bounded path closed; P0-B receipt boundary remains open |
+| Timeout/deadline | L3 | monotonic root absolute deadline; component ceilings clamp to root remaining; 14 offline adversarial tests | L2 | L2 | L3 | OH conversation/run limits; Pi AbortSignal | Odys-owned absolute deadline | NONE | NO | OH SDK `57f5cc9`; Pi `71dca871` | local/bounded path closed; general remote scheduler remains out of scope |
 | Context/compaction | L2 | `NativeContextAssembler`; CP policies; bounded context | L3 | L3 | L3 | Pi AgentSession; Hermes compression; OH condensers | add provenance-preserving compaction | P1 | NO | Pi `71dca871`; Hermes `bf867d3`; OH SDK `57f5cc9` | no unbounded transcript persistence |
 | Budget/cost | L3 | `RunBudgetLedger`; provider accounting; NOT_MEASURED | L3 | L3 | L3 | Hermes usage file; Pi stats; OH metrics | retain, normalize optional usage | NONE | YES | all three | frozen benchmark accounting is strong |
 | Validation/completion | L3 | `CompletionAuthority`; external validator; P410 semantics | L2 | L2 | L2 | no direct substitute | Odys-owned | NONE | YES | local only | upstream verification is not Odys acceptance |
@@ -36,6 +36,19 @@ serialization, session storage primitives, checkpoint storage, sandbox/process
 isolation, MCP wire behavior, OpenTelemetry export, and bounded concurrency
 primitives. Every adapter must preserve Odys IDs, deadlines, cancellation,
 tool policy, workspace identity, and durable evidence.
+
+## P0-A closure evidence
+
+On top of audit-doc commit `1724b4aca55d81de1abe5254e35f8b90772f682a`, the
+single root `ExecutionControlToken` is implemented and wired across the local
+bounded execution path. Root deadline arithmetic uses `time.monotonic()`;
+wall-clock timestamps are evidence only. The offline gate passed 14/14 and
+the final full suite passed 1215/1215. The implementation SHA is emitted as
+`NEW_EXECUTION_SHA` at closeout rather than duplicated self-referentially in
+this commit's own evidence.
+
+P0-A is closed only for the covered local/bounded path. P0-B (universal
+external-side-effect receipts) remains open.
 
 ## Gate interpretation
 

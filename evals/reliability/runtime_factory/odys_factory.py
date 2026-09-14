@@ -16,6 +16,7 @@ import time
 import re
 from typing import Any
 
+from lhas.execution_control import ExecutionControlError, ExecutionControlToken
 from evals.reliability.run_phase4 import (
     ATTEMPT_LOCAL_BUDGET_FAILURES,
     ExecutionOutcome,
@@ -106,6 +107,11 @@ class _OdysRuntime:
         """Run one benchmark task through the full ODYS kernel."""
         started = time.monotonic()
         features = config.get("features", {})
+        control = config.get("_execution_control")
+        if control is not None and not isinstance(control, ExecutionControlToken):
+            raise TypeError("_execution_control must be an ExecutionControlToken")
+        if control is not None:
+            control.check()
 
         try:
             from lhas.agent.models import AgentBudget, AgentRequest, AgentRole, AgentStatus
@@ -117,6 +123,7 @@ class _OdysRuntime:
             if self.db is not None:
                 attempt_id = self._ensure_db_records(task, config)
                 if self.recovery is not None:
+                    self.recovery.bind_execution_control(control)
                     self.recovery.prepare(
                         task=task,
                         config=config,
@@ -152,7 +159,10 @@ class _OdysRuntime:
 
             # Run through the full kernel (includes completion authority,
             # failure provenance, selective repair, recovery loop)
-            result = await self.kernel.run(request)
+            result = await self.kernel.run(
+                request,
+                execution_control=control,
+            )
 
             elapsed = time.monotonic() - started
 
@@ -220,6 +230,31 @@ class _OdysRuntime:
             elapsed = time.monotonic() - started
             from evals.reliability.attempt_boundary import AttemptTerminalFailure
 
+            if isinstance(exc, ExecutionControlError):
+                return ExecutionOutcome(
+                    claimed_complete=False,
+                    observed_state={
+                        "agent_status": "CANCELLED",
+                        "execution_control": exc.evidence(),
+                        "features_active": {
+                            "completion_authority": True,
+                            "failure_provenance": True,
+                            "selective_repair": True,
+                            "recovery_loop": True,
+                        },
+                    },
+                    failure_type=exc.failure_type,
+                    recovery_required=False,
+                    recovery_attempted=False,
+                    recovery_success=False,
+                    repair_scope=None,
+                    tool_calls=0,
+                    model_calls=0,
+                    attempt_count=1,
+                    wall_time_seconds=round(elapsed, 6),
+                    infrastructure_failure=False,
+                )
+
             if isinstance(exc, AttemptTerminalFailure):
                 return ExecutionOutcome(
                     claimed_complete=False,
@@ -284,6 +319,9 @@ class _OdysRuntime:
         """Use the explicit official recovery contract."""
         if self.recovery is None:
             raise RuntimeError("OFFICIAL_RECOVERY_AUTHORITY_UNAVAILABLE")
+        control = getattr(request, "execution_control", None)
+        if control is not None:
+            control.check()
         return await self.recovery.recover_after_validation(
             request,
             outcome,

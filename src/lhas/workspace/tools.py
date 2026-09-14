@@ -145,7 +145,14 @@ class SafeCliTool:
             timeout_seconds = request.timeout_seconds
             if timeout_seconds is None:
                 timeout_seconds = args.get("timeout_seconds")
-            output, error = await self.cli.execute(args.get("argv"), args.get("cwd", "."), timeout_seconds)
+            cli_args = (args.get("argv"), args.get("cwd", "."), timeout_seconds)
+            if request.execution_control is None:
+                output, error = await self.cli.execute(*cli_args)
+            else:
+                output, error = await self.cli.execute(
+                    *cli_args,
+                    execution_control=request.execution_control,
+                )
         except WorkspacePathEscape:
             return _failure("WORKSPACE_PATH_ESCAPE", "cwd outside workspace", path_kind="cwd")
         if error:

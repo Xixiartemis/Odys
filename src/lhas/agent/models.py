@@ -50,6 +50,9 @@ class AgentRequest(BaseModel):
     parent_agent_id: str | None = None
     parent_run_id: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
+    # In-process only. The root execution token is never serialized as agent
+    # input, but it must follow delegated work through the child boundary.
+    execution_control: Any = Field(default=None, exclude=True)
 
     @field_validator("messages")
     @classmethod

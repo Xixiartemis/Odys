@@ -30,6 +30,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from lhas.execution_control import ExecutionControlError, ExecutionControlToken, await_with_control
 from evals.reliability.run_phase4 import (
     ExecutionOutcome,
     ExecutionRequest,
@@ -266,6 +267,7 @@ class P45BenchmarkExecutor:
         # validation-rejection recovery through the explicit runtime
         # recovery contract.
         self._active_runtimes: dict[str, Any] = {}
+        self._execution_controls: dict[str, ExecutionControlToken] = {}
         self._provider_call_offsets: dict[str, int] = {}
         self._run_budgets: dict[str, RunBudgetLedger] = {}
         self._frozen_budgets: dict[str, Any] = {}
@@ -346,6 +348,17 @@ class P45BenchmarkExecutor:
 
     async def execute(self, request: ExecutionRequest) -> ExecutionOutcome:
         """Run one benchmark task through the appropriate runtime."""
+        config_id = request.config.get("config_id", "unknown")
+        task = request.task
+        task_id = task.get("task_id", "unknown")
+        run_id = request.run_id
+        control = request.execution_control or ExecutionControlToken(
+            run_id,
+            attempt_id=f"{run_id}::attempt-{request.repeat_index}",
+            timeout_seconds=float(task.get("timeout_seconds", 60.0)),
+        )
+        self._execution_controls[run_id] = control
+        control.check()
         if self._factory_type == "real" and self._provider is None:
             # This validation happens before fixture setup or model execution.
             # A direct executor construction therefore cannot accidentally turn
@@ -363,10 +376,6 @@ class P45BenchmarkExecutor:
                 expected_model=self._expected_model,
             )
 
-        config_id = request.config.get("config_id", "unknown")
-        task = request.task
-        task_id = task.get("task_id", "unknown")
-        run_id = request.run_id
         self._run_budget(run_id)
         attempt_id = f"{run_id}::attempt-{request.repeat_index}"
         self._provider_call_offsets.setdefault(
@@ -378,6 +387,7 @@ class P45BenchmarkExecutor:
             task_id=str(task_id),
             attempt_id=attempt_id,
             phase="initial",
+            execution_control=control,
         )
 
         # Mutable trace list accumulated throughout the execution lifecycle.
@@ -387,7 +397,9 @@ class P45BenchmarkExecutor:
         trace.append(_trace_event("TASK_STARTED", task_id, attempt_id))
 
         # Setup fixture workspace
+        control.check()
         workspace_dir = self._setup_fixture(request)
+        control.check()
 
         # ---- FIXTURE_SETUP ----
         trace.append(_trace_event("FIXTURE_SETUP", task_id, attempt_id,
@@ -416,10 +428,12 @@ class P45BenchmarkExecutor:
 
         trace.append(_trace_event("FAULT_INJECTION_STARTED", task_id, attempt_id,
                                   fault_id=fault_id))
+        control.check()
         try:
             fixture = self._fixture_registry.get(task_id) if self._fixture_registry is not None else None
             if fixture is not None:
                 fixture.inject_fault(workspace_dir, fault_id)
+            control.check()
             trace.append(_trace_event("FAULT_INJECTED", task_id, attempt_id,
                                       fault_id=fault_id))
         except Exception as exc:
@@ -530,11 +544,17 @@ class P45BenchmarkExecutor:
             # use the same run identity as the official Phase 4 request.
             runtime_config["run_id"] = request.run_id
             runtime_config["_workspace_root"] = str(workspace_dir)
+            runtime_config["_execution_control"] = control
             try:
-                outcome = await runtime.execute(task, runtime_config)
+                outcome = await await_with_control(
+                    runtime.execute(task, runtime_config),
+                    control=control,
+                    source="runtime",
+                )
             finally:
                 for owner, original_injector in injector_targets:
                     owner.fault_injector = original_injector
+            control.check()
             self._attach_provider_accounting(outcome, run_id)
             outcome.root_timeout_seconds = root_timeout_seconds
             outcome.provider_timeout_seconds = provider_timeout_seconds
@@ -579,6 +599,7 @@ class P45BenchmarkExecutor:
                                       )))
 
             # Observe fixture state
+            control.check()
             if self._fixture_registry is not None:
                 try:
                     fixture = self._fixture_registry.get(task_id)
@@ -608,6 +629,7 @@ class P45BenchmarkExecutor:
                                       failure_type=outcome.failure_type))
 
             # ---- Propagate trace into observed_state ----
+            control.check()
             if outcome.observed_state is None:
                 outcome.observed_state = {}
             outcome.observed_state["execution_trace"] = trace
@@ -619,6 +641,10 @@ class P45BenchmarkExecutor:
 
             return outcome
 
+        except ExecutionControlError:
+            # The runner must classify a root cancellation/deadline as
+            # infrastructure state; do not turn it into a normal task result.
+            raise
         except Exception as exc:
             from evals.reliability.p46_provider import ProviderIdentityError
 
@@ -660,7 +686,13 @@ class P45BenchmarkExecutor:
         from evals.reliability.runtime_factory.protocol import RecoverableBenchmarkRuntime
 
         runtime = self._active_runtimes.get(request.run_id)
+        control = request.execution_control or ExecutionControlToken(
+            request.run_id,
+            attempt_id=str(outcome.repair_attempt_id or "recovery"),
+            timeout_seconds=float(request.task.get("timeout_seconds", 60.0)),
+        )
         try:
+            control.check()
             ledger = self._run_budgets.get(request.run_id)
             if ledger is not None and not ledger.reserve_repair():
                 return None
@@ -675,11 +707,16 @@ class P45BenchmarkExecutor:
                 task_id=str(request.task.get("task_id", "unknown")),
                 attempt_id=str(outcome.repair_attempt_id or "recovery"),
                 phase="recovery",
+                execution_control=control,
             )
-            result = await runtime.recover_after_validation(
-                request,
-                outcome,
-                validation,
+            result = await await_with_control(
+                runtime.recover_after_validation(
+                    request,
+                    outcome,
+                    validation,
+                ),
+                control=control,
+                source="recovery",
             )
             if result is None:
                 return None
@@ -694,16 +731,27 @@ class P45BenchmarkExecutor:
                     max(repaired.root_timeout_seconds, 0.1), 300.0
                 )
             workspace_dir = self._workspace_dirs.get(request.run_id)
+            control.check()
             if workspace_dir is not None and self._fixture_registry is not None:
                 fixture = self._fixture_registry.get(request.task["task_id"])
                 observed = fixture.observe(workspace_dir)
                 repaired.observed_state.update(observed)
                 repaired.observed_state["fixture_observations"] = observed
             return repaired
+        except ExecutionControlError as exc:
+            outcome.failure_type = exc.failure_type
+            outcome.recovery_required = False
+            outcome.recovery_attempted = False
+            outcome.recovery_success = False
+            outcome.observed_state.setdefault("execution_control", exc.evidence())
+            return None
         finally:
             self._active_runtimes.pop(request.run_id, None)
             self._reset_fixture(request)
             self._run_budgets.pop(request.run_id, None)
+            self._execution_controls.pop(request.run_id, None)
+            self._provider_call_offsets.pop(request.run_id, None)
+            self._clear_provider_control()
 
     def cleanup(self, request: ExecutionRequest) -> None:
         """Release one run's workspace after validation/recovery is complete."""
@@ -711,6 +759,20 @@ class P45BenchmarkExecutor:
         self._reset_fixture(request)
         self._run_budgets.pop(request.run_id, None)
         self._provider_call_offsets.pop(request.run_id, None)
+        self._execution_controls.pop(request.run_id, None)
+        self._clear_provider_control()
+
+    async def cancel(
+        self,
+        run_id: str,
+        *,
+        reason: str = "USER_CANCEL",
+    ) -> bool:
+        """Cancel an active root run without creating a second authority."""
+        control = self._execution_controls.get(str(run_id))
+        if control is None:
+            return False
+        return control.cancel(reason, source="p45.cancel")
 
     def _bind_provider_context(
         self,
@@ -719,6 +781,7 @@ class P45BenchmarkExecutor:
         task_id: str,
         attempt_id: str,
         phase: str,
+        execution_control: ExecutionControlToken | None = None,
     ) -> None:
         binder = getattr(self._provider, "bind_execution_context", None)
         if callable(binder):
@@ -728,6 +791,9 @@ class P45BenchmarkExecutor:
                 attempt_id=attempt_id,
                 phase=phase,
             )
+        control_binder = getattr(self._provider, "bind_execution_control", None)
+        if callable(control_binder):
+            control_binder(execution_control)
         ledger = self._run_budgets.get(run_id)
         if ledger is not None:
             self._bind_provider_budget(ledger)
@@ -736,6 +802,11 @@ class P45BenchmarkExecutor:
         binder = getattr(self._provider, "bind_run_budget", None)
         if callable(binder):
             binder(ledger)
+
+    def _clear_provider_control(self) -> None:
+        binder = getattr(self._provider, "bind_execution_control", None)
+        if callable(binder):
+            binder(None)
 
     @staticmethod
     def _configure_runtime_deadlines(

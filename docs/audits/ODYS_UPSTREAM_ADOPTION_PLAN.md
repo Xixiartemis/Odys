@@ -45,6 +45,19 @@ durable terminal event without a post-cancel mutation.
 
 License: no third-party code required.
 
+P0-A closure evidence: the Odys-owned `ExecutionControlToken` now carries one
+root monotonic deadline and cancellation lineage through provider, tool,
+Safe CLI/process, MCP, recovery, and child execution in the local/bounded
+path. Fourteen offline adversarial tests and the final 1215-test suite passed.
+Late provider/child results are rejected, post-cancel Safe CLI mutation is
+prevented, local ceilings cannot outlive the root, cancellation is idempotent,
+and terminal evidence survives EventStore reopen. Remote workers and universal
+external-side-effect receipts are not covered; P0-B remains open.
+
+The implementation base is audit-doc commit
+`1724b4aca55d81de1abe5254e35f8b90772f682a`; the exact implementation commit
+is reported as `NEW_EXECUTION_SHA` at closeout.
+
 ### P0-B — Side-effect receipt interface
 
 Reference: local `ToolInvocationRepository`/`NativeToolDispatcher`; OpenHands

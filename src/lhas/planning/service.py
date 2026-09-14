@@ -87,7 +87,7 @@ class _ToolExecutor:
         try: tool = self.registry.resolve(self.step.capability)
         except KeyError as exc: return ExecutionResult(status=ExecutionStatus.FAILURE, error_type="UNKNOWN_CAPABILITY", error_message=str(exc))
         tr = ToolRequest(tool_call_id=new_id(), task_id=request.task_id, run_id=request.run_id, attempt_id=request.attempt_id,
-                         capability=self.step.capability, tool_name=self.step.capability, arguments=self.step.inputs, context={**self.context, **request.context}, metadata=request.metadata)
+                         capability=self.step.capability, tool_name=self.step.capability, arguments=self.step.inputs, context={**self.context, **request.context}, execution_control=request.execution_control, metadata=request.metadata)
         safe_request={"tool_call_id":tr.tool_call_id,"capability":tr.capability}
         event.append(EventType.TOOL_CALL_STARTED, task_id=request.task_id, run_id=request.run_id, attempt_id=request.attempt_id, payload={"request":safe_request})
         try:
@@ -155,11 +155,12 @@ class PlanExecutionService:
     LINEAR remains a legacy execution path and is intentionally outside the
     P3.3 selective-repair contract.
     """
-    def __init__(self, db: Database, planner: Planner, registry: ToolRegistry, agent_executor_factory=None, tool_contract=None, capability_registry=None, workflow_verifier=None):
+    def __init__(self, db: Database, planner: Planner, registry: ToolRegistry, agent_executor_factory=None, tool_contract=None, capability_registry=None, workflow_verifier=None, execution_control=None):
         self.db, self.planner, self.registry, self.agent_executor_factory = db, planner, registry, agent_executor_factory
         # P3.1 verification seam: explicit verifier only, default=None (fail-closed)
         # No auto-verify, no implicit accept-all, no compatibility flag
         self.workflow_verifier = workflow_verifier
+        self.execution_control = execution_control
         # If no explicit tool_contract provided, build one from default_capabilities()
         # (NOT from ToolRegistry — that would be reverse synthesis)
         if tool_contract is None and capability_registry is None:
@@ -502,7 +503,7 @@ class PlanExecutionService:
                 transition_step(step, PlanStepStatus.RUNNING, "dispatch", events, plan_id=plan.id)
                 self._emit(EventType.PLAN_STEP_STARTED, {"plan_id": plan.id, "step_id": step.id, "task_id": task.id})
                 plans.update(plan)
-                orch = RecoveringOrchestrator(self.db, executor_factory=lambda s=step,p=plan: self._step_executor(p,s,execution_context), executor_type="TaskGraphAgentExecutor" if self.agent_executor_factory else "ToolRegistryExecutor", provider="native-kernel" if self.agent_executor_factory else "tool-registry", model="provider-adapter" if self.agent_executor_factory else "deterministic", harness_version=HARNESS_VERSION, dataset_version="PLANNING-V0.1", experiment_id=experiment_id)
+                orch = RecoveringOrchestrator(self.db, executor_factory=lambda s=step,p=plan: self._step_executor(p,s,execution_context), executor_type="TaskGraphAgentExecutor" if self.agent_executor_factory else "ToolRegistryExecutor", provider="native-kernel" if self.agent_executor_factory else "tool-registry", model="provider-adapter" if self.agent_executor_factory else "deterministic", harness_version=HARNESS_VERSION, dataset_version="PLANNING-V0.1", experiment_id=experiment_id, execution_control=self.execution_control)
                 run = await orch.execute_task(task.id)
                 if run.status.value != "COMPLETED":
                     transition_step(step, PlanStepStatus.FAILED, "run_failed", events, plan_id=plan.id)
@@ -789,7 +790,7 @@ class PlanExecutionService:
                 task=Task(project_id=goal.project_id,title=step.title,objective=step.objective,constraints=goal.constraints,acceptance_criteria=step.success_criteria,max_attempts=1 if context.get("official_benchmark_recovery") else 2,timeout_seconds=float(context.get("timeout_seconds", 60.0))); tasks.create(task); step.task_id=task.id
                 self._emit(EventType.PLAN_STEP_STARTED,{"plan_id":plan.id,"step_id":step.id,"task_id":task.id})
                 plans.update(plan)
-                orch=RecoveringOrchestrator(self.db,executor_factory=lambda s=step,p=plan: self._step_executor(p,s,step.execution_context),executor_type="TaskGraphAgentExecutor" if self.agent_executor_factory else "ToolRegistryExecutor",provider="native-kernel" if self.agent_executor_factory else "tool-registry",model="provider-adapter" if self.agent_executor_factory else "deterministic",harness_version=HARNESS_VERSION,dataset_version="PLANNING-V0.1",experiment_id=experiment_id)
+                orch=RecoveringOrchestrator(self.db,executor_factory=lambda s=step,p=plan: self._step_executor(p,s,step.execution_context),executor_type="TaskGraphAgentExecutor" if self.agent_executor_factory else "ToolRegistryExecutor",provider="native-kernel" if self.agent_executor_factory else "tool-registry",model="provider-adapter" if self.agent_executor_factory else "deterministic",harness_version=HARNESS_VERSION,dataset_version="PLANNING-V0.1",experiment_id=experiment_id,execution_control=self.execution_control)
                 run=await orch.execute_task(task.id)
                 if not self._finalize_inline_repair_lineage(step, plan, run):
                     plan.status = PlanStatus.FAILED

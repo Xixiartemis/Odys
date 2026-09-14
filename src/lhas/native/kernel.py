@@ -10,6 +10,12 @@ from typing import Any
 
 from lhas.agent.models import AgentRequest, AgentResult, AgentStatus
 from lhas.domain.enums import EventType
+from lhas.execution_control import (
+    ExecutionControlError,
+    ExecutionControlToken,
+    ExecutionLayerTimeout,
+    await_with_control,
+)
 from lhas.native.completion import CompletionAuthority
 from lhas.native.context import NativeContextAssembler
 from lhas.native.delegation import DurableDeliveryService
@@ -76,6 +82,7 @@ class NativeAgentKernel:
         self.runtime_target_controller = runtime_target_controller
         self.provider_health = provider_health or ProviderHealthRepository(db)
         self.provider_factory = provider_factory
+        self._controls: dict[str, ExecutionControlToken] = {}
 
     def switch_runtime_target(self, new_target: RuntimeTarget, *, expected_current: RuntimeTarget,
                               runtime_id: str | None = None, reason: str = "explicit provider migration"):
@@ -107,9 +114,21 @@ class NativeAgentKernel:
             self._save(active)
         return switch
 
-    async def run(self, request: AgentRequest) -> AgentResult:
+    async def run(
+        self,
+        request: AgentRequest,
+        *,
+        execution_control: ExecutionControlToken | None = None,
+    ) -> AgentResult:
         task_id, run_id, attempt_id = self._ids(request)
         self._states[request.agent_id] = AgentStatus.RUNNING
+        control = execution_control or self._controls.get(request.agent_id)
+        if control is None:
+            control = ExecutionControlToken(run_id, attempt_id=attempt_id)
+        self._controls[request.agent_id] = control
+        binder = getattr(self.provider, "bind_execution_control", None)
+        if callable(binder):
+            binder(control)
         snapshot = self.snapshots.get_for_attempt(attempt_id)
         if snapshot is None:
             snapshot = self._new_snapshot(request, task_id, run_id, attempt_id)
@@ -117,6 +136,11 @@ class NativeAgentKernel:
         self._ensure_runtime_target(request, snapshot)
         self._active_snapshot = snapshot
         self.dispatcher.restore_observer(snapshot.repeated_failure_state)
+
+        try:
+            control.check()
+        except ExecutionControlError as exc:
+            return self._control_terminated(request, snapshot, exc)
 
         pending = await self.completion.resume_pending(attempt_id)
         if pending and pending.status is CandidateStatus.ACCEPTED:
@@ -161,6 +185,10 @@ class NativeAgentKernel:
             self._save(snapshot)
 
         while snapshot.model_turn_count < request.budget.max_turns:
+            try:
+                control.check()
+            except ExecutionControlError as exc:
+                return self._control_terminated(request, snapshot, exc)
             self._consume_deliveries(snapshot)
             if snapshot.tool_call_count >= request.budget.max_tool_calls:
                 return self._budget_exhausted(request, snapshot, "TOOL_CALL_BUDGET")
@@ -200,11 +228,23 @@ class NativeAgentKernel:
             self.events.append(EventType.NATIVE_MODEL_TURN_STARTED, task_id=task_id, run_id=run_id, attempt_id=attempt_id, payload={"turn": next_turn, "model_turn_ordinal": next_turn, "provider": getattr(self.provider, "name", type(self.provider).__name__), **target_payload, "context_chars": context.chars_used, "context_budget": context.budget_chars})
             started = time.monotonic()
             try:
-                raw = await self.provider.generate(
-                    context=context,
-                    tools=self.dispatcher.tool_schemas(),
-                    timeout_seconds=self.provider_timeout_seconds,
+                raw = await await_with_control(
+                    self.provider.generate(
+                        context=context,
+                        tools=self.dispatcher.tool_schemas(),
+                        timeout_seconds=self.provider_timeout_seconds,
+                    ),
+                    control=control,
+                    local_ceiling=self.provider_timeout_seconds,
+                    timeout_failure_type="PROVIDER_TIMEOUT",
+                    source="provider",
                 )
+            except ExecutionControlError as exc:
+                if isinstance(exc, ExecutionLayerTimeout):
+                    category = ProviderFailureCategory.PROVIDER_TIMEOUT
+                    self._record_model_response_rejected(task_id, run_id, attempt_id, next_turn, category, str(exc), stage="PROVIDER_GENERATE")
+                    return self._provider_failure(request, snapshot, category, next_turn, str(exc))
+                return self._control_terminated(request, snapshot, exc)
             except asyncio.TimeoutError as exc:
                 category = ProviderFailureCategory.PROVIDER_TIMEOUT
                 self._record_model_response_rejected(task_id, run_id, attempt_id, next_turn, category, str(exc), stage="PROVIDER_GENERATE")
@@ -214,6 +254,10 @@ class NativeAgentKernel:
                 self._record_model_response_rejected(task_id, run_id, attempt_id, next_turn, category, str(exc), stage="PROVIDER_GENERATE")
                 return self._provider_failure(request, snapshot, category, next_turn, str(exc))
             duration_ms = int((time.monotonic() - started) * 1000)
+            try:
+                control.check()
+            except ExecutionControlError as exc:
+                return self._control_terminated(request, snapshot, exc)
             self.events.append(
                 EventType.MODEL_RESPONSE_RECEIVED,
                 task_id=task_id,
@@ -273,8 +317,24 @@ class NativeAgentKernel:
                 snapshot.phase = NativePhase.WAITING_TOOL
                 self._save(snapshot)
                 for call in response.tool_calls:
+                    try:
+                        control.check()
+                    except ExecutionControlError as exc:
+                        return self._control_terminated(request, snapshot, exc)
                     previous_verification = dict(snapshot.verification_state)
-                    observation = await self.dispatcher.dispatch(call, request, snapshot)
+                    try:
+                        observation = await await_with_control(
+                            self.dispatcher.dispatch(
+                                call,
+                                request,
+                                snapshot,
+                                execution_control=control,
+                            ),
+                            control=control,
+                            source="tool",
+                        )
+                    except ExecutionControlError as exc:
+                        return self._control_terminated(request, snapshot, exc)
                     snapshot.tool_call_count += 1
                     snapshot.recent_tool_outcomes.append(observation)
                     snapshot.repeated_failure_state = self.dispatcher.observer_state()
@@ -297,6 +357,10 @@ class NativeAgentKernel:
                             "capability": observation.get("capability"),
                         }
                     self._save(snapshot)
+                    try:
+                        control.check()
+                    except ExecutionControlError as exc:
+                        return self._control_terminated(request, snapshot, exc)
                 snapshot.phase = NativePhase.CONTINUE
                 self._save(snapshot)
                 continue
@@ -304,7 +368,14 @@ class NativeAgentKernel:
             if response.completion_claim:
                 snapshot.phase = NativePhase.CANDIDATE_COMPLETE
                 self._save(snapshot)
-                candidate = await self.completion.evaluate_claim(snapshot, response.content, source="MODEL_CLAIM")
+                try:
+                    candidate = await await_with_control(
+                        self.completion.evaluate_claim(snapshot, response.content, source="MODEL_CLAIM"),
+                        control=control,
+                        source="validation",
+                    )
+                except ExecutionControlError as exc:
+                    return self._control_terminated(request, snapshot, exc)
                 snapshot.completion_candidate_id = candidate.id
                 if candidate.status is CandidateStatus.ACCEPTED:
                     snapshot.phase = NativePhase.ACCEPTED_COMPLETE
@@ -332,10 +403,51 @@ class NativeAgentKernel:
         return self._budget_exhausted(request, snapshot, "TURN_BUDGET")
 
     async def cancel(self, agent_id: str) -> None:
+        control = self._controls.get(agent_id)
+        if control is not None:
+            control.cancel("USER_CANCEL", source="kernel.cancel")
         self._states[agent_id] = AgentStatus.CANCELLED
 
     async def status(self, agent_id: str) -> dict[str, Any]:
         return {"agent_id": agent_id, "status": self._states.get(agent_id, AgentStatus.PENDING).value, "kernel": self.name}
+
+    def _control_terminated(
+        self,
+        request: AgentRequest,
+        snapshot: ExecutionSnapshot,
+        error: ExecutionControlError,
+    ) -> AgentResult:
+        """Persist one terminal control boundary and reject late work."""
+        evidence = error.evidence()
+        snapshot.phase = NativePhase.FAILED
+        snapshot.current_failure = evidence
+        self._save(snapshot)
+        event_type = (
+            EventType.EXECUTION_DEADLINE_EXCEEDED
+            if error.failure_type == "ROOT_DEADLINE_EXCEEDED"
+            else EventType.EXECUTION_CANCELLED
+        )
+        self.events.append(
+            event_type,
+            task_id=snapshot.task_id,
+            run_id=snapshot.run_id,
+            attempt_id=snapshot.attempt_id,
+            payload=evidence,
+        )
+        self._states[request.agent_id] = AgentStatus.CANCELLED
+        return AgentResult(
+            status=AgentStatus.CANCELLED,
+            completion_claim=False,
+            turn_count=snapshot.model_turn_count,
+            tool_call_count=snapshot.tool_call_count,
+            safe_trace=snapshot.recent_tool_outcomes[-100:],
+            artifacts={
+                "execution_snapshot_id": snapshot.id,
+                "execution_control": evidence,
+            },
+            error_type=error.failure_type,
+            error_message=error.reason[:512],
+        )
 
     @staticmethod
     def _ids(request: AgentRequest) -> tuple[str, str, str]:
