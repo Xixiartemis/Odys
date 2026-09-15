@@ -9,6 +9,7 @@ from lhas.native.models import ProviderResponse, ProviderToolCall
 from lhas.native.persistence import CompletionCandidateRepository, ExecutionSnapshotRepository, ReplanSignalRepository
 from lhas.native.provider import ScriptedProviderAdapter
 from lhas.native.tools import NativeToolDispatcher
+from lhas.persistence.event_store import EventStore
 from lhas.persistence.repositories import AttemptRepository, RunRepository
 from lhas.planning.models import CapabilitySpec
 from lhas.tools.protocol import ToolResult, ToolResultStatus
@@ -149,6 +150,58 @@ def test_native_malformed_provider_response_fails_closed(db, make_task):
     assert result.status is AgentStatus.FAILED
     assert result.error_type == "PROVIDER_MALFORMED_RESPONSE"
     assert CompletionCandidateRepository(db).list_for_attempt(case[2].id) == []
+
+
+def test_native_non_json_model_output_is_bounded_typed_failure(db, make_task):
+    case = _kernel_case(db, make_task, ["not-json", ProviderResponse(content="done", completion_claim=True)])
+
+    result = asyncio.run(case[4].run(case[5]))
+    events = [event for event in EventStore(db).list_for_attempt(case[2].id)]
+    received = next(event for event in events if event.event_type.value == "MODEL_RESPONSE_RECEIVED")
+    rejected = next(event for event in events if event.event_type.value == "MODEL_RESPONSE_REJECTED")
+
+    assert result.status is AgentStatus.FAILED
+    assert result.error_type == "PROVIDER_MALFORMED_RESPONSE"
+    assert len(case[3].calls) == 1
+    assert received.payload["transport_status"] == "SUCCESS"
+    assert rejected.payload["failure_stage"] == "MODEL_OUTPUT_PARSE"
+    assert rejected.payload["raw_value_type"] == "str"
+    assert "not-json" not in json.dumps(rejected.payload)
+
+
+def test_native_malformed_tool_arguments_do_not_escape_parser_or_retry(db, make_task):
+    tool = EchoTool()
+    malformed = {
+        "choices": [{
+            "message": {
+                "content": "",
+                "tool_calls": [{
+                    "id": "malformed-call",
+                    "type": "function",
+                    "function": {"name": "test.echo", "arguments": "not-json"},
+                }],
+            }
+        }],
+    }
+    case = _kernel_case(
+        db,
+        make_task,
+        [malformed, ProviderResponse(content="would be a hidden retry", completion_claim=True)],
+        tool=tool,
+    )
+
+    result = asyncio.run(case[4].run(case[5]))
+    events = [event for event in EventStore(db).list_for_attempt(case[2].id)]
+    rejected = next(event for event in events if event.event_type.value == "MODEL_RESPONSE_REJECTED")
+
+    assert result.status is AgentStatus.FAILED
+    assert result.error_type == "PROVIDER_MALFORMED_RESPONSE"
+    assert len(case[3].calls) == 1
+    assert tool.calls == []
+    assert rejected.payload["failure_stage"] == "MODEL_OUTPUT_PARSE"
+    assert rejected.payload["raw_value_type"] == "str"
+    assert rejected.payload["raw_value_length"] == len("not-json")
+    assert rejected.payload["raw_value_sha256"]
 
 
 def test_native_provider_timeout_is_structured_failure(db, make_task):

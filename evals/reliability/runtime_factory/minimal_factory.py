@@ -15,6 +15,8 @@ which ODYS improvements are measured.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import time
 from typing import Any
 
@@ -22,6 +24,40 @@ from lhas.execution_control import ExecutionControlError, ExecutionControlToken,
 from evals.reliability.run_phase4 import NOT_MEASURED, ExecutionOutcome
 from evals.reliability.runtime_factory.base import RuntimeFactory
 from evals.reliability.runtime_factory.protocol import BenchmarkRuntime
+from lhas.native.parser import ModelResponseError
+
+
+def _parse_failure_evidence(value: Any, error: BaseException) -> dict[str, Any]:
+    """Project bounded parser evidence without persisting model text."""
+    raw_type = getattr(error, "raw_value_type", None) or type(value).__name__
+    raw_length = getattr(error, "raw_value_length", None)
+    raw_hash = getattr(error, "raw_value_sha256", None)
+    if raw_length is None or raw_hash is None:
+        try:
+            encoded = json.dumps(
+                value,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                default=str,
+            ).encode("utf-8")
+        except (TypeError, ValueError):
+            encoded = str(value).encode("utf-8", "replace")
+        raw_length = len(encoded)
+        raw_hash = hashlib.sha256(encoded).hexdigest()
+    finish_reason = None
+    if isinstance(value, dict):
+        choices = value.get("choices")
+        if isinstance(choices, list) and choices and isinstance(choices[0], dict):
+            finish_reason = choices[0].get("finish_reason")
+    return {
+        "parser": "ModelResponseParser",
+        "parser_version": "native-v1",
+        "raw_value_type": raw_type,
+        "raw_value_length": int(raw_length),
+        "raw_value_sha256": str(raw_hash),
+        "finish_reason": finish_reason,
+    }
 
 
 class _MinimalRuntime:
@@ -62,6 +98,7 @@ class _MinimalRuntime:
             if callable(binder):
                 binder(control)
 
+        raw: Any = None
         try:
             # Build a minimal agent request
             from lhas.agent.models import AgentBudget, AgentRequest, AgentRole
@@ -164,6 +201,28 @@ class _MinimalRuntime:
         except Exception as exc:
             elapsed = time.monotonic() - started
             from evals.reliability.attempt_boundary import AttemptTerminalFailure
+
+            if isinstance(exc, (ModelResponseError, json.JSONDecodeError)):
+                parse_evidence = _parse_failure_evidence(raw, exc)
+                return ExecutionOutcome(
+                    claimed_complete=False,
+                    observed_state={
+                        "error_type": "PROVIDER_MALFORMED_RESPONSE",
+                        "model_output_parse_failure": True,
+                        "model_output_parse_evidence": parse_evidence,
+                        "features_active": {},
+                    },
+                    failure_type="MALFORMED_PROVIDER_RESPONSE",
+                    recovery_required=False,
+                    recovery_attempted=False,
+                    recovery_success=False,
+                    repair_scope=None,
+                    tool_calls=0,
+                    model_calls=1,
+                    attempt_count=1,
+                    wall_time_seconds=round(elapsed, 6),
+                    infrastructure_failure=False,
+                )
 
             if isinstance(exc, ExecutionControlError):
                 return ExecutionOutcome(

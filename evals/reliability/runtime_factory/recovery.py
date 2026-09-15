@@ -580,15 +580,29 @@ class OfficialOdysRecoveryCoordinator:
             "REPLAN_REJECTED": "REPLAN_REJECTED",
             "NATIVE_TOOL_REQUESTED": "TOOL_CALL_REQUESTED",
             "NATIVE_TOOL_OBSERVED": "TOOL_CALL_OBSERVED",
+            "MODEL_RESPONSE_RECEIVED": "PROVIDER_RESPONSE_SUCCESS",
+            "MODEL_RESPONSE_PARSED": "MODEL_OUTPUT_PARSE_SUCCEEDED",
+            "MODEL_RESPONSE_REJECTED": "MODEL_OUTPUT_PARSE_FAILED",
         }
         output: list[dict[str, Any]] = []
         for event in events.list_all():
-            if event.id in before_ids or event.event_type.value not in mapped:
+            event_value = event.event_type.value
+            if event.id in before_ids or event_value not in mapped:
                 continue
             payload = dict(event.payload or {})
-            event_type = mapped[event.event_type.value]
-            if event_type in {"TOOL_CALL_REQUESTED", "TOOL_CALL_OBSERVED"}:
+            event_type = mapped[event_value]
+            if event_type in {
+                "TOOL_CALL_REQUESTED",
+                "TOOL_CALL_OBSERVED",
+                "PROVIDER_RESPONSE_SUCCESS",
+                "MODEL_OUTPUT_PARSE_SUCCEEDED",
+                "MODEL_OUTPUT_PARSE_FAILED",
+            }:
                 if str(event.attempt_id or "") != str(repair_attempt_id):
+                    continue
+                if event_type == "MODEL_OUTPUT_PARSE_FAILED" and payload.get(
+                    "failure_stage"
+                ) != "MODEL_OUTPUT_PARSE":
                     continue
             elif payload.get("plan_id") != plan_id:
                 continue

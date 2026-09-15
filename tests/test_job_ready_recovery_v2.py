@@ -85,6 +85,37 @@ def _repair_response() -> dict:
     return _response(content="Repairing the state document.", tool_calls=[{"id": "job-ready-repair-call", "type": "function", "function": {"name": "workspace.edit", "arguments": json.dumps({"path": "state.json", "content": TARGET_CONTENT})}}])
 
 
+def _malformed_repair_response() -> dict:
+    return _response(
+        content="Repairing the state document.",
+        tool_calls=[
+            {
+                "id": "job-ready-malformed-repair-call",
+                "type": "function",
+                "function": {"name": "workspace.edit", "arguments": "not-json"},
+            }
+        ],
+    )
+
+
+def _invalid_state_repair_response() -> dict:
+    return _response(
+        content="Writing the repaired state.",
+        tool_calls=[
+            {
+                "id": "job-ready-invalid-state-call",
+                "type": "function",
+                "function": {
+                    "name": "workspace.edit",
+                    "arguments": json.dumps(
+                        {"path": "state.json", "content": "not-json"}
+                    ),
+                },
+            }
+        ],
+    )
+
+
 def _provider(responses):
     client = _FakeClient(responses)
     provider = RealLLMProvider(model=CHEAP_MODEL, api_key="offline-job-ready-v2-test-secret", base_url=FROZEN_ENDPOINT, provider_id=FROZEN_PROVIDER, client=client, expected_model=CHEAP_MODEL)
@@ -217,6 +248,64 @@ def test_v2_repeat_two_recovery_handoff_is_not_invalid(tmp_path):
         if event["event_type"] == "StepFailureProvenance"
     )
     assert provenance["attempt_id"] in initial_attempt_ids
+
+
+def test_v2_malformed_repair_output_is_validated_failure_not_invalid(tmp_path):
+    snapshot = load_snapshot()
+    counts, raw, trace, output, provider = _run(
+        tmp_path,
+        snapshot,
+        "odys_p3",
+        [_initial_tool_response(), _malformed_repair_response()],
+    )
+
+    assert counts == {"valid": 1, "invalid": 0}
+    assert raw["validity"] == "VALIDATED_FAIL"
+    assert raw["verified_completion"] is False
+    assert raw["recovery_attempted"] is True
+    assert raw["runtime_environment"]["execution_accounting"]["provider_calls"] == 2
+    assert len(provider.call_records) == 2
+    assert not (output / "invalid.jsonl").exists() or not (output / "invalid.jsonl").read_text().strip()
+
+    events = trace["execution_trace"]
+    types = [event["event_type"] for event in events]
+    assert "PROVIDER_RESPONSE_SUCCESS" in types
+    assert "MODEL_OUTPUT_PARSE_FAILED" in types
+    parse_failure = next(
+        event for event in events if event["event_type"] == "MODEL_OUTPUT_PARSE_FAILED"
+    )
+    assert parse_failure["metadata"]["failure_stage"] == "MODEL_OUTPUT_PARSE"
+    assert parse_failure["metadata"]["raw_value_type"] == "str"
+    assert "not-json" not in json.dumps(parse_failure)
+
+
+def test_v2_invalid_external_state_is_validated_failure_not_invalid(tmp_path):
+    snapshot = load_snapshot()
+    counts, raw, trace, output, provider = _run(
+        tmp_path,
+        snapshot,
+        "odys_p3",
+        [
+            _initial_tool_response(),
+            _invalid_state_repair_response(),
+            _response(content="The state was repaired."),
+        ],
+    )
+
+    assert counts == {"valid": 1, "invalid": 0}
+    assert raw["validity"] == "VALIDATED_FAIL"
+    assert raw["verified_completion"] is False
+    assert raw["runtime_environment"]["recovery"]["recovery_attempted"] is True
+    assert len(provider.call_records) == 3
+    assert not (output / "invalid.jsonl").exists() or not (output / "invalid.jsonl").read_text().strip()
+
+    events = trace["execution_trace"]
+    parse_failure = next(
+        event for event in events if event["event_type"] == "EXTERNAL_STATE_PARSE_FAILED"
+    )
+    assert parse_failure["metadata"]["phase"] == "recovery"
+    assert parse_failure["metadata"]["error_type"] == "JSONDecodeError"
+    assert raw["runtime_environment"]["recovery"]["recovery_success"] is False
 
 
 def test_v2_protocol_and_selection_are_versioned():

@@ -22,9 +22,11 @@ variables:
 """
 from __future__ import annotations
 
+import json
 import logging
 import shutil
 import tempfile
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -163,6 +165,39 @@ def _filter_tool_events(trace: list[dict[str, Any]]) -> list[dict[str, Any]]:
     ]
 
 
+def _observation_parse_metadata(
+    exc: json.JSONDecodeError,
+    *,
+    phase: str,
+) -> dict[str, Any]:
+    """Return bounded external-state parse evidence without raw file content."""
+    return {
+        "phase": phase,
+        "error_type": type(exc).__name__,
+        "line": int(exc.lineno),
+        "column": int(exc.colno),
+        "position": int(exc.pos),
+    }
+
+
+def _mark_observation_parse_failure(
+    outcome: ExecutionOutcome,
+    exc: json.JSONDecodeError,
+    *,
+    phase: str,
+) -> dict[str, Any]:
+    """Classify model-written invalid external state as a task failure."""
+    evidence = _observation_parse_metadata(exc, phase=phase)
+    outcome.observed_state = dict(outcome.observed_state or {})
+    outcome.observed_state["fixture_observation_parse_failed"] = True
+    outcome.observed_state["fixture_observation_error"] = evidence
+    # The model/tool mutated the observed workspace into an invalid state;
+    # this is an executable task failure, not infrastructure corruption.
+    outcome.failure_type = "TOOL_ERROR"
+    outcome.infrastructure_failure = False
+    return evidence
+
+
 _CONTROLLED_FAILURES: dict[str, frozenset[str]] = {
     "JOB_READY_ATTEMPT_TERMINAL_FAILURE": frozenset(
         {"TOOL_ERROR", "ATTEMPT_TERMINAL"}
@@ -201,6 +236,16 @@ def _is_infrastructure_failure(outcome: ExecutionOutcome, fault_id: str | None) 
         return True
     failure_type = str(outcome.failure_type or "").upper()
     if not failure_type:
+        return False
+    if (
+        failure_type in {"MALFORMED_PROVIDER_RESPONSE", "PROVIDER_MALFORMED_RESPONSE"}
+        and bool(
+            isinstance(outcome.observed_state, Mapping)
+            and outcome.observed_state.get("model_output_parse_failure")
+        )
+    ):
+        # Transport succeeded; the model action could not be parsed. This is
+        # a bounded agent/model failure, independent of the task's fault ID.
         return False
     if failure_type.startswith(("MINIMAL_ERROR:", "ODYS_ERROR:", "EXECUTOR_ERROR:")):
         return True
@@ -583,6 +628,31 @@ class P45BenchmarkExecutor:
                     )
                 )
 
+            if outcome.observed_state.get("model_output_parse_failure"):
+                parse_evidence = dict(
+                    outcome.observed_state.get("model_output_parse_evidence") or {}
+                )
+                trace.append(
+                    _trace_event(
+                        "PROVIDER_RESPONSE_SUCCESS",
+                        task_id,
+                        attempt_id,
+                        status="received",
+                        transport_status="SUCCESS",
+                        **parse_evidence,
+                    )
+                )
+                trace.append(
+                    _trace_event(
+                        "MODEL_OUTPUT_PARSE_FAILED",
+                        task_id,
+                        attempt_id,
+                        status="failed",
+                        failure_stage="MODEL_OUTPUT_PARSE",
+                        **parse_evidence,
+                    )
+                )
+
             # ---- EXECUTION_COMPLETE ----
             trace.append(_trace_event("EXECUTION_COMPLETE", task_id, attempt_id,
                                       claimed_complete=outcome.claimed_complete,
@@ -615,6 +685,30 @@ class P45BenchmarkExecutor:
                     # ---- FIXTURE_OBSERVATIONS ----
                     trace.append(_trace_event("FIXTURE_OBSERVATIONS", task_id, attempt_id,
                                               observation_keys=list(observed.keys()) if isinstance(observed, dict) else []))
+                except json.JSONDecodeError as exc:
+                    evidence = _mark_observation_parse_failure(
+                        outcome,
+                        exc,
+                        phase="initial",
+                    )
+                    trace.append(
+                        _trace_event(
+                            "EXTERNAL_STATE_PARSE_FAILED",
+                            task_id,
+                            attempt_id,
+                            status="failed",
+                            **evidence,
+                        )
+                    )
+                    trace.append(
+                        _trace_event(
+                            "FIXTURE_OBSERVATIONS",
+                            task_id,
+                            attempt_id,
+                            observation_keys=[],
+                            note="invalid_external_state",
+                        )
+                    )
                 except KeyError:
                     trace.append(_trace_event("FIXTURE_OBSERVATIONS", task_id, attempt_id,
                                               observation_keys=[], note="no fixture"))
@@ -742,9 +836,29 @@ class P45BenchmarkExecutor:
             control.check()
             if workspace_dir is not None and self._fixture_registry is not None:
                 fixture = self._fixture_registry.get(request.task["task_id"])
-                observed = fixture.observe(workspace_dir)
-                repaired.observed_state.update(observed)
-                repaired.observed_state["fixture_observations"] = observed
+                try:
+                    observed = fixture.observe(workspace_dir)
+                    repaired.observed_state.update(observed)
+                    repaired.observed_state["fixture_observations"] = observed
+                except json.JSONDecodeError as exc:
+                    evidence = _mark_observation_parse_failure(
+                        repaired,
+                        exc,
+                        phase="recovery",
+                    )
+                    repaired.observed_state["fixture_observations"] = {}
+                    recovery_trace = list(repaired.execution_trace or [])
+                    recovery_trace.append(
+                        _trace_event(
+                            "EXTERNAL_STATE_PARSE_FAILED",
+                            request.task["task_id"],
+                            str(repaired.repair_attempt_id or "recovery"),
+                            status="failed",
+                            **evidence,
+                        )
+                    )
+                    repaired.execution_trace = recovery_trace
+                    repaired.observed_state["execution_trace"] = recovery_trace
             return repaired
         except ExecutionControlError as exc:
             self._attach_provider_accounting(outcome, request.run_id)

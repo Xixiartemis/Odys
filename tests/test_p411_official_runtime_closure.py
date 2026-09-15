@@ -49,6 +49,16 @@ class _FailingCompletions:
         raise RuntimeError("upstream opaque failure")
 
 
+class _MalformedCompletions:
+    async def create(self, **_kwargs):
+        return {
+            "id": "p411-malformed-response",
+            "model": CHEAP_MODEL,
+            "choices": [],
+            "usage": {"prompt_tokens": 2, "completion_tokens": 1, "total_tokens": 3},
+        }
+
+
 class _Client:
     def __init__(self, completions=None):
         self.base_url = FROZEN_ENDPOINT
@@ -191,6 +201,44 @@ def test_unexpected_odys_provider_failure_is_infrastructure_invalid(tmp_path):
     assert accounting["provider_call_reservations"] == 1
     assert accounting["provider_call_records"][0]["status"] == "FAILURE"
     assert accounting["provider_call_records"][0]["total_tokens"] == "NOT_MEASURED"
+
+
+def test_malformed_model_output_is_validated_failure_with_parse_trace(tmp_path):
+    snapshot = ProtocolSnapshot.load(PROTOCOL_ROOT)
+    runner = Phase4Runner(
+        snapshot,
+        output_dir=tmp_path,
+        executor=_executor(provider=_provider(completions=_MalformedCompletions())),
+        model=CHEAP_MODEL,
+        provider=FROZEN_PROVIDER,
+        repo_root=ROOT,
+        trace_path=tmp_path / "traces.jsonl",
+        require_trace=True,
+    )
+    run = select_runs(snapshot, task_id="PTF-04", config_name="minimal", repeat_index=1)
+
+    assert asyncio.run(runner.run(run)) == {"valid": 1, "invalid": 0}
+    raw = json.loads((tmp_path / "raw.jsonl").read_text().splitlines()[0])
+    trace = json.loads((tmp_path / "traces.jsonl").read_text().splitlines()[0])
+    events = trace["execution_trace"]
+    parse_failure = next(
+        event for event in events if event["event_type"] == "MODEL_OUTPUT_PARSE_FAILED"
+    )
+
+    assert raw["validity"] == "VALIDATED_FAIL"
+    assert raw["verified_completion"] is False
+    assert raw["runtime_environment"]["execution_accounting"]["provider_calls"] == 1
+    assert raw["runtime_environment"]["execution_accounting"]["model_calls"] == 1
+    accounting = raw["runtime_environment"]["execution_accounting"]
+    assert accounting["provider_call_reservations"] == 1
+    assert accounting["provider_call_records"][0]["status"] == "SUCCESS"
+    assert accounting["tokens_input"] == 2
+    assert accounting["tokens_output"] == 1
+    assert accounting["total_tokens"] == 3
+    assert "PROVIDER_RESPONSE_SUCCESS" in [event["event_type"] for event in events]
+    assert parse_failure["metadata"]["failure_stage"] == "MODEL_OUTPUT_PARSE"
+    assert parse_failure["metadata"]["raw_value_type"] == "dict"
+    assert not (tmp_path / "invalid.jsonl").exists() or not (tmp_path / "invalid.jsonl").read_text().strip()
 
 
 def test_official_odys_recovery_uses_canonical_attempt_lineage(tmp_path):

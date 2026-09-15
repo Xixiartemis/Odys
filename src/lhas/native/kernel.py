@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import re
 import time
 from typing import Any
@@ -263,20 +264,48 @@ class NativeAgentKernel:
                 task_id=task_id,
                 run_id=run_id,
                 attempt_id=attempt_id,
-                payload=self._response_shape(raw, turn=next_turn),
+                payload={
+                    **self._response_shape(raw, turn=next_turn),
+                    "transport_status": "SUCCESS",
+                },
             )
             try:
                 response = self.parser.parse(raw)
-            except ModelResponseError as exc:
+            except (ModelResponseError, json.JSONDecodeError) as exc:
+                parse_evidence = self._parse_failure_evidence(raw, exc)
                 snapshot.model_turn_count = next_turn
                 snapshot.phase = NativePhase.FAILED
-                snapshot.current_failure = {"type": "PROVIDER_MALFORMED_RESPONSE", "failure_category": "MALFORMED_PROVIDER_RESPONSE", "category": str(exc)[:128]}
+                snapshot.current_failure = {
+                    "type": "MODEL_OUTPUT_PARSE_FAILED",
+                    "failure_category": "MALFORMED_PROVIDER_RESPONSE",
+                    "category": str(exc)[:128],
+                    **parse_evidence,
+                }
                 self._save(snapshot)
-                rejected = {"turn": next_turn, "error_type": "PROVIDER_MALFORMED_RESPONSE", "failure_code": "invalid_response", "category": str(exc)[:128]}
+                rejected = {
+                    "turn": next_turn,
+                    "error_type": "PROVIDER_MALFORMED_RESPONSE",
+                    "failure_code": "invalid_response",
+                    "failure_stage": "MODEL_OUTPUT_PARSE",
+                    "category": str(exc)[:128],
+                    **parse_evidence,
+                }
                 self.events.append(EventType.MODEL_RESPONSE_REJECTED, task_id=task_id, run_id=run_id, attempt_id=attempt_id, payload=rejected)
                 self.events.append(EventType.NATIVE_MODEL_RESPONSE_REJECTED, task_id=task_id, run_id=run_id, attempt_id=attempt_id, payload=rejected)
                 self._create_replan(snapshot, "PROVIDER_MALFORMED_RESPONSE", {"category": str(exc)[:128]})
-                return self._failed(request, snapshot, "PROVIDER_MALFORMED_RESPONSE", detail=str(exc))
+                failed = self._failed(
+                    request,
+                    snapshot,
+                    "PROVIDER_MALFORMED_RESPONSE",
+                    detail=str(exc),
+                )
+                failed.artifacts.update(
+                    {
+                        "model_output_parse_failure": True,
+                        "model_output_parse_evidence": parse_evidence,
+                    }
+                )
+                return failed
 
             self.events.append(
                 EventType.MODEL_RESPONSE_PARSED,
@@ -622,6 +651,39 @@ class NativeAgentKernel:
                 except Exception:
                     keys = []
         return {"turn": turn, "response_python_type": type(value).__name__, "dict_keys": keys}
+
+    @staticmethod
+    def _parse_failure_evidence(value: Any, error: BaseException) -> dict[str, Any]:
+        """Project bounded parser evidence without persisting model text."""
+        raw_type = getattr(error, "raw_value_type", None) or type(value).__name__
+        raw_length = getattr(error, "raw_value_length", None)
+        raw_hash = getattr(error, "raw_value_sha256", None)
+        if raw_length is None or raw_hash is None:
+            try:
+                encoded = json.dumps(
+                    value,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    default=str,
+                ).encode("utf-8")
+            except (TypeError, ValueError):
+                encoded = str(value).encode("utf-8", "replace")
+            raw_length = len(encoded)
+            raw_hash = hashlib.sha256(encoded).hexdigest()
+        finish_reason = None
+        if isinstance(value, dict):
+            choices = value.get("choices")
+            if isinstance(choices, list) and choices and isinstance(choices[0], dict):
+                finish_reason = choices[0].get("finish_reason")
+        return {
+            "parser": "ModelResponseParser",
+            "parser_version": "native-v1",
+            "raw_value_type": raw_type,
+            "raw_value_length": int(raw_length),
+            "raw_value_sha256": str(raw_hash),
+            "finish_reason": finish_reason,
+        }
 
     def _record_model_response_rejected(
         self,

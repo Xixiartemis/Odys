@@ -182,6 +182,17 @@ class _OdysRuntime:
                 failure_type = "UNKNOWN_FAILURE"
 
             safe_trace = result.safe_trace or []
+            parse_failure = bool(
+                (result.artifacts or {}).get("model_output_parse_failure")
+            )
+            parse_evidence_value = (result.artifacts or {}).get(
+                "model_output_parse_evidence"
+            )
+            parse_evidence = (
+                dict(parse_evidence_value)
+                if isinstance(parse_evidence_value, dict)
+                else {}
+            )
             recovery_required = any(
                 isinstance(entry, dict) and entry.get("status") == "FAILURE"
                 for entry in safe_trace
@@ -209,6 +220,8 @@ class _OdysRuntime:
                         else None
                     ),
                     "budget_failure_type": budget_failure_type,
+                    "model_output_parse_failure": parse_failure,
+                    "model_output_parse_evidence": parse_evidence,
                     "features_active": {
                         "completion_authority": True,
                         "failure_provenance": True,
