@@ -185,6 +185,12 @@ def test_unexpected_odys_provider_failure_is_infrastructure_invalid(tmp_path):
     assert invalid["validity"] == "INVALID_RUN"
     assert "UNKNOWN_PROVIDER_FAILURE" in invalid["invalid_reason"]
     assert "upstream opaque failure" in invalid["invalid_reason"]
+    accounting = invalid["runtime_environment"]["execution_accounting"]
+    assert accounting["provider_calls"] == 1
+    assert accounting["model_calls"] == 1
+    assert accounting["provider_call_reservations"] == 1
+    assert accounting["provider_call_records"][0]["status"] == "FAILURE"
+    assert accounting["provider_call_records"][0]["total_tokens"] == "NOT_MEASURED"
 
 
 def test_official_odys_recovery_uses_canonical_attempt_lineage(tmp_path):

@@ -736,6 +736,37 @@ def _invalid_outcome(exc: BaseException) -> dict[str, Any]:
     return output
 
 
+def _execution_accounting(outcome: ExecutionOutcome) -> dict[str, Any]:
+    """Project only accounting observed by the execution adapter."""
+    return {
+        "provider_calls": int(outcome.provider_calls),
+        "model_calls": int(outcome.model_calls),
+        "root_attempt_count": int(outcome.root_attempt_count),
+        "nested_attempt_count": int(outcome.nested_attempt_count),
+        "provider_attempt_count": int(outcome.provider_attempt_count),
+        "provider_call_reservations": int(
+            outcome.provider_call_reservations or outcome.provider_calls
+        ),
+        "blocked_provider_calls": int(outcome.blocked_provider_calls),
+        "unrecorded_provider_reservations": int(
+            outcome.unrecorded_provider_reservations
+        ),
+        "root_timeout_seconds": outcome.root_timeout_seconds,
+        "provider_timeout_seconds": outcome.provider_timeout_seconds,
+        "budget_exhausted": bool(outcome.budget_exhausted),
+        "budget_failure_type": outcome.budget_failure_type,
+        "provider_call_records": [
+            dict(item) for item in outcome.provider_call_records
+        ],
+        "tool_invocations": [
+            dict(item) for item in outcome.tool_invocation_evidence
+        ],
+        "tokens_input": outcome.tokens_input,
+        "tokens_output": outcome.tokens_output,
+        "total_tokens": outcome.total_tokens,
+    }
+
+
 def _validate_runner_result(
     result: dict[str, Any],
     schema_path: Path,
@@ -1219,6 +1250,7 @@ class Phase4Runner:
         diagnostic_runtime_source: str | None = None
         diagnostic_validation: ValidationOutcome | None = None
         diagnostic_trace_status: str | None = None
+        outcome: ExecutionOutcome | None = None
         try:
             fixture = self.fixtures.prepare(spec.task)
             record: dict[str, Any] | None = None
@@ -1434,6 +1466,7 @@ class Phase4Runner:
                 execution_trace_ref=diagnostic_trace_ref,
                 trace_event_count=diagnostic_trace_event_count,
                 validation=diagnostic_validation,
+                outcome=outcome,
                 diagnostic_trace_status=diagnostic_trace_status,
             )
             _validate_runner_result(
@@ -1843,33 +1876,7 @@ class Phase4Runner:
             # Backwards-compatible alias for consumers of the P410 schema.
             "agent_claimed_complete": bool(outcome.claimed_complete),
         }
-        accounting = {
-            "provider_calls": int(outcome.provider_calls),
-            "model_calls": int(outcome.model_calls),
-            "root_attempt_count": int(outcome.root_attempt_count),
-            "nested_attempt_count": int(outcome.nested_attempt_count),
-            "provider_attempt_count": int(outcome.provider_attempt_count),
-            "provider_call_reservations": int(
-                outcome.provider_call_reservations or outcome.provider_calls
-            ),
-            "blocked_provider_calls": int(outcome.blocked_provider_calls),
-            "unrecorded_provider_reservations": int(
-                outcome.unrecorded_provider_reservations
-            ),
-            "root_timeout_seconds": outcome.root_timeout_seconds,
-            "provider_timeout_seconds": outcome.provider_timeout_seconds,
-            "budget_exhausted": bool(outcome.budget_exhausted),
-            "budget_failure_type": outcome.budget_failure_type,
-            "provider_call_records": [
-                dict(item) for item in outcome.provider_call_records
-            ],
-            "tool_invocations": [
-                dict(item) for item in outcome.tool_invocation_evidence
-            ],
-            "tokens_input": outcome.tokens_input,
-            "tokens_output": outcome.tokens_output,
-            "total_tokens": outcome.total_tokens,
-        }
+        accounting = _execution_accounting(outcome)
         state_evidence = {
             "expected_effect_ids": list(outcome.expected_effect_ids),
             "pre_repair_state_digest": outcome.pre_repair_state_digest,
@@ -1958,6 +1965,7 @@ class Phase4Runner:
         execution_trace_ref: str | None = None,
         trace_event_count: int | None = None,
         validation: ValidationOutcome | None = None,
+        outcome: ExecutionOutcome | None = None,
         diagnostic_trace_status: str | None = None,
     ) -> dict[str, Any]:
         validation_identity: dict[str, Any] = {
@@ -1975,6 +1983,18 @@ class Phase4Runner:
                     "acceptance_status": validation.acceptance_status,
                     "false_completion_detected": False,
                 }
+            )
+        if outcome is not None:
+            initial_claim = bool(
+                outcome.initial_claimed_complete
+                if outcome.initial_claimed_complete is not None
+                else outcome.claimed_complete
+            )
+            validation_identity["agent_claimed_complete"] = initial_claim
+            validation_identity["false_completion_detected"] = bool(
+                initial_claim
+                and validation is not None
+                and validation.acceptance_status == "REJECTED"
             )
         recovery_identity = {
             "recovery_required": False,
@@ -1998,6 +2018,9 @@ class Phase4Runner:
             trace_event_count=trace_event_count,
             validation=validation_identity,
             recovery=recovery_identity,
+            execution_accounting=_execution_accounting(
+                outcome if outcome is not None else ExecutionOutcome()
+            ),
         )
         if diagnostic_trace_status is not None:
             runtime_environment["diagnostic_trace_status"] = diagnostic_trace_status
@@ -2018,9 +2041,11 @@ class Phase4Runner:
             "validator_id": self.snapshot.protocol["shared_validator_id"],
             "fault_id": fault.fault_id,
             "fault_type": fault.fault_type,
-            "claimed_complete": False,
+            "claimed_complete": bool(outcome.claimed_complete) if outcome else False,
             "verified_completion": False,
-            "false_completion": False,
+            "false_completion": bool(
+                validation_identity["false_completion_detected"]
+            ),
             "failure_type": getattr(exc, "failure_type", None),
             "recovery_required": False,
             "recovery_attempted": False,
@@ -2030,16 +2055,16 @@ class Phase4Runner:
             "replan_count": 0,
             "lost_work_units": NOT_MEASURED,
             "duplicate_side_effect_count": 0,
-            "tool_calls": 0,
-            "model_calls": 0,
-            "attempt_count": 0,
-            "tokens_input": NOT_MEASURED,
-            "tokens_output": NOT_MEASURED,
-            "total_tokens": NOT_MEASURED,
-            "model_cost": NOT_MEASURED,
-            "tool_cost": NOT_MEASURED,
-            "wall_time_seconds": NOT_MEASURED,
-            "human_intervention": False,
+            "tool_calls": int(outcome.tool_calls) if outcome else 0,
+            "model_calls": int(outcome.model_calls) if outcome else 0,
+            "attempt_count": int(outcome.attempt_count) if outcome else 0,
+            "tokens_input": outcome.tokens_input if outcome else NOT_MEASURED,
+            "tokens_output": outcome.tokens_output if outcome else NOT_MEASURED,
+            "total_tokens": outcome.total_tokens if outcome else NOT_MEASURED,
+            "model_cost": outcome.model_cost if outcome else NOT_MEASURED,
+            "tool_cost": outcome.tool_cost if outcome else NOT_MEASURED,
+            "wall_time_seconds": outcome.wall_time_seconds if outcome else NOT_MEASURED,
+            "human_intervention": bool(outcome.human_intervention) if outcome else False,
             "validity": "INVALID_RUN",
             "invalid_reason": json.dumps(_invalid_outcome(exc), sort_keys=True),
             "started_at": _timestamp(started),

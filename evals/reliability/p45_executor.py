@@ -425,7 +425,6 @@ class P45BenchmarkExecutor:
                 },
                 failure_type="MISSING_FAULT_BINDING",
             )
-
         trace.append(_trace_event("FAULT_INJECTION_STARTED", task_id, attempt_id,
                                   fault_id=fault_id))
         control.check()
@@ -660,7 +659,7 @@ class P45BenchmarkExecutor:
                                       validator_execution_status="NOT_EXECUTED",
                                       acceptance_status="NOT_EVALUATED",
                                       failure_type=f"EXECUTOR_ERROR:{type(exc).__name__}"))
-            return ExecutionOutcome(
+            failure_outcome = ExecutionOutcome(
                 claimed_complete=False,
                 observed_state={
                     "error": f"{type(exc).__name__}: {str(exc)[:500]}",
@@ -672,6 +671,9 @@ class P45BenchmarkExecutor:
                 },
                 failure_type=f"EXECUTOR_ERROR:{type(exc).__name__}",
             )
+            if request.run_id in self._provider_call_offsets:
+                self._attach_provider_accounting(failure_outcome, request.run_id)
+            return failure_outcome
         # The fixture workspace must survive until the runner has performed
         # external validation and (for Odys) recovery.  Cleanup is performed
         # by ``cleanup`` after that boundary; resetting here would make the
@@ -719,6 +721,11 @@ class P45BenchmarkExecutor:
                 control=control,
                 source="recovery",
             )
+            # Keep the initial outcome current as well as the returned repair
+            # outcome.  If the caller fails while projecting the recovery
+            # result, invalid.jsonl can still report this run's real ledger
+            # slice instead of defaulting to zero.
+            self._attach_provider_accounting(outcome, request.run_id)
             if result is None:
                 return None
             repaired = ExecutionOutcome.from_value(result)
@@ -740,12 +747,16 @@ class P45BenchmarkExecutor:
                 repaired.observed_state["fixture_observations"] = observed
             return repaired
         except ExecutionControlError as exc:
+            self._attach_provider_accounting(outcome, request.run_id)
             outcome.failure_type = exc.failure_type
             outcome.recovery_required = False
             outcome.recovery_attempted = False
             outcome.recovery_success = False
             outcome.observed_state.setdefault("execution_control", exc.evidence())
             return None
+        except Exception:
+            self._attach_provider_accounting(outcome, request.run_id)
+            raise
         finally:
             self._active_runtimes.pop(request.run_id, None)
             self._reset_fixture(request)

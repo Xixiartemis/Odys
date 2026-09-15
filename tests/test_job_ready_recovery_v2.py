@@ -51,6 +51,28 @@ class _FakeClient:
         return self
 
 
+class _RecoveryCrashAfterProvider:
+    """Let the official recovery path spend calls, then crash at its caller."""
+
+    def __init__(self, inner):
+        self.inner = inner
+
+    async def execute(self, request):
+        return await self.inner.execute(request)
+
+    async def recover_after_validation(self, request, outcome, validation):
+        await self.inner.recover_after_validation(request, outcome, validation)
+        raise RuntimeError("synthetic recovery projection failure")
+
+    def cleanup(self, request):
+        return self.inner.cleanup(request)
+
+
+class _PreDispatchFailure:
+    async def execute(self, _request):
+        raise RuntimeError("synthetic pre-dispatch failure")
+
+
 def _response(*, content: str, tool_calls: list[dict] | None = None) -> dict:
     return {"id": "job-ready-v2-offline", "model": CHEAP_MODEL, "choices": [{"message": {"content": content, "tool_calls": tool_calls or []}}], "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}}
 
@@ -98,6 +120,74 @@ def test_execution_outcome_accepts_and_stabilizes_structured_observed_state():
 
     assert outcome.observed_state == state
     assert outcome.observed_state is not state
+
+
+def test_invalid_before_dispatch_reports_zero_accounting(tmp_path):
+    snapshot = load_snapshot()
+    output = tmp_path / "pre-dispatch"
+    runner = build_runner(
+        snapshot,
+        executor=_PreDispatchFailure(),
+        output_dir=output,
+        repo_root=ROOT,
+    )
+
+    assert asyncio.run(
+        runner.run(
+            select_runs(
+                snapshot,
+                task_id=TASK_ID,
+                config_name="odys_p3",
+                repeat_index=1,
+            )
+        )
+    ) == {"valid": 0, "invalid": 1}
+    invalid = json.loads((output / "invalid.jsonl").read_text().splitlines()[0])
+    accounting = invalid["runtime_environment"]["execution_accounting"]
+    assert accounting["provider_calls"] == 0
+    assert accounting["model_calls"] == 0
+    assert accounting["provider_call_reservations"] == 0
+    assert accounting["provider_call_records"] == []
+
+
+def test_invalid_after_recovery_preserves_provider_accounting(tmp_path):
+    snapshot = load_snapshot()
+    provider = _provider(
+        [_initial_tool_response(), _repair_response(), _response(content="State repaired and verified.")]
+    )
+    inner = P45BenchmarkExecutor(
+        fixture_registry=JobReadyFixtureRegistry(),
+        factory_type="real",
+        provider=provider,
+        expected_model=CHEAP_MODEL,
+    )
+    output = tmp_path / "recovery-crash"
+    runner = build_runner(
+        snapshot,
+        executor=_RecoveryCrashAfterProvider(inner),
+        output_dir=output,
+        repo_root=ROOT,
+    )
+
+    assert asyncio.run(
+        runner.run(
+            select_runs(
+                snapshot,
+                task_id=TASK_ID,
+                config_name="odys_p3",
+                repeat_index=1,
+            )
+        )
+    ) == {"valid": 0, "invalid": 1}
+    invalid = json.loads((output / "invalid.jsonl").read_text().splitlines()[0])
+    accounting = invalid["runtime_environment"]["execution_accounting"]
+    assert accounting["provider_calls"] == 3
+    assert accounting["model_calls"] == 3
+    assert accounting["provider_call_reservations"] == 3
+    assert len(accounting["provider_call_records"]) == 3
+    assert accounting["tokens_input"] == 30
+    assert accounting["tokens_output"] == 15
+    assert accounting["total_tokens"] == 45
 
 
 def test_v2_repeat_two_recovery_handoff_is_not_invalid(tmp_path):
