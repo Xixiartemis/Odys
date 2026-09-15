@@ -136,7 +136,9 @@ class _OdysRuntime:
             budget = AgentBudget(max_turns=max_turns, max_tool_calls=max_tool_calls)
             allowed = set(config.get("tool_capability_set", []))
 
-            attempt_id = f"{run_id}::attempt-1"
+            attempt_id = str(
+                config.get("_attempt_id") or f"{run_id}::attempt-1"
+            )
             metadata = {
                 "task_id": task.get("task_id", "unknown"),
                 "run_id": run_id,
@@ -340,7 +342,9 @@ class _OdysRuntime:
 
         task_id = task.get("task_id", "unknown")
         run_id = config.get("run_id", "odys-run")
-        attempt_id = f"{run_id}::attempt-1"
+        attempt_id = str(
+            config.get("_attempt_id") or f"{run_id}::attempt-1"
+        )
 
         projects = ProjectRepository(self.db)
         project = projects.get_by_name("benchmark")

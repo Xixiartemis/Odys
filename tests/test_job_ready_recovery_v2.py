@@ -7,6 +7,8 @@ import hashlib
 import json
 from pathlib import Path
 
+import pytest
+
 from evals.reliability.job_ready_recovery_v2 import (
     BROKEN_CONTENT, JOB_READY_VERSION, TARGET_CONTENT, TARGET_HASH, TASK_ID,
     JobReadyFixtureRegistry, build_runner, job_ready_config_hash, load_snapshot,
@@ -14,7 +16,12 @@ from evals.reliability.job_ready_recovery_v2 import (
 )
 from evals.reliability.p45_executor import P45BenchmarkExecutor
 from evals.reliability.p46_provider import CHEAP_MODEL, FROZEN_ENDPOINT, FROZEN_PROVIDER, RealLLMProvider
-from evals.reliability.run_phase4 import ExternalObservableValidator, select_runs
+from evals.reliability.run_phase4 import (
+    ExecutionOutcome,
+    ExecutionOutcomeContractError,
+    ExternalObservableValidator,
+    select_runs,
+)
 from lhas.native.models import ModelContext
 from lhas.native.provider import OpenAIChatProviderAdapter
 
@@ -63,16 +70,63 @@ def _provider(responses):
     return provider
 
 
-def _run(tmp_path, snapshot, config: str, responses):
+def _run(tmp_path, snapshot, config: str, responses, *, repeat_index: int = 1):
     output = tmp_path / config
     provider = _provider(responses)
     executor = P45BenchmarkExecutor(fixture_registry=JobReadyFixtureRegistry(), factory_type="real", provider=provider, expected_model=CHEAP_MODEL)
     runner = build_runner(snapshot, executor=executor, output_dir=output, repo_root=ROOT)
-    runs = select_runs(snapshot, task_id=TASK_ID, config_name=config, repeat_index=1)
+    runs = select_runs(
+        snapshot,
+        task_id=TASK_ID,
+        config_name=config,
+        repeat_index=repeat_index,
+    )
     result = asyncio.run(runner.run(runs))
     raw = json.loads((output / "raw.jsonl").read_text(encoding="utf-8").splitlines()[0])
     trace = json.loads((output / "traces.jsonl").read_text(encoding="utf-8").splitlines()[0])
     return result, raw, trace, output, provider
+
+
+def test_execution_outcome_rejects_bool_observed_state_at_handoff_boundary():
+    with pytest.raises(ExecutionOutcomeContractError, match="OBSERVED_STATE_MUST_BE_MAPPING"):
+        ExecutionOutcome.from_value({"observed_state": True})
+
+
+def test_execution_outcome_accepts_and_stabilizes_structured_observed_state():
+    state = {"fixture_observations": {"state": "pending"}}
+    outcome = ExecutionOutcome.from_value({"observed_state": state})
+
+    assert outcome.observed_state == state
+    assert outcome.observed_state is not state
+
+
+def test_v2_repeat_two_recovery_handoff_is_not_invalid(tmp_path):
+    snapshot = load_snapshot()
+    counts, raw, trace, _output, _provider = _run(
+        tmp_path,
+        snapshot,
+        "odys_p3",
+        [_initial_tool_response(), _repair_response(), _response(content="State repaired and verified.")],
+        repeat_index=2,
+    )
+
+    assert counts == {"valid": 1, "invalid": 0}
+    assert raw["validity"] == "VALIDATED_PASS"
+    assert raw["verified_completion"] is True
+    event_types = [event["event_type"] for event in trace["execution_trace"]]
+    assert "StepFailureProvenance" in event_types
+    assert "REPAIR_STARTED" in event_types
+    assert "VERIFICATION_PASSED" in event_types
+    initial_attempt_ids = {
+        event["attempt_id"]
+        for event in trace["execution_trace"]
+        if event["event_type"] == "EXECUTION_COMPLETE"
+    }
+    provenance = next(
+        event for event in trace["execution_trace"]
+        if event["event_type"] == "StepFailureProvenance"
+    )
+    assert provenance["attempt_id"] in initial_attempt_ids
 
 
 def test_v2_protocol_and_selection_are_versioned():

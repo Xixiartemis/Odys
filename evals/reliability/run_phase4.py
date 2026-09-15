@@ -62,6 +62,10 @@ class RuntimeInfrastructureError(RuntimeError):
     """Raised when execution cannot produce trustworthy benchmark evidence."""
 
 
+class ExecutionOutcomeContractError(TypeError):
+    """Raised when an execution adapter returns a malformed outcome shape."""
+
+
 ROOT_API_BUDGET_FAILURE = "ROOT_API_BUDGET_EXHAUSTED"
 WALL_TIME_BUDGET_FAILURE = "WALL_TIME_BUDGET_EXHAUSTED"
 ATTEMPT_LOCAL_BUDGET_FAILURES = frozenset(
@@ -483,14 +487,36 @@ class ExecutionOutcome:
     # frozen benchmark metric or result-schema field.
     tool_invocation_evidence: list[dict[str, Any]] = field(default_factory=list)
 
+    def validate_contract(self) -> "ExecutionOutcome":
+        """Validate and stabilize the cross-layer outcome handoff.
+
+        ``observed_state`` is the adapter's structured observation channel.
+        It is consumed by both the validator projection and the recovery
+        handoff, so accepting a scalar here would only defer the contract
+        failure to an arbitrary ``.get``/``.update`` call.  Mapping values are
+        copied to a plain dict so downstream recovery may append execution
+        evidence without depending on a producer's mapping implementation.
+        """
+        if not isinstance(self.observed_state, Mapping):
+            raise ExecutionOutcomeContractError(
+                "OBSERVED_STATE_MUST_BE_MAPPING: "
+                f"field=observed_state expected=mapping "
+                f"actual={type(self.observed_state).__name__} "
+                f"value={self.observed_state!r}"
+            )
+        self.observed_state = dict(self.observed_state)
+        return self
+
     @classmethod
     def from_value(cls, value: "ExecutionOutcome | Mapping[str, Any]") -> "ExecutionOutcome":
         if isinstance(value, cls):
-            return value
+            return value.validate_contract()
         if not isinstance(value, Mapping):
             raise TypeError("execution adapter must return ExecutionOutcome or mapping")
         allowed = {field_name for field_name in cls.__dataclass_fields__}
-        return cls(**{key: value[key] for key in allowed if key in value})
+        return cls(
+            **{key: value[key] for key in allowed if key in value}
+        ).validate_contract()
 
 
 def _validator_observation_view(

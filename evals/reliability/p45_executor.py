@@ -543,6 +543,7 @@ class P45BenchmarkExecutor:
             # make the durable native Attempt and the recovery coordinator
             # use the same run identity as the official Phase 4 request.
             runtime_config["run_id"] = request.run_id
+            runtime_config["_attempt_id"] = attempt_id
             runtime_config["_workspace_root"] = str(workspace_dir)
             runtime_config["_execution_control"] = control
             try:
