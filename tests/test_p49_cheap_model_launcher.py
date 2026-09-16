@@ -1,4 +1,5 @@
 import json
+import shutil
 from pathlib import Path
 
 import pytest
@@ -20,8 +21,21 @@ from evals.reliability.p46_provider import (
 from evals.reliability.run_phase4 import ProtocolSnapshot
 
 
-def test_cheap_profile_loads_its_frozen_identity():
-    profile = load_benchmark_profile(PROFILE_CHEAP)
+TEST_PROFILE_DIR = Path(__file__).parent / "fixtures" / "cheap_model"
+
+
+def _materialize_cheap_profile(tmp_path: Path) -> Path:
+    """Build the runtime-shaped profile from committed test inputs only."""
+    repo_root = tmp_path / "profile-repo"
+    destination = repo_root / "results" / "official_phase4" / "cheap_model"
+    shutil.copytree(TEST_PROFILE_DIR, destination)
+    return repo_root
+
+
+def test_cheap_profile_loads_its_frozen_identity(tmp_path):
+    profile = load_benchmark_profile(
+        PROFILE_CHEAP, repo_root=_materialize_cheap_profile(tmp_path)
+    )
 
     assert profile.name == PROFILE_CHEAP
     assert profile.benchmark_version == "phase4-v1-cheap-model"
@@ -48,12 +62,17 @@ def test_cheap_provider_does_not_reuse_generic_pro_credential(monkeypatch):
         create_cheap_model_provider()
 
 
-def test_launcher_selects_cheap_executor_and_identity(monkeypatch):
+def test_launcher_selects_cheap_executor_and_identity(monkeypatch, tmp_path):
     monkeypatch.setenv(CHEAP_CREDENTIAL_ENV, "cheap-test-secret")
     monkeypatch.delenv("ODYS_BENCHMARK_PROVIDER", raising=False)
     monkeypatch.delenv("ODYS_CHEAP_BENCHMARK_BASE_URL", raising=False)
 
-    executor = _load_executor_from_flag(None, load_benchmark_profile(PROFILE_CHEAP))
+    executor = _load_executor_from_flag(
+        None,
+        load_benchmark_profile(
+            PROFILE_CHEAP, repo_root=_materialize_cheap_profile(tmp_path)
+        ),
+    )
 
     assert executor.provider_identity["model"] == CHEAP_MODEL
     assert executor.provider_identity["provider"] == "xiaomimimo-openai-compatible"
@@ -78,7 +97,7 @@ def test_frozen_protocol_hash_is_unchanged():
 
 
 def test_cheap_provider_identity_artifact_contains_no_secret():
-    path = Path("results/official_phase4/cheap_model/provider_identity.json")
+    path = TEST_PROFILE_DIR / "provider_identity.json"
     identity = json.loads(path.read_text(encoding="utf-8"))
 
     assert identity["model"] == CHEAP_MODEL
@@ -88,6 +107,14 @@ def test_cheap_provider_identity_artifact_contains_no_secret():
 
 def test_warmup_propagates_cheap_profile_and_derived_output(monkeypatch, tmp_path):
     import evals.reliability.p46_launcher as launcher
+
+    profile_root = _materialize_cheap_profile(tmp_path)
+    real_loader = launcher.load_benchmark_profile
+    monkeypatch.setattr(
+        launcher,
+        "load_benchmark_profile",
+        lambda name: real_loader(name, repo_root=profile_root),
+    )
 
     class Snapshot:
         protocol_hash = (

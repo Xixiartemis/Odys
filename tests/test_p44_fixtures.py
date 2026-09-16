@@ -7,8 +7,6 @@ Validates:
 - observe returns valid dict
 """
 import pytest
-import shutil
-import tempfile
 from pathlib import Path
 from evals.reliability.fixture_packages import FixtureRegistry, BaseFixture
 
@@ -23,11 +21,11 @@ def registry() -> FixtureRegistry:
 
 
 @pytest.fixture()
-def workspace_root() -> Path:
-    """Custom tmp dir to avoid Windows permission issues with default tmp_path."""
-    d = Path(tempfile.mkdtemp(dir=".pytest-tmp", prefix="p44_"))
-    yield d
-    shutil.rmtree(d, ignore_errors=True)
+def workspace_root(tmp_path: Path) -> Path:
+    """Use pytest-managed temporary storage on fresh local and CI checkouts."""
+    d = tmp_path / "p44_workspace"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
 
 
 EXPECTED_TASK_IDS = sorted([
