@@ -10,6 +10,7 @@ from lhas.native.persistence import CompletionCandidateRepository, ExecutionSnap
 from lhas.native.provider import ScriptedProviderAdapter
 from lhas.native.tools import NativeToolDispatcher
 from lhas.repair_progress import RepairProgressTracker
+from lhas.recovery_control import RecoveryController
 from lhas.persistence.event_store import EventStore
 from lhas.persistence.repositories import AttemptRepository, RunRepository
 from lhas.planning.models import CapabilitySpec
@@ -308,6 +309,81 @@ def test_repeated_tool_failure_emits_replan_signal(db, make_task):
     signals = ReplanSignalRepository(db).list_for_attempt(case[2].id)
     assert result.status is AgentStatus.COMPLETED
     assert "REPEATED_TOOL_FAILURE" in [item.reason for item in signals]
+
+
+def test_recovery_controller_escalates_kernel_after_bounded_no_progress(db, make_task):
+    tool = EchoTool()
+    case = _kernel_case(
+        db,
+        make_task,
+        [
+            ProviderResponse(
+                tool_calls=[
+                    ProviderToolCall(id="progress-1", name="test.echo", arguments={"value": "wrong-a"})
+                ]
+            ),
+            ProviderResponse(
+                tool_calls=[
+                    ProviderToolCall(id="progress-2", name="test.echo", arguments={"value": "wrong-b"})
+                ]
+            ),
+            ProviderResponse(content="must not be consumed", completion_claim=True),
+        ],
+        tool=tool,
+    )
+    controller = RecoveryController(
+        db=db,
+        task_id=case[0].id,
+        run_id=case[1].id,
+        attempt_id=case[2].id,
+        step_id="step-1",
+        expected_effects={"value": "target"},
+        max_no_progress=2,
+        max_repeated_action=9,
+        max_repeated_state=9,
+    )
+    case[5].metadata["_recovery_controller"] = controller
+
+    result = asyncio.run(case[4].run(case[5]))
+    signals = ReplanSignalRepository(db).list_for_attempt(case[2].id)
+
+    assert result.status is AgentStatus.FAILED
+    assert result.error_type == "REPLAN_REQUIRED"
+    assert len(tool.calls) == 2
+    assert [item.reason for item in signals] == ["REPAIR_NO_PROGRESS"]
+
+
+def test_recovery_controller_hands_satisfied_effect_to_authoritative_boundary(db, make_task):
+    tool = EchoTool()
+    case = _kernel_case(
+        db,
+        make_task,
+        [
+            ProviderResponse(
+                tool_calls=[
+                    ProviderToolCall(id="candidate-1", name="test.echo", arguments={"value": "target"})
+                ]
+            ),
+            ProviderResponse(content="must not be consumed", completion_claim=True),
+        ],
+        tool=tool,
+    )
+    controller = RecoveryController(
+        task_id=case[0].id,
+        run_id=case[1].id,
+        attempt_id=case[2].id,
+        step_id="step-1",
+        expected_effects={"value": "target"},
+    )
+    case[5].metadata["_recovery_controller"] = controller
+
+    result = asyncio.run(case[4].run(case[5]))
+
+    assert result.status is AgentStatus.COMPLETED
+    assert result.completion_claim is True
+    assert result.artifacts["validation_candidate"] is True
+    assert len(tool.calls) == 1
+    assert CompletionCandidateRepository(db).list_for_attempt(case[2].id) == []
 
 
 def test_delegation_budget_is_harness_enforced(db, make_task):

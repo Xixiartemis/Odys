@@ -141,6 +141,18 @@ class _TaskGraphAgentExecutor:
             progress_config = runtime_context.get("_repair_progress_config")
             if isinstance(progress_config, Mapping):
                 context["_repair_progress_config"] = dict(progress_config)
+            if runtime_context.get("recovery_control_plane_v2") and self.db is not None:
+                from lhas.recovery_control import RecoveryController
+
+                context["_recovery_controller"] = RecoveryController(
+                    db=self.db,
+                    task_id=str(request.task_id),
+                    run_id=str(request.run_id),
+                    attempt_id=str(request.attempt_id),
+                    step_id=self.bound_step_id,
+                    expected_effects=dict(self.step.expected_effects),
+                )
+                context["recovery_control_plane_v2"] = True
             if self.step.required_capabilities:
                 context.setdefault(
                     "allowed_capabilities",
@@ -402,7 +414,26 @@ class PlanExecutionService:
         if not attempts:
             return
         signal_repo = ReplanSignalRepository(self.db)
-        if any(signal_repo.list_for_attempt(attempt.id) for attempt in attempts):
+        existing = [
+            signal
+            for attempt in attempts
+            for signal in signal_repo.list_for_attempt(attempt.id)
+        ]
+        if any(signal.failed_node_id == step.id for signal in existing):
+            return
+        # CompletionAuthority cannot know the enclosing plan step, so its
+        # durable validator-rejection signal may intentionally have no node.
+        # Enrich that same signal at the planning boundary instead of creating
+        # a duplicate; this gives scoped replan policy a real failed node.
+        if existing:
+            signal = existing[-1]
+            signal.failed_node_id = step.id
+            signal.evidence = {
+                **dict(signal.evidence or {}),
+                "failed_node_id_bound_by": "PlanExecutionService",
+                "failed_node_id": step.id,
+            }
+            signal_repo.update(signal)
             return
         trigger = ReplanTriggerPolicy(self.db).evaluate(step=step, run_id=run_id)
         if trigger is None:
@@ -431,6 +462,33 @@ class PlanExecutionService:
         repo = ReplanSignalRepository(self.db)
         for attempt in attempts:
             signals.extend(repo.list_for_attempt(attempt.id))
+        # A completion authority emits validator-rejection truth before the
+        # plan service knows which PlanStep owns the attempt.  Bind that
+        # missing node now, at the planning boundary, so scoped macro replan
+        # has a durable target without changing validator semantics.
+        run = RunRepository(self.db).get(run_id)
+        bound_step = (
+            next(
+                (
+                    item
+                    for item in plan.steps
+                    if run is not None and item.task_id == run.task_id
+                ),
+                None,
+            )
+            if run is not None
+            else None
+        )
+        if bound_step is not None:
+            for signal in signals:
+                if signal.failed_node_id is None:
+                    signal.failed_node_id = bound_step.id
+                    signal.evidence = {
+                        **dict(signal.evidence or {}),
+                        "failed_node_id_bound_by": "PlanExecutionService",
+                        "failed_node_id": bound_step.id,
+                    }
+                    repo.update(signal)
         consumed = set(plan.metadata.get("consumed_replan_signal_ids", []))
         signals = [signal for signal in signals if signal.id not in consumed]
         if not signals:

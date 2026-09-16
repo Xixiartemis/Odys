@@ -298,6 +298,18 @@ class ReplanSignalRepository:
             ))
         return signal
 
+    def update(self, signal: ReplanSignal) -> ReplanSignal:
+        """Update only the durable projection fields of an existing signal."""
+        with self.db.session() as session:
+            row = session.get(ReplanSignalRow, signal.id)
+            if row is None:
+                raise KeyError(f"replan signal not found: {signal.id}")
+            row.reason = signal.reason
+            row.scope = signal.scope
+            row.failed_node_id = signal.failed_node_id
+            row.evidence_json = json_dumps(signal.evidence)
+        return signal
+
     def list_for_attempt(self, attempt_id: str) -> list[ReplanSignal]:
         with self.db.session() as session:
             rows = session.execute(

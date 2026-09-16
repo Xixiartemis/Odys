@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 import json
 from typing import Any
 
 from lhas.agent.context import ContextAssembler, ContextPriority, ContextSource
 from lhas.agent.models import AgentRequest
 from lhas.native.models import ExecutionSnapshot, ModelContext, ReplanSignal, ValidationFailure
+from lhas.recovery_control import RecoveryContextProjector
 
 
 _SYSTEM = (
@@ -21,6 +23,7 @@ _SYSTEM = (
 class NativeContextAssembler:
     def __init__(self, assembler: ContextAssembler | None = None):
         self.assembler = assembler or ContextAssembler()
+        self.recovery_projector = RecoveryContextProjector()
 
     def build(
         self,
@@ -57,6 +60,35 @@ class NativeContextAssembler:
         repair_progress = snapshot.current_failure.get("repair_convergence")
         if isinstance(repair_progress, dict):
             execution["repair_progress"] = dict(repair_progress)
+        if runtime.get("recovery_control_plane_v2"):
+            repair_context = runtime.get("repair_context", {})
+            if not isinstance(repair_context, Mapping):
+                repair_context = {}
+            recent = snapshot.recent_tool_outcomes
+            last_observation = recent[-1] if recent else None
+            action_fingerprints = [
+                item.get("args_sha256")
+                for item in recent
+                if isinstance(item, Mapping) and item.get("args_sha256")
+            ][-16:]
+            execution["recovery_context_projection"] = self.recovery_projector.project(
+                goal=request.objective,
+                acceptance_contract=runtime.get("acceptance_criteria", []),
+                current_state=(
+                    last_observation.get("safe_summary", last_observation)
+                    if isinstance(last_observation, Mapping)
+                    else {}
+                ),
+                failure_provenance=repair_context.get("failure_provenance", {}),
+                progress=repair_progress or {},
+                attempted_actions=action_fingerprints,
+                last_useful_observation=last_observation,
+                current_mismatch=repair_context.get("mismatch"),
+                budget=runtime.get("recovery_budget", {}),
+            )
+            # The durable snapshot remains complete; the model receives the
+            # semantic projection plus only the latest bounded observations.
+            execution["recent_tool_outcomes"] = recent[-3:]
         sources = [
             ContextSource("goal", request.objective, ContextPriority.REQUIRED, 20_000),
             ContextSource("acceptance", runtime.get("acceptance_criteria", []), ContextPriority.REQUIRED, 8_000),

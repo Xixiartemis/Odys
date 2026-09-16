@@ -66,6 +66,7 @@ class NativeAgentKernel:
         runtime_target_controller: Any = None,
         provider_health: ProviderHealthRepository | None = None,
         provider_factory: Any = None,
+        recovery_controller: Any = None,
     ):
         self.db = db
         self.provider = provider
@@ -84,6 +85,9 @@ class NativeAgentKernel:
         self.runtime_target_controller = runtime_target_controller
         self.provider_health = provider_health or ProviderHealthRepository(db)
         self.provider_factory = provider_factory
+        # Optional Odys recovery control-plane owner.  It is injected by the
+        # runtime boundary; legacy callers retain tracker-only behavior.
+        self.recovery_controller = recovery_controller
         self._controls: dict[str, ExecutionControlToken] = {}
 
     def switch_runtime_target(self, new_target: RuntimeTarget, *, expected_current: RuntimeTarget,
@@ -139,6 +143,7 @@ class NativeAgentKernel:
         self._active_snapshot = snapshot
         self.dispatcher.restore_observer(snapshot.repeated_failure_state)
         progress_tracker = self._repair_tracker(request)
+        recovery_controller = self._recovery_controller(request)
 
         try:
             control.check()
@@ -232,6 +237,39 @@ class NativeAgentKernel:
                 },
             )
             self.events.append(EventType.NATIVE_MODEL_TURN_STARTED, task_id=task_id, run_id=run_id, attempt_id=attempt_id, payload={"turn": next_turn, "model_turn_ordinal": next_turn, "provider": getattr(self.provider, "name", type(self.provider).__name__), **target_payload, "context_chars": context.chars_used, "context_budget": context.budget_chars})
+            if recovery_controller is not None:
+                try:
+                    recovery_controller.acquire_local_turn()
+                except Exception as exc:
+                    # A local lease may not consume the protected escalation
+                    # reserve. The controller records the durable signal;
+                    # this boundary only projects a bounded terminal result.
+                    from lhas.recovery_control import BudgetReservationError
+
+                    if not isinstance(exc, BudgetReservationError):
+                        raise
+                    progress = recovery_controller.budget_failure_progress()
+                    recovery_controller.emit_signal(
+                        "LOCAL_REPAIR_BUDGET_EXHAUSTED",
+                        progress,
+                        extra={"phase": "local_repair"},
+                    )
+                    if progress_tracker is not None:
+                        progress_tracker.stop("REPLAN_REQUIRED")
+                    snapshot.phase = NativePhase.REPLANNING
+                    snapshot.current_failure.update(
+                        {
+                            "type": "REPLAN_REQUIRED",
+                            "repair_stop_reason": "LOCAL_REPAIR_BUDGET_EXHAUSTED",
+                        }
+                    )
+                    self._save(snapshot)
+                    return self._failed(
+                        request,
+                        snapshot,
+                        "REPLAN_REQUIRED",
+                        detail="local repair lease exhausted; escalation reserve protected",
+                    )
             started = time.monotonic()
             try:
                 raw = await await_with_control(
@@ -376,6 +414,30 @@ class NativeAgentKernel:
                         snapshot.current_failure["repair_convergence"] = (
                             progress_tracker.snapshot()
                         )
+                    controller_decision = None
+                    controller_progress = None
+                    if recovery_controller is not None:
+                        bounded = (
+                            observation.get("bounded_output")
+                            or observation.get("safe_summary")
+                            or observation
+                        )
+                        controller_decision, controller_progress = recovery_controller.observe(
+                            before_state=None,
+                            after_state=bounded,
+                            action={
+                                "capability": observation.get("capability") or call.name,
+                                "args_sha256": observation.get("args_sha256"),
+                            },
+                            observation=observation,
+                        )
+                        snapshot.current_failure["recovery_control"] = {
+                            "decision": controller_decision.value,
+                            "progress_status": controller_progress.status.value,
+                            "state_digest": controller_progress.state_digest,
+                            "action_fingerprint": controller_progress.action_fingerprint,
+                            "matched_effect_keys": list(controller_progress.matched_effect_keys),
+                        }
                     snapshot.repeated_failure_state = self.dispatcher.observer_state()
                     summary = observation.get("safe_summary") if isinstance(observation, dict) else {}
                     if isinstance(summary, dict) and summary.get("meaningful_mutation"):
@@ -396,6 +458,34 @@ class NativeAgentKernel:
                             "capability": observation.get("capability"),
                         }
                     self._save(snapshot)
+                    if controller_decision is not None and controller_decision.value == "VALIDATE_CANDIDATE":
+                        # Satisfied effects are only candidates. The external
+                        # validator remains the sole completion authority.
+                        return self._validation_candidate(
+                            request,
+                            snapshot,
+                            controller_progress,
+                        )
+                    if controller_decision is not None and controller_decision.value == "ESCALATE_MACRO_REPLAN":
+                        if progress_tracker is not None:
+                            progress_tracker.stop("REPLAN_REQUIRED")
+                        snapshot.phase = NativePhase.REPLANNING
+                        snapshot.current_failure.update(
+                            {
+                                "type": "REPLAN_REQUIRED",
+                                "repair_stop_reason": controller_progress.status.value,
+                            }
+                        )
+                        self._save(snapshot)
+                        return self._failed(
+                            request,
+                            snapshot,
+                            "REPLAN_REQUIRED",
+                            detail=(
+                                "recovery control escalated after "
+                                f"{controller_progress.status.value}"
+                            ),
+                        )
                     if progress_tracker is not None and not progress.continue_repair:
                         snapshot.phase = NativePhase.FAILED
                         snapshot.current_failure.update(
@@ -460,6 +550,29 @@ class NativeAgentKernel:
                     "safe_summary": candidate.validation,
                 })
                 self._save(snapshot)
+                validator_control_decision = None
+                if recovery_controller is not None:
+                    validator_control_decision = recovery_controller.validator_rejected()
+                if (
+                    validator_control_decision is not None
+                    and validator_control_decision.value == "ESCALATE_MACRO_REPLAN"
+                ):
+                    if progress_tracker is not None:
+                        progress_tracker.stop("REPLAN_REQUIRED")
+                    snapshot.phase = NativePhase.REPLANNING
+                    snapshot.current_failure.update(
+                        {
+                            "type": "REPLAN_REQUIRED",
+                            "repair_stop_reason": "REPEATED_VALIDATOR_REJECTION",
+                        }
+                    )
+                    self._save(snapshot)
+                    return self._failed(
+                        request,
+                        snapshot,
+                        "REPLAN_REQUIRED",
+                        detail="repeated authoritative validator rejection",
+                    )
                 if (
                     progress_tracker is not None
                     and rejection_progress is not None
@@ -725,10 +838,47 @@ class NativeAgentKernel:
             artifacts["repair_convergence"] = tracker.snapshot()
         return AgentResult(status=AgentStatus.FAILED, completion_claim=False, turn_count=snapshot.model_turn_count, tool_call_count=snapshot.tool_call_count, safe_trace=snapshot.recent_tool_outcomes[-100:], artifacts=artifacts, error_type=error_type, error_message=(detail or "")[:512] or None)
 
+    def _validation_candidate(
+        self,
+        request: AgentRequest,
+        snapshot: ExecutionSnapshot,
+        progress: Any,
+    ) -> AgentResult:
+        """Stop on a generic effect candidate for authoritative validation."""
+        self._states[request.agent_id] = AgentStatus.COMPLETED
+        snapshot.phase = NativePhase.CANDIDATE_COMPLETE
+        self._save(snapshot)
+        artifacts = {
+            "execution_snapshot_id": snapshot.id,
+            "validation_candidate": True,
+            "effect_progress": {
+                "status": progress.status.value,
+                "state_digest": progress.state_digest,
+                "matched_effect_keys": list(progress.matched_effect_keys),
+            },
+        }
+        tracker = self._repair_tracker(request)
+        if tracker is not None:
+            tracker.candidate_for_validation()
+            artifacts["repair_convergence"] = tracker.snapshot()
+        return AgentResult(
+            status=AgentStatus.COMPLETED,
+            final_output="",
+            completion_claim=True,
+            turn_count=snapshot.model_turn_count,
+            tool_call_count=snapshot.tool_call_count,
+            safe_trace=snapshot.recent_tool_outcomes[-100:],
+            artifacts=artifacts,
+        )
+
     @staticmethod
     def _repair_tracker(request: AgentRequest) -> RepairProgressTracker | None:
         tracker = (request.metadata or {}).get("_repair_progress_tracker")
         return tracker if isinstance(tracker, RepairProgressTracker) else None
+
+    def _recovery_controller(self, request: AgentRequest) -> Any:
+        controller = (request.metadata or {}).get("_recovery_controller")
+        return controller if controller is not None else self.recovery_controller
 
     @staticmethod
     def _response_shape(value: Any, *, turn: int) -> dict[str, Any]:

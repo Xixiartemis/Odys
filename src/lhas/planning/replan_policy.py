@@ -7,6 +7,8 @@ from typing import Any
 
 from lhas.persistence.phaseb_repos import FailureReportRepository, ValidationResultRepository
 from lhas.persistence.repositories import AttemptRepository
+from lhas.native.persistence import ReplanSignalRepository
+from lhas.recovery_control import TYPED_ESCALATION_REASONS
 
 
 @dataclass(frozen=True)
@@ -24,11 +26,34 @@ class ReplanTriggerPolicy:
         self.attempts = AttemptRepository(db)
         self.failures = FailureReportRepository(db)
         self.validations = ValidationResultRepository(db)
+        self.signals = ReplanSignalRepository(db)
 
     def evaluate(self, *, step, run_id: str) -> ReplanTrigger | None:
         attempts = self.attempts.list_for_run(run_id)
         if not attempts:
             return None
+
+        # A bounded recovery controller may have already converted a local
+        # stop into a durable typed signal.  Consume that signal as the
+        # policy's primary input instead of waiting for a second attempt or
+        # guessing from counters after the fact.
+        typed_signals = [
+            signal
+            for attempt in attempts
+            for signal in self.signals.list_for_attempt(attempt.id)
+            if signal.reason in TYPED_ESCALATION_REASONS
+        ]
+        if typed_signals:
+            signal = typed_signals[-1]
+            return ReplanTrigger(
+                signal.reason,
+                {
+                    "source": "DURABLE_REPAIR_CONTROL_SIGNAL",
+                    "signal_id": signal.id,
+                    "capability": step.capability,
+                    **dict(signal.evidence or {}),
+                },
+            )
 
         error_types = [str(item.error_type or "").upper() for item in attempts]
         reports = [

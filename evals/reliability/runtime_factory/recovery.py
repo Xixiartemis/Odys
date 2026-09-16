@@ -114,6 +114,7 @@ class _KernelTaskExecutor:
         task = request.task if isinstance(request.task, Mapping) else {}
         context = dict(request.context or {})
         progress_config = context.pop("_repair_progress_config", None)
+        recovery_controller = context.pop("_recovery_controller", None)
         progress_tracker = (
             RepairProgressTracker.from_config(progress_config)
             if isinstance(progress_config, Mapping)
@@ -138,6 +139,11 @@ class _KernelTaskExecutor:
             # durable plan JSON.  The static config is the only persisted
             # repair input; tracker state belongs to this native Attempt.
             metadata["_repair_progress_tracker"] = progress_tracker
+        if recovery_controller is not None:
+            # In-process only: the controller owns durable signal emission;
+            # its state is never serialized into prompt or plan JSON.
+            metadata["_recovery_controller"] = recovery_controller
+            context["recovery_control_plane_v2"] = True
         binder = getattr(self.provider, "bind_execution_context", None)
         if callable(binder):
             binder(
@@ -454,6 +460,25 @@ class OfficialOdysRecoveryCoordinator:
         before_ids = {
             event.id for event in events.list_all() if event.id is not None
         }
+        from lhas.recovery_control import RecoveryController
+
+        recovery_controller = RecoveryController(
+            db=self.db,
+            task_id=context["task_id"],
+            run_id=request.run_id,
+            attempt_id=context["attempt_id"],
+            step_id=step.id,
+            expected_effects=dict(step.expected_effects),
+            max_no_progress=int(
+                request.task.get("repair_max_no_progress", 3)
+            ),
+            max_repeated_action=int(
+                request.task.get("repair_max_repeated_action", 2)
+            ),
+            max_repeated_state=int(
+                request.task.get("repair_max_repeated_state", 2)
+            ),
+        )
         events.append(
             EventType.STEP_FAILURE_PROVENANCE,
             payload={
@@ -510,6 +535,7 @@ class OfficialOdysRecoveryCoordinator:
                     "max_repeated_state": 2,
                     "max_repeated_action": 2,
                 },
+                "_recovery_controller": recovery_controller,
                 "_execution_control": getattr(request, "execution_control", None),
             },
         )
