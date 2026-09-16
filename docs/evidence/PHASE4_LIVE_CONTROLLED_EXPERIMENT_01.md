@@ -30,11 +30,29 @@ Run on the credential-bearing machine:
 ```powershell
 Set-Location -LiteralPath 'D:\projects\odys-p411-official'
 $env:PYTHONPATH = 'D:\projects\odys-p411-official'
-& 'D:\projects\odys.venv\Scripts\python.exe' -B `
+& 'D:\projects\odys\.venv\Scripts\python.exe' -B `
   'D:\projects\odys-p411-official\scripts\phase4_live_controlled_experiment.py' `
   --repo-root 'D:\projects\odys-p411-official' `
   --output 'D:\projects\odys-p411-official\results\phase4_live_controlled_experiment_01'
 ```
+
+To regenerate only derived evidence from an existing bundle, without provider
+access and without rewriting `raw.jsonl`, `traces.jsonl`, or `invalid.jsonl`:
+
+```powershell
+& 'D:\projects\odys\.venv\Scripts\python.exe' -B `
+  'D:\projects\odys-p411-official\scripts\phase4_live_controlled_experiment.py' `
+  --repo-root 'D:\projects\odys-p411-official' `
+  --output 'D:\projects\odys-p411-official\results\phase4_live_controlled_experiment_01' `
+  --reaggregate
+```
+
+The derived report classifies this CWR-06 bundle as
+`LOCAL_RECOVERY_SMOKE`. It reports `COST_COMPARISON=NOT_COMPARABLE` when the
+baseline and V2 outcomes differ, treats a no-fault arm as
+`FAULT_INJECTION_SKIPPED`, and records missing historical
+`FAULT_TRIGGERED` telemetry as `NOT_AVAILABLE_FOR_OLD_RUN`. A zero duplicate
+mutation count is not promoted to proof, so its rate remains `NOT_PROVEN`.
 
 The generated report must use `NOT_MEASURED` for unavailable token/cost
 telemetry and must not claim linear context-growth elimination from character
