@@ -231,6 +231,9 @@ class OfficialOdysRecoveryCoordinator:
         registry: Any,
         capability_registry: Any,
         tool_contract: Any,
+        experiment_macro_replan_enabled: bool = False,
+        escalation_trigger_policy: str = "NO_PROGRESS_AWARE",
+        root_budget_authority: Any = None,
     ) -> None:
         from lhas.planning.service import PlanExecutionService
         from lhas.planning.planner import DeterministicPlanner
@@ -240,6 +243,13 @@ class OfficialOdysRecoveryCoordinator:
         self.kernel = kernel
         self.registry = registry
         self._contexts: dict[str, dict[str, Any]] = {}
+        self.experiment_macro_replan_enabled = bool(
+            experiment_macro_replan_enabled
+        )
+        self.escalation_trigger_policy = str(
+            escalation_trigger_policy or "NO_PROGRESS_AWARE"
+        ).upper()
+        self.root_budget_authority = root_budget_authority
         self.execution_control = None
         executor = _KernelTaskExecutor(
             kernel,
@@ -264,6 +274,16 @@ class OfficialOdysRecoveryCoordinator:
         """Bind the parent root authority to the existing repair service."""
         self.execution_control = control
         self.service.execution_control = control
+
+    def _reserve_replan(self) -> bool:
+        authority = self.root_budget_authority
+        reserve = getattr(authority, "reserve_replan", None)
+        if callable(reserve):
+            return bool(reserve())
+        # The non-opt-in official path never calls this guard.  Returning
+        # false here is fail-closed if an experiment forgets to bind the
+        # single root budget authority.
+        return False
 
     def prepare(
         self,
@@ -290,18 +310,35 @@ class OfficialOdysRecoveryCoordinator:
             )
         task_id = str(task.get("task_id", "unknown"))
         objective = str(task.get("objective", task_id))
+        goal_metadata = {
+            "benchmark_run_id": run_id,
+            "benchmark_config": config.get("config_id"),
+            # DeterministicPlanner is the existing macro authority.  The
+            # frozen task supplies the allowed strategy; the planner may
+            # only propose within that allow-list during escalation.
+            "plan_steps": list(
+                task.get(
+                    "experiment_initial_plan_steps",
+                    task.get("required_capabilities", []),
+                )
+            ),
+        }
+        if self.experiment_macro_replan_enabled:
+            alternate = task.get("experiment_replan_plan_steps", [])
+            if alternate:
+                goal_metadata["replan_plan_steps"] = list(alternate)
+            step_inputs = task.get("experiment_step_inputs", {})
+            if isinstance(step_inputs, Mapping):
+                goal_metadata["step_inputs"] = {
+                    str(key): dict(value)
+                    for key, value in step_inputs.items()
+                    if isinstance(value, Mapping)
+                }
         goal = Goal(
             project_id=project.id,
             objective=f"Official recovery for {task_id}: {objective}",
             allowed_capabilities=list(task.get("required_capabilities", [])),
-            metadata={
-                "benchmark_run_id": run_id,
-                "benchmark_config": config.get("config_id"),
-                # DeterministicPlanner is the existing macro authority.  The
-                # frozen task supplies the allowed strategy; the planner may
-                # only propose within that allow-list during escalation.
-                "plan_steps": list(task.get("required_capabilities", [])),
-            },
+            metadata=goal_metadata,
         )
         GoalRepository(self.db).create(goal)
 
@@ -330,18 +367,27 @@ class OfficialOdysRecoveryCoordinator:
             budget={"max_repair_attempts": 1},
             evidence={"original_failure_attempt_id": attempt_id},
         )
+        official_benchmark_recovery = not self.experiment_macro_replan_enabled
         plan = Plan(
             id=f"{run_id}::recovery-plan",
             goal_id=goal.id,
             mode=PlanMode.SIMPLE_DEPENDENCY,
             status=PlanStatus.FAILED,
             steps=[step],
-            metadata={"official_benchmark_recovery": True},
+            metadata={
+                "official_benchmark_recovery": official_benchmark_recovery,
+                "experiment_macro_replan_enabled": self.experiment_macro_replan_enabled,
+                "escalation_trigger_policy": self.escalation_trigger_policy,
+            },
         )
         PlanRepository(self.db).create(plan)
         EventStore(self.db).append(
             EventType.PLAN_CREATED,
-            payload={"plan_id": plan.id, "official_benchmark_recovery": True},
+            payload={
+                "plan_id": plan.id,
+                "official_benchmark_recovery": official_benchmark_recovery,
+                "experiment_macro_replan_enabled": self.experiment_macro_replan_enabled,
+            },
         )
         self._contexts[run_id] = {
             "plan_id": plan.id,
@@ -478,6 +524,12 @@ class OfficialOdysRecoveryCoordinator:
             max_repeated_state=int(
                 request.task.get("repair_max_repeated_state", 2)
             ),
+            escalation_policy=str(
+                request.config.get(
+                    "escalation_trigger_policy",
+                    self.escalation_trigger_policy,
+                )
+            ),
         )
         events.append(
             EventType.STEP_FAILURE_PROVENANCE,
@@ -504,7 +556,23 @@ class OfficialOdysRecoveryCoordinator:
             context={
                 "benchmark_task_id": context["task_id"],
                 "benchmark_run_id": request.run_id,
-                "official_benchmark_recovery": True,
+                # The frozen official path remains bounded and cannot enter
+                # macro replan. Experiment 02 opts in explicitly and uses the
+                # same planning/recovery service with a different execution-
+                # local policy value.
+                "official_benchmark_recovery": not self.experiment_macro_replan_enabled,
+                "experiment_macro_replan_enabled": self.experiment_macro_replan_enabled,
+                "escalation_trigger_policy": str(
+                    request.config.get(
+                        "escalation_trigger_policy",
+                        self.escalation_trigger_policy,
+                    )
+                ),
+                "_replan_budget_guard": (
+                    self._reserve_replan
+                    if self.experiment_macro_replan_enabled
+                    else None
+                ),
                 "bounded_recovery": True,
                 "repair_scope": scope.value,
                 "timeout_seconds": float(

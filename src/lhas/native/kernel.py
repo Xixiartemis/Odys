@@ -437,6 +437,14 @@ class NativeAgentKernel:
                             "state_digest": controller_progress.state_digest,
                             "action_fingerprint": controller_progress.action_fingerprint,
                             "matched_effect_keys": list(controller_progress.matched_effect_keys),
+                            "escalation_policy": getattr(
+                                recovery_controller,
+                                "escalation_policy",
+                                "NO_PROGRESS_AWARE",
+                            ),
+                            "detections": list(
+                                getattr(recovery_controller, "detections", [])
+                            )[-8:],
                         }
                     snapshot.repeated_failure_state = self.dispatcher.observer_state()
                     summary = observation.get("safe_summary") if isinstance(observation, dict) else {}

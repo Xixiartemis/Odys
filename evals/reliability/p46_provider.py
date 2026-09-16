@@ -659,6 +659,13 @@ def _build_real_odys_kernel(
         registry=registry,
         capability_registry=cap_reg,
         tool_contract=contract,
+        experiment_macro_replan_enabled=bool(
+            config.get("_experiment_macro_replan_enabled", False)
+        ),
+        escalation_trigger_policy=str(
+            config.get("escalation_trigger_policy", "NO_PROGRESS_AWARE")
+        ),
+        root_budget_authority=config.get("_run_budget_ledger"),
     )
     return kernel, db, recovery
 

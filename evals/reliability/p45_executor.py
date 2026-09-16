@@ -63,6 +63,7 @@ class RunBudgetLedger:
     nested_provider_calls: int = 0
     blocked_provider_calls: int = 0
     repair_attempts: int = 0
+    replan_attempts: int = 0
     exhausted: bool = False
     _phases: list[str] = field(default_factory=list)
 
@@ -103,6 +104,17 @@ class RunBudgetLedger:
             return False
         self.repair_attempts += 1
         self._phases.append("repair_attempt")
+        return True
+
+    def reserve_replan(self) -> bool:
+        """Consume the explicit macro-replan allowance on this root ledger."""
+        if (
+            self.exhausted
+            or self.replan_attempts >= self.max_replan_attempts
+        ):
+            return False
+        self.replan_attempts += 1
+        self._phases.append("macro_replan")
         return True
 
     def snapshot(self) -> dict[str, Any]:
@@ -297,6 +309,7 @@ class P45BenchmarkExecutor:
         provider: Any | None = None,
         provider_identity: dict[str, Any] | None = None,
         expected_model: str | None = None,
+        experiment_macro_replan_enabled: bool = False,
     ):
         if factory_type not in ("real", "scripted"):
             raise ValueError(
@@ -321,6 +334,12 @@ class P45BenchmarkExecutor:
             if self._provider_identity
             else None
         )
+        # The official Phase 4 path remains fail-closed at the macro boundary.
+        # Experiment 02 must opt in explicitly; this flag is execution-local
+        # and is never inferred from a frozen protocol input.
+        self._experiment_macro_replan_enabled = bool(
+            experiment_macro_replan_enabled
+        )
         logger.info("P45BenchmarkExecutor created with factory_type=%s", factory_type)
 
     def configure_frozen_budget(self, budgets: dict[str, Any] | None) -> None:
@@ -341,7 +360,9 @@ class P45BenchmarkExecutor:
             # them here prevents a recovery coordinator from inventing a new
             # budget at the provider boundary.
             "max_repair_attempts": 1,
-            "max_replan_attempts": 0,
+            "max_replan_attempts": (
+                1 if self._experiment_macro_replan_enabled else 0
+            ),
         }
 
     def _run_budget(self, run_id: str) -> RunBudgetLedger:
@@ -356,7 +377,9 @@ class P45BenchmarkExecutor:
                     "max_provider_calls": 2**31 - 1,
                     "max_turns": None,
                     "max_repair_attempts": 1,
-                    "max_replan_attempts": 0,
+                    "max_replan_attempts": (
+                        1 if self._experiment_macro_replan_enabled else 0
+                    ),
                 }
             ledger = RunBudgetLedger(**values)
             self._run_budgets[run_id] = ledger
@@ -558,6 +581,50 @@ class P45BenchmarkExecutor:
             trace.append(_trace_event("RUNTIME_CREATED", task_id, attempt_id,
                                       runtime_source=runtime_source))
 
+            # Experiment 02 may opt into the native fault boundary for its
+            # own telemetry. The default official Phase 4 path deliberately
+            # does not install this harness-local injector, so its frozen
+            # execution semantics remain unchanged.
+            experiment_fault_injector = None
+            experiment_fault_targets: list[tuple[Any, Any]] = []
+            if (
+                request.config.get("_experiment_macro_replan_enabled")
+                and config_id == "odys_p3"
+                and getattr(runtime, "kernel", None) is not None
+            ):
+                from evals.reliability.odys_executor import BenchmarkFaultInjector
+
+                experiment_fault_injector = BenchmarkFaultInjector(
+                    request.fault_context
+                )
+                for owner in (
+                    getattr(runtime, "kernel", None),
+                    getattr(runtime, "dispatcher", None),
+                    getattr(getattr(runtime, "kernel", None), "dispatcher", None),
+                ):
+                    if owner is None or not hasattr(owner, "fault_injector"):
+                        continue
+                    if any(existing is owner for existing, _ in experiment_fault_targets):
+                        continue
+                    original = getattr(owner, "fault_injector", None)
+                    experiment_fault_targets.append((owner, original))
+                    owner.fault_injector = experiment_fault_injector
+                if not experiment_fault_targets:
+                    raise RuntimeInfrastructureError(
+                        "EXPERIMENT_FAULT_BOUNDARY_UNAVAILABLE"
+                    )
+                trace.append(
+                    _trace_event(
+                        "FAULT_ARMED",
+                        task_id,
+                        attempt_id,
+                        fault_id=fault_id,
+                        trigger=request.fault.trigger,
+                        trigger_count=request.fault.trigger_count,
+                        capability=experiment_fault_injector.native_point,
+                    )
+                )
+
             # A frozen attempt-terminal fault is installed at the same native
             # pre-dispatch boundary for both runtime factories.  It is
             # one-shot and restored before the runner can invoke recovery, so
@@ -590,6 +657,14 @@ class P45BenchmarkExecutor:
             runtime_config["_attempt_id"] = attempt_id
             runtime_config["_workspace_root"] = str(workspace_dir)
             runtime_config["_execution_control"] = control
+            runtime_config["_run_budget_ledger"] = self._run_budget(run_id)
+            runtime_config["_experiment_macro_replan_enabled"] = (
+                self._experiment_macro_replan_enabled
+            )
+            runtime_config.setdefault(
+                "escalation_trigger_policy",
+                "NO_PROGRESS_AWARE",
+            )
             try:
                 outcome = await await_with_control(
                     runtime.execute(task, runtime_config),
@@ -597,12 +672,47 @@ class P45BenchmarkExecutor:
                     source="runtime",
                 )
             finally:
+                for owner, original in experiment_fault_targets:
+                    owner.fault_injector = original
                 for owner, original_injector in injector_targets:
                     owner.fault_injector = original_injector
             control.check()
             self._attach_provider_accounting(outcome, run_id)
             outcome.root_timeout_seconds = root_timeout_seconds
             outcome.provider_timeout_seconds = provider_timeout_seconds
+            if experiment_fault_injector is not None:
+                fault_triggered = bool(experiment_fault_injector.fired)
+                outcome.observed_state.setdefault(
+                    "fault_armed", True
+                )
+                outcome.observed_state.setdefault(
+                    "fault_triggered", fault_triggered
+                )
+                outcome.observed_state.setdefault(
+                    "fault_trigger_point",
+                    experiment_fault_injector.fired_point,
+                )
+                fired_snapshot = experiment_fault_injector.fired_kwargs.get(
+                    "snapshot"
+                )
+                trigger_index = getattr(
+                    fired_snapshot, "tool_call_count", None
+                ) if fired_snapshot is not None else None
+                outcome.observed_state.setdefault(
+                    "fault_trigger_index", trigger_index
+                )
+                if fault_triggered:
+                    trace.append(
+                        _trace_event(
+                            "FAULT_TRIGGERED",
+                            task_id,
+                            attempt_id,
+                            fault_id=fault_id,
+                            trigger_index=trigger_index,
+                            trigger_point=experiment_fault_injector.fired_point,
+                            capability=experiment_fault_injector.native_point,
+                        )
+                    )
             if terminal_injector is not None and terminal_injector.fired:
                 outcome.observed_state.setdefault("fault_fired", True)
                 outcome.observed_state.setdefault(

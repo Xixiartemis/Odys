@@ -340,10 +340,19 @@ class RunSpec:
     task: dict[str, Any]
     config: dict[str, Any]
     repeat_index: int
+    # Experiment-local arm identity.  It is intentionally optional so all
+    # frozen Phase 4 selectors retain their original run IDs.  Paired
+    # experiments that keep the same runtime config but vary one harness
+    # policy use this field to avoid result collisions without changing the
+    # config identity itself.
+    arm_id: str | None = None
 
     @property
     def run_id(self) -> str:
-        return f"{self.task['task_id']}::{self.config['config_id']}::repeat-{self.repeat_index}"
+        prefix = f"{self.task['task_id']}::{self.config['config_id']}"
+        if self.arm_id:
+            prefix = f"{prefix}::{self.arm_id}"
+        return f"{prefix}::repeat-{self.repeat_index}"
 
 
 def select_runs(

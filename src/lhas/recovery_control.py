@@ -321,6 +321,7 @@ class RecoveryController:
         max_no_progress: int = 3,
         max_repeated_action: int = 2,
         max_repeated_state: int = 2,
+        escalation_policy: str = "NO_PROGRESS_AWARE",
     ):
         self.db = db
         self.task_id = str(task_id)
@@ -333,11 +334,22 @@ class RecoveryController:
         self.max_no_progress = max(1, min(int(max_no_progress), 16))
         self.max_repeated_action = max(1, min(int(max_repeated_action), 16))
         self.max_repeated_state = max(1, min(int(max_repeated_state), 16))
+        self.escalation_policy = str(escalation_policy or "NO_PROGRESS_AWARE").upper()
+        if self.escalation_policy not in {"NO_PROGRESS_AWARE", "LEGACY_BOUNDED"}:
+            raise ValueError(
+                "unsupported escalation policy: "
+                f"{self.escalation_policy}"
+            )
         self.no_progress_count = 0
         self.repeated_action_count = 0
         self.repeated_state_count = 0
         self.validator_rejection_count = 0
         self.signals: list[dict[str, Any]] = []
+        # Baseline arms still observe and retain bounded no-progress evidence,
+        # but LEGACY_BOUNDED does not turn that observation into an early
+        # control decision. Durable replan signals remain reserved for the
+        # explicitly opted-in policy.
+        self.detections: list[dict[str, Any]] = []
         self.projector = RecoveryContextProjector()
 
     def observe(
@@ -357,8 +369,11 @@ class RecoveryController:
         if progress.status is ProgressStatus.SATISFIED:
             return RecoveryDecision.VALIDATE_CANDIDATE, progress
         if progress.status is ProgressStatus.OSCILLATING:
-            self.emit_signal("REPAIR_STATE_OSCILLATION", progress)
-            return RecoveryDecision.ESCALATE_MACRO_REPLAN, progress
+            self._record_detection("REPAIR_STATE_OSCILLATION", progress)
+            if self._no_progress_aware:
+                self.emit_signal("REPAIR_STATE_OSCILLATION", progress)
+                return RecoveryDecision.ESCALATE_MACRO_REPLAN, progress
+            return RecoveryDecision.CONTINUE_LOCAL_REPAIR, progress
         evidence = progress.evidence or {}
         if evidence.get("repeated_action"):
             self.repeated_action_count += 1
@@ -369,14 +384,23 @@ class RecoveryController:
         else:
             self.no_progress_count = 0
         if self.repeated_action_count >= self.max_repeated_action:
-            self.emit_signal("REPAIR_REPEATED_ACTION", progress)
-            return RecoveryDecision.ESCALATE_MACRO_REPLAN, progress
+            self._record_detection("REPAIR_REPEATED_ACTION", progress)
+            if self._no_progress_aware:
+                self.emit_signal("REPAIR_REPEATED_ACTION", progress)
+                return RecoveryDecision.ESCALATE_MACRO_REPLAN, progress
+            return RecoveryDecision.CONTINUE_LOCAL_REPAIR, progress
         if self.repeated_state_count >= self.max_repeated_state:
-            self.emit_signal("REPAIR_NO_PROGRESS", progress)
-            return RecoveryDecision.ESCALATE_MACRO_REPLAN, progress
+            self._record_detection("REPAIR_NO_PROGRESS", progress)
+            if self._no_progress_aware:
+                self.emit_signal("REPAIR_NO_PROGRESS", progress)
+                return RecoveryDecision.ESCALATE_MACRO_REPLAN, progress
+            return RecoveryDecision.CONTINUE_LOCAL_REPAIR, progress
         if self.no_progress_count >= self.max_no_progress:
-            self.emit_signal("REPAIR_NO_PROGRESS", progress)
-            return RecoveryDecision.ESCALATE_MACRO_REPLAN, progress
+            self._record_detection("REPAIR_NO_PROGRESS", progress)
+            if self._no_progress_aware:
+                self.emit_signal("REPAIR_NO_PROGRESS", progress)
+                return RecoveryDecision.ESCALATE_MACRO_REPLAN, progress
+            return RecoveryDecision.CONTINUE_LOCAL_REPAIR, progress
         return RecoveryDecision.CONTINUE_LOCAL_REPAIR, progress
 
     def validator_rejected(self) -> RecoveryDecision:
@@ -398,9 +422,25 @@ class RecoveryController:
         self.validator_rejection_count += 1
         self.no_progress_count += 1
         if self.validator_rejection_count >= self.max_no_progress:
-            self.emit_signal("REPEATED_VALIDATOR_REJECTION", progress)
-            return RecoveryDecision.ESCALATE_MACRO_REPLAN
+            self._record_detection("REPEATED_VALIDATOR_REJECTION", progress)
+            if self._no_progress_aware:
+                self.emit_signal("REPEATED_VALIDATOR_REJECTION", progress)
+                return RecoveryDecision.ESCALATE_MACRO_REPLAN
         return RecoveryDecision.CONTINUE_LOCAL_REPAIR
+
+    @property
+    def _no_progress_aware(self) -> bool:
+        return self.escalation_policy == "NO_PROGRESS_AWARE"
+
+    def _record_detection(self, reason: str, progress: EffectProgress) -> None:
+        self.detections.append(
+            {
+                "reason": reason,
+                "progress_status": progress.status.value,
+                "state_digest": progress.state_digest,
+                "action_fingerprint": progress.action_fingerprint,
+            }
+        )
 
     def acquire_local_turn(self) -> None:
         if self.budget_manager is None:

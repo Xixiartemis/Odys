@@ -493,6 +493,17 @@ class PlanExecutionService:
         signals = [signal for signal in signals if signal.id not in consumed]
         if not signals:
             return False
+        replan_budget_guard = context.get("_replan_budget_guard")
+        if callable(replan_budget_guard) and not replan_budget_guard():
+            self._emit(
+                EventType.REPLAN_REJECTED,
+                {
+                    "plan_id": plan.id,
+                    "reason": "MACRO_REPLAN_RESERVE_EXHAUSTED",
+                    "error_type": "REPLAN_BUDGET_EXHAUSTED",
+                },
+            )
+            return False
         result = await MacroReplanService(self.db, self.planner).consume(
             goal=goal, plan=plan, signals=signals, context={**context, "capabilities": self._planner_capabilities()}
         )
