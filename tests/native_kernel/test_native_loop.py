@@ -9,6 +9,7 @@ from lhas.native.models import ProviderResponse, ProviderToolCall
 from lhas.native.persistence import CompletionCandidateRepository, ExecutionSnapshotRepository, ReplanSignalRepository
 from lhas.native.provider import ScriptedProviderAdapter
 from lhas.native.tools import NativeToolDispatcher
+from lhas.repair_progress import RepairProgressTracker
 from lhas.persistence.event_store import EventStore
 from lhas.persistence.repositories import AttemptRepository, RunRepository
 from lhas.planning.models import CapabilitySpec
@@ -125,6 +126,57 @@ def test_native_multiple_tool_rounds(db, make_task):
     assert result.status is AgentStatus.COMPLETED
     assert result.turn_count == 3 and result.tool_call_count == 2
     assert tool.calls == [{"value": "one"}, {"value": "two"}]
+
+
+def test_native_repair_progress_stops_repeated_actions_before_budget(db, make_task):
+    tool = EchoTool()
+    case = _kernel_case(
+        db,
+        make_task,
+        [
+            ProviderResponse(
+                tool_calls=[
+                    ProviderToolCall(
+                        id="repeat-1",
+                        name="test.echo",
+                        arguments={"value": "same"},
+                    )
+                ]
+            ),
+            ProviderResponse(
+                tool_calls=[
+                    ProviderToolCall(
+                        id="repeat-2",
+                        name="test.echo",
+                        arguments={"value": "same"},
+                    )
+                ]
+            ),
+            ProviderResponse(
+                tool_calls=[
+                    ProviderToolCall(
+                        id="repeat-3",
+                        name="test.echo",
+                        arguments={"value": "same"},
+                    )
+                ]
+            ),
+            ProviderResponse(content="must not be consumed", completion_claim=True),
+        ],
+        tool=tool,
+    )
+    tracker = RepairProgressTracker(expected_effects={"value": "never"})
+    case[5].metadata["_repair_progress_tracker"] = tracker
+
+    result = asyncio.run(case[4].run(case[5]))
+
+    assert result.status is AgentStatus.FAILED
+    assert result.error_type == "REPEATED_ACTION"
+    assert result.tool_call_count == 3
+    assert len(tool.calls) == 3
+    convergence = result.artifacts["repair_convergence"]
+    assert convergence["repair_stop_reason"] == "REPEATED_ACTION"
+    assert convergence["repair_turns"] == 3
 
 
 def test_native_tool_failure_is_next_turn_observation(db, make_task):

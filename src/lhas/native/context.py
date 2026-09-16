@@ -46,12 +46,17 @@ class NativeContextAssembler:
             "tool_call_count": snapshot.tool_call_count,
             "workspace_identity": snapshot.workspace_identity,
             "workspace_mutation_version": snapshot.workspace_mutation_version,
-            "recent_tool_outcomes": snapshot.recent_tool_outcomes[-20:],
+            # Keep the prompt projection compact while the durable snapshot
+            # retains its bounded forensic history for replay/audit.
+            "recent_tool_outcomes": snapshot.recent_tool_outcomes[-8:],
             "repeated_failure_state": snapshot.repeated_failure_state,
             "verification_state": snapshot.verification_state,
             "current_failure": snapshot.current_failure,
             "delegation_dependencies": snapshot.delegation_dependencies,
         }
+        repair_progress = snapshot.current_failure.get("repair_convergence")
+        if isinstance(repair_progress, dict):
+            execution["repair_progress"] = dict(repair_progress)
         sources = [
             ContextSource("goal", request.objective, ContextPriority.REQUIRED, 20_000),
             ContextSource("acceptance", runtime.get("acceptance_criteria", []), ContextPriority.REQUIRED, 8_000),

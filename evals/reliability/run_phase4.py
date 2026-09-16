@@ -1886,6 +1886,11 @@ class Phase4Runner:
             "validator_observed_repaired_state": outcome.validator_observed_repaired_state,
         }
         recovery_identity["recovery_action"] = outcome.recovery_action
+        convergence = outcome.observed_state.get("repair_convergence")
+        if isinstance(convergence, Mapping):
+            # Runtime convergence evidence is additive execution evidence;
+            # the frozen benchmark metric definitions remain unchanged.
+            recovery_identity["repair_convergence"] = dict(convergence)
         return {
             "benchmark_version": benchmark_version or self.benchmark_version,
             "benchmark_run_id": spec.run_id,
@@ -2022,6 +2027,16 @@ class Phase4Runner:
                 outcome if outcome is not None else ExecutionOutcome()
             ),
         )
+        convergence = (
+            outcome.observed_state.get("repair_convergence")
+            if outcome is not None
+            and isinstance(outcome.observed_state, Mapping)
+            else None
+        )
+        if isinstance(convergence, Mapping):
+            runtime_environment["recovery"]["repair_convergence"] = dict(
+                convergence
+            )
         if diagnostic_trace_status is not None:
             runtime_environment["diagnostic_trace_status"] = diagnostic_trace_status
         return {

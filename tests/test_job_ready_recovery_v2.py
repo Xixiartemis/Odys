@@ -360,6 +360,11 @@ def test_v2_odys_repairs_after_typed_terminal_failure(tmp_path):
     evidence = raw["runtime_environment"]["state_evidence"]
     assert evidence["pre_repair_state_digest"] != evidence["post_repair_state_digest"]
     assert evidence["validator_observed_state_digest"] == evidence["post_repair_state_digest"]
+    convergence = raw["runtime_environment"]["recovery"]["repair_convergence"]
+    assert convergence["repair_turns"] == 2
+    assert convergence["unique_repair_states"] == 1
+    assert convergence["validation_candidate_count"] >= 1
+    assert convergence["repair_stop_reason"] == "VERIFIED"
     assert len(provider.call_records) == 3
     events = trace["execution_trace"]
     types = [event["event_type"] for event in events]

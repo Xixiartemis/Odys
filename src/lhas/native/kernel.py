@@ -37,6 +37,7 @@ from lhas.native.persistence import (
 from lhas.native.models import ProviderFailureCategory, ProviderHealthState, RuntimeTarget
 from lhas.native.runtime import ProviderFailureClassifier, ProviderHealthRepository
 from lhas.persistence.event_store import EventStore
+from lhas.repair_progress import RepairProgressTracker
 
 
 # The native kernel retains a conservative default for non-benchmark callers.
@@ -137,6 +138,7 @@ class NativeAgentKernel:
         self._ensure_runtime_target(request, snapshot)
         self._active_snapshot = snapshot
         self.dispatcher.restore_observer(snapshot.repeated_failure_state)
+        progress_tracker = self._repair_tracker(request)
 
         try:
             control.check()
@@ -202,6 +204,9 @@ class NativeAgentKernel:
                 replan_signals=signals,
             )
             next_turn = snapshot.model_turn_count + 1
+            if progress_tracker is not None:
+                progress_tracker.begin_turn()
+                snapshot.current_failure["repair_convergence"] = progress_tracker.snapshot()
             if snapshot.effective_target is not None:
                 health = self.provider_health.get(snapshot.effective_target)
                 if health and health["state"] in {ProviderHealthState.QUOTA_BLOCKED.value, ProviderHealthState.AUTH_BLOCKED.value}:
@@ -366,6 +371,11 @@ class NativeAgentKernel:
                         return self._control_terminated(request, snapshot, exc)
                     snapshot.tool_call_count += 1
                     snapshot.recent_tool_outcomes.append(observation)
+                    if progress_tracker is not None:
+                        progress = progress_tracker.observe(observation)
+                        snapshot.current_failure["repair_convergence"] = (
+                            progress_tracker.snapshot()
+                        )
                     snapshot.repeated_failure_state = self.dispatcher.observer_state()
                     summary = observation.get("safe_summary") if isinstance(observation, dict) else {}
                     if isinstance(summary, dict) and summary.get("meaningful_mutation"):
@@ -386,6 +396,24 @@ class NativeAgentKernel:
                             "capability": observation.get("capability"),
                         }
                     self._save(snapshot)
+                    if progress_tracker is not None and not progress.continue_repair:
+                        snapshot.phase = NativePhase.FAILED
+                        snapshot.current_failure.update(
+                            {
+                                "type": progress.stop_reason,
+                                "repair_stop_reason": progress.stop_reason,
+                            }
+                        )
+                        self._save(snapshot)
+                        return self._failed(
+                            request,
+                            snapshot,
+                            str(progress.stop_reason),
+                            detail=(
+                                "bounded repair convergence control stopped "
+                                f"after {progress_tracker.repair_turns} repair turns"
+                            ),
+                        )
                     try:
                         control.check()
                     except ExecutionControlError as exc:
@@ -395,6 +423,11 @@ class NativeAgentKernel:
                 continue
 
             if response.completion_claim:
+                if progress_tracker is not None:
+                    progress_tracker.candidate_for_validation()
+                    snapshot.current_failure["repair_convergence"] = (
+                        progress_tracker.snapshot()
+                    )
                 snapshot.phase = NativePhase.CANDIDATE_COMPLETE
                 self._save(snapshot)
                 try:
@@ -413,6 +446,12 @@ class NativeAgentKernel:
                     return self._accepted(request, snapshot, candidate.summary)
                 snapshot.phase = NativePhase.RECOVERING
                 snapshot.current_failure = {"type": "VALIDATOR_REJECTION", "candidate_id": candidate.id}
+                rejection_progress = None
+                if progress_tracker is not None:
+                    rejection_progress = progress_tracker.validation_rejected()
+                    snapshot.current_failure["repair_convergence"] = (
+                        progress_tracker.snapshot()
+                    )
                 snapshot.recent_tool_outcomes.append({
                     "capability": "completion.validate",
                     "status": "FAILURE",
@@ -421,6 +460,20 @@ class NativeAgentKernel:
                     "safe_summary": candidate.validation,
                 })
                 self._save(snapshot)
+                if (
+                    progress_tracker is not None
+                    and rejection_progress is not None
+                    and not rejection_progress.continue_repair
+                ):
+                    return self._failed(
+                        request,
+                        snapshot,
+                        str(rejection_progress.stop_reason),
+                        detail=(
+                            "bounded repair convergence control stopped after "
+                            f"{progress_tracker.repair_turns} repair turns"
+                        ),
+                    )
                 continue
 
             snapshot.phase = NativePhase.FAILED
@@ -464,16 +517,21 @@ class NativeAgentKernel:
             payload=evidence,
         )
         self._states[request.agent_id] = AgentStatus.CANCELLED
+        artifacts = {
+            "execution_snapshot_id": snapshot.id,
+            "execution_control": evidence,
+        }
+        tracker = self._repair_tracker(request)
+        if tracker is not None:
+            tracker.stop("CANCELLED")
+            artifacts["repair_convergence"] = tracker.snapshot()
         return AgentResult(
             status=AgentStatus.CANCELLED,
             completion_claim=False,
             turn_count=snapshot.model_turn_count,
             tool_call_count=snapshot.tool_call_count,
             safe_trace=snapshot.recent_tool_outcomes[-100:],
-            artifacts={
-                "execution_snapshot_id": snapshot.id,
-                "execution_control": evidence,
-            },
+            artifacts=artifacts,
             error_type=error.failure_type,
             error_message=error.reason[:512],
         )
@@ -626,14 +684,51 @@ class NativeAgentKernel:
 
     def _accepted(self, request: AgentRequest, snapshot: ExecutionSnapshot, output: str) -> AgentResult:
         self._states[request.agent_id] = AgentStatus.COMPLETED
-        return AgentResult(status=AgentStatus.COMPLETED, final_output=output, completion_claim=True, turn_count=snapshot.model_turn_count, tool_call_count=snapshot.tool_call_count, safe_trace=snapshot.recent_tool_outcomes[-100:], artifacts={"completion_candidate_id": snapshot.completion_candidate_id, "execution_snapshot_id": snapshot.id})
+        artifacts = {
+            "completion_candidate_id": snapshot.completion_candidate_id,
+            "execution_snapshot_id": snapshot.id,
+        }
+        tracker = self._repair_tracker(request)
+        if tracker is not None:
+            tracker.stop("VERIFIED")
+            artifacts["repair_convergence"] = tracker.snapshot()
+        return AgentResult(
+            status=AgentStatus.COMPLETED,
+            final_output=output,
+            completion_claim=True,
+            turn_count=snapshot.model_turn_count,
+            tool_call_count=snapshot.tool_call_count,
+            safe_trace=snapshot.recent_tool_outcomes[-100:],
+            artifacts=artifacts,
+        )
 
     def _failed(self, request: AgentRequest, snapshot: ExecutionSnapshot, error_type: str, *, detail: str | None = None) -> AgentResult:
         self._states[request.agent_id] = AgentStatus.FAILED
         if snapshot.phase not in {NativePhase.REPLANNING, NativePhase.RECOVERING}:
             snapshot.phase = NativePhase.FAILED
             self._save(snapshot)
-        return AgentResult(status=AgentStatus.FAILED, completion_claim=False, turn_count=snapshot.model_turn_count, tool_call_count=snapshot.tool_call_count, safe_trace=snapshot.recent_tool_outcomes[-100:], artifacts={"execution_snapshot_id": snapshot.id, "workspace_mutation_version": snapshot.workspace_mutation_version}, error_type=error_type, error_message=(detail or "")[:512] or None)
+        artifacts = {
+            "execution_snapshot_id": snapshot.id,
+            "workspace_mutation_version": snapshot.workspace_mutation_version,
+        }
+        tracker = self._repair_tracker(request)
+        if tracker is not None:
+            if error_type == "BUDGET_EXHAUSTED":
+                tracker.stop("BUDGET_EXHAUSTED")
+            elif tracker.repair_stop_reason is None:
+                tracker.stop(
+                    "MODEL_FAILURE"
+                    if error_type.startswith("PROVIDER")
+                    or "MODEL" in error_type
+                    else "TOOL_FAILURE"
+                )
+            artifacts["repair_convergence"] = tracker.snapshot()
+        return AgentResult(status=AgentStatus.FAILED, completion_claim=False, turn_count=snapshot.model_turn_count, tool_call_count=snapshot.tool_call_count, safe_trace=snapshot.recent_tool_outcomes[-100:], artifacts=artifacts, error_type=error_type, error_message=(detail or "")[:512] or None)
+
+    @staticmethod
+    def _repair_tracker(request: AgentRequest) -> RepairProgressTracker | None:
+        tracker = (request.metadata or {}).get("_repair_progress_tracker")
+        return tracker if isinstance(tracker, RepairProgressTracker) else None
 
     @staticmethod
     def _response_shape(value: Any, *, turn: int) -> dict[str, Any]:

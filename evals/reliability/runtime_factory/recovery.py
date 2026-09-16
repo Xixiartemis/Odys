@@ -109,9 +109,16 @@ class _KernelTaskExecutor:
         from lhas.agent.models import AgentBudget, AgentRequest, AgentRole, AgentStatus
         from lhas.domain.enums import ExecutionStatus
         from lhas.executors.protocol import ExecutionResult
+        from lhas.repair_progress import RepairProgressTracker
 
         task = request.task if isinstance(request.task, Mapping) else {}
         context = dict(request.context or {})
+        progress_config = context.pop("_repair_progress_config", None)
+        progress_tracker = (
+            RepairProgressTracker.from_config(progress_config)
+            if isinstance(progress_config, Mapping)
+            else None
+        )
         context.setdefault(
             "acceptance_criteria",
             list(task.get("acceptance_criteria", [])),
@@ -126,6 +133,11 @@ class _KernelTaskExecutor:
             "run_id": request.run_id,
             "attempt_id": request.attempt_id,
         }
+        if progress_tracker is not None:
+            # In-process only: never place the tracker in prompt context or
+            # durable plan JSON.  The static config is the only persisted
+            # repair input; tracker state belongs to this native Attempt.
+            metadata["_repair_progress_tracker"] = progress_tracker
         binder = getattr(self.provider, "bind_execution_context", None)
         if callable(binder):
             binder(
@@ -162,13 +174,26 @@ class _KernelTaskExecutor:
         agent_request.execution_control = control
         result = await self.kernel.run(agent_request, execution_control=control)
         completed = result.status is AgentStatus.COMPLETED
+        artifacts = dict(result.artifacts or {})
+        if progress_tracker is not None:
+            if result.status is AgentStatus.COMPLETED:
+                progress_tracker.stop("VERIFIED")
+            elif progress_tracker.repair_stop_reason is None:
+                error_type = str(result.error_type or "")
+                progress_tracker.stop(
+                    "MODEL_FAILURE"
+                    if error_type.startswith("PROVIDER")
+                    or "MODEL" in error_type
+                    else "TOOL_FAILURE"
+                )
+            artifacts["repair_convergence"] = progress_tracker.snapshot()
         return ExecutionResult(
             status=ExecutionStatus.SUCCESS if completed else ExecutionStatus.FAILURE,
             output=result.final_output,
             error_type=result.error_type,
             error_message=result.error_message,
             usage=dict(result.usage or {}),
-            artifacts=dict(result.artifacts or {}),
+            artifacts=artifacts,
             raw={
                 "safe_trace": list(result.safe_trace or []),
                 "completion_claim": bool(result.completion_claim),
@@ -475,6 +500,16 @@ class OfficialOdysRecoveryCoordinator:
                         "capability before claiming completion."
                     ),
                 },
+                # This is a generic, serializable policy input.  The tracker
+                # itself is created inside the repair Attempt and is never
+                # persisted as an object or treated as completion authority.
+                "_repair_progress_config": {
+                    "expected_effects": dict(step.expected_effects),
+                    "initial_state_digest": outcome.pre_repair_state_digest,
+                    "max_no_progress": 3,
+                    "max_repeated_state": 2,
+                    "max_repeated_action": 2,
+                },
                 "_execution_control": getattr(request, "execution_control", None),
             },
         )
@@ -521,6 +556,14 @@ class OfficialOdysRecoveryCoordinator:
         # tasks.  It is the canonical scope decision produced by the
         # planning authority, not a fabricated success flag.
         state["repair_scope"] = scope.value.lower()
+        convergence = state.get("repair_convergence")
+        if not isinstance(convergence, Mapping):
+            convergence = {}
+        else:
+            convergence = dict(convergence)
+        if repaired_step.status is PlanStepStatus.VERIFIED:
+            convergence["repair_stop_reason"] = "VERIFIED"
+        state["repair_convergence"] = convergence
         repair_tool_calls = 0
         invocations = getattr(self.kernel.dispatcher, "invocations", None)
         if invocations is not None and repair_attempt_id:

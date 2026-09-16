@@ -470,6 +470,7 @@ class NativeToolDispatcher:
         model_observation = {
             "tool_call_id": call.id[:128],
             "capability": call.name,
+            "args_sha256": invocation.args_fingerprint,
             "status": result.status.value,
             "error_type": result.error_type,
             "error_message": _safe_value(result.error_message, 512),

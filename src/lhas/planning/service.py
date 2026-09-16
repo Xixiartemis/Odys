@@ -138,6 +138,9 @@ class _TaskGraphAgentExecutor:
             repair_context = runtime_context.get("repair_context")
             if isinstance(repair_context, Mapping):
                 context["repair_context"] = dict(repair_context)
+            progress_config = runtime_context.get("_repair_progress_config")
+            if isinstance(progress_config, Mapping):
+                context["_repair_progress_config"] = dict(progress_config)
             if self.step.required_capabilities:
                 context.setdefault(
                     "allowed_capabilities",
