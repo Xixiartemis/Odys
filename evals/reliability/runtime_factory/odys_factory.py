@@ -144,6 +144,23 @@ class _OdysRuntime:
                 "run_id": run_id,
                 "attempt_id": attempt_id,
             }
+            # The experiment opt-in is deliberately explicit.  Ordinary
+            # official Odys runs may retain the historical default policy
+            # name without changing their initial execution semantics.
+            escalation_policy = str(
+                config.get("escalation_trigger_policy", "")
+            ).upper()
+            if (
+                self.recovery is not None
+                and escalation_policy == "NO_PROGRESS_AWARE"
+                and bool(config.get("_experiment_macro_replan_enabled"))
+            ):
+                controller = self.recovery.controller_for(run_id)
+                if controller is None:
+                    raise RuntimeError("INITIAL_RECOVERY_CONTROLLER_UNAVAILABLE")
+                # In-process only: NativeAgentKernel consumes the same
+                # run-scoped controller that canonical recovery will reuse.
+                metadata["_recovery_controller"] = controller
 
             request = AgentRequest(
                 agent_id=f"odys-{run_id}",

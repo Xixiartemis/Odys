@@ -43,6 +43,19 @@ class ReplanTriggerPolicy:
             for signal in self.signals.list_for_attempt(attempt.id)
             if signal.reason in TYPED_ESCALATION_REASONS
         ]
+        if not typed_signals:
+            # Native recovery controllers may persist a typed signal against
+            # the canonical run identity before an enclosing planning
+            # service has materialized/linked the corresponding Attempt row.
+            # The signal is still durable and run-scoped, so do not discard
+            # it merely because the attempt foreign-key projection is not
+            # available at this boundary.  Keep the attempt lookup primary;
+            # this is a fail-closed same-run fallback, not a cross-run join.
+            typed_signals = [
+                signal
+                for signal in self.signals.list_for_run(run_id)
+                if signal.reason in TYPED_ESCALATION_REASONS
+            ]
         if typed_signals:
             signal = typed_signals[-1]
             return ReplanTrigger(

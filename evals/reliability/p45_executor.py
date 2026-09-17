@@ -1013,7 +1013,11 @@ class P45BenchmarkExecutor:
 
     def cleanup(self, request: ExecutionRequest) -> None:
         """Release one run's workspace after validation/recovery is complete."""
-        self._active_runtimes.pop(request.run_id, None)
+        runtime = self._active_runtimes.pop(request.run_id, None)
+        recovery = getattr(runtime, "recovery", None)
+        discard_controller = getattr(recovery, "discard_controller", None)
+        if callable(discard_controller):
+            discard_controller(request.run_id)
         self._reset_fixture(request)
         self._run_budgets.pop(request.run_id, None)
         self._provider_call_offsets.pop(request.run_id, None)

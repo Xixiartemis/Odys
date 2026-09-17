@@ -69,6 +69,26 @@ def test_quota_classification_and_route_health_are_bounded(db):
     assert health.get(target)["state"] == "QUOTA_BLOCKED"
 
 
+@pytest.mark.parametrize(
+    ("exception_name", "message"),
+    [
+        ("APIConnectionError", "provider connection failed"),
+        ("ConnectError", "transport connect failed"),
+        ("RuntimeError", "Connection error"),
+    ],
+)
+def test_provider_connection_failures_are_unavailable_not_unknown(
+    exception_name, message
+):
+    error_type = type(exception_name, (Exception,), {})
+    error = error_type(message)
+
+    assert (
+        ProviderFailureClassifier.classify(error)
+        is ProviderFailureCategory.PROVIDER_UNAVAILABLE
+    )
+
+
 @pytest.mark.parametrize(("message", "expected"), [
     ("Rate limit reached", ProviderFailureCategory.TRANSIENT_RATE_LIMIT),
     ("Too many requests; Retry-After: 2", ProviderFailureCategory.TRANSIENT_RATE_LIMIT),

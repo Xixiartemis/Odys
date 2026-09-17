@@ -93,6 +93,60 @@ def test_controller_persists_no_progress_and_policy_consumes_signal(db, make_tas
     assert trigger is not None and trigger.reason == "REPAIR_NO_PROGRESS"
 
 
+def test_policy_consumes_run_scoped_signal_without_attempt_projection(
+    db, make_task
+):
+    task = make_task()
+    run = RunRepository(db).create(
+        Run(id="run-scoped-control", task_id=task.id, status="RUNNING")
+    )
+    AttemptRepository(db).create(
+        Attempt(
+            id="durable-attempt-projection",
+            run_id=run.id,
+            attempt_number=1,
+            status="RUNNING",
+        )
+    )
+    controller = RecoveryController(
+        db=db,
+        task_id=task.id,
+        run_id=run.id,
+        # Simulate the native runtime identity before its planning Attempt
+        # projection is linked. The signal remains durably run-scoped.
+        attempt_id="native-runtime-attempt",
+        step_id="step-run-scoped",
+        max_no_progress=2,
+        max_repeated_action=9,
+        max_repeated_state=1,
+    )
+    controller.observe(
+        before_state=None,
+        after_state={"checksum": "same"},
+        action={"capability": "workspace.edit", "args_sha256": "a" * 64},
+        observation={"safe_summary": {"checksum": "same"}},
+    )
+    decision, _ = controller.observe(
+        before_state=None,
+        after_state={"checksum": "same"},
+        action={"capability": "workspace.edit", "args_sha256": "a" * 64},
+        observation={"safe_summary": {"checksum": "same"}},
+    )
+
+    assert decision is RecoveryDecision.ESCALATE_MACRO_REPLAN
+    trigger = ReplanTriggerPolicy(db).evaluate(
+        step=PlanStep(
+            id="step-run-scoped",
+            title="repair",
+            objective="repair",
+            capability="workspace.edit",
+        ),
+        run_id=run.id,
+    )
+    assert trigger is not None
+    assert trigger.reason == "REPAIR_NO_PROGRESS"
+
+
 def test_repeated_validator_rejection_becomes_durable_replan_signal(db, make_task):
     task = make_task()
     run = RunRepository(db).create(Run(id="validator-control-run", task_id=task.id, status="RUNNING"))

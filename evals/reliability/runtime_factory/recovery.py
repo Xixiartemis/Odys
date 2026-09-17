@@ -258,6 +258,11 @@ class OfficialOdysRecoveryCoordinator:
         self.kernel = kernel
         self.registry = registry
         self._contexts: dict[str, dict[str, Any]] = {}
+        # One controller is created at the run boundary and reused by the
+        # initial native attempt and the canonical recovery path.  Keeping the
+        # object here is intentionally in-process only; durable escalation
+        # truth remains in ReplanSignalRepository/EventStore.
+        self._controllers: dict[str, Any] = {}
         self.experiment_macro_replan_enabled = bool(
             experiment_macro_replan_enabled
         )
@@ -292,6 +297,20 @@ class OfficialOdysRecoveryCoordinator:
         self.execution_control = control
         self.service.execution_control = control
 
+    def controller_for(self, run_id: str) -> Any | None:
+        """Return the run-scoped controller for the initial native attempt."""
+        return self._controllers.get(str(run_id))
+
+    def discard_controller(self, run_id: str) -> None:
+        """Release a run-scoped controller after the run is terminal.
+
+        Recovery consumes the controller itself when validation rejects a
+        candidate.  Accepted initial executions and infrastructure failures
+        bypass that path, so the runtime boundary must also be able to
+        release the in-process reference without touching durable evidence.
+        """
+        self._controllers.pop(str(run_id), None)
+
     def _reserve_replan(self) -> bool:
         authority = self.root_budget_authority
         reserve = getattr(authority, "reserve_replan", None)
@@ -319,6 +338,7 @@ class OfficialOdysRecoveryCoordinator:
         """Persist the single-step plan that will receive external rejection."""
         from lhas.domain.enums import EventType
         from lhas.domain.models import Project
+        from lhas.recovery_control import RecoveryController
         from lhas.persistence.event_store import EventStore
         from lhas.persistence.planning_repositories import GoalRepository, PlanRepository
         from lhas.persistence.repositories import ProjectRepository
@@ -390,6 +410,19 @@ class OfficialOdysRecoveryCoordinator:
             budget={"max_repair_attempts": 1},
             evidence={"original_failure_attempt_id": attempt_id},
         )
+        repair_thresholds = repair_thresholds_from_task(task)
+        self._controllers[run_id] = RecoveryController(
+            db=self.db,
+            task_id=task_id,
+            run_id=run_id,
+            attempt_id=attempt_id,
+            step_id=step_id,
+            expected_effects=dict(step.expected_effects),
+            **repair_thresholds,
+            escalation_policy=str(
+                config.get("escalation_trigger_policy", self.escalation_trigger_policy)
+            ),
+        )
         official_benchmark_recovery = not self.experiment_macro_replan_enabled
         plan = Plan(
             id=f"{run_id}::recovery-plan",
@@ -443,6 +476,7 @@ class OfficialOdysRecoveryCoordinator:
         if control is not None:
             control.check()
         context = self._contexts.pop(request.run_id, None)
+        recovery_controller = self._controllers.pop(request.run_id, None)
         if context is None:
             raise OfficialRecoveryContractError("RECOVERY_CONTEXT_MISSING")
         plans = PlanRepository(self.db)
@@ -500,6 +534,43 @@ class OfficialOdysRecoveryCoordinator:
             error_type=failure_type.value,
         )
 
+        if (
+            self.experiment_macro_replan_enabled
+            and str(
+                request.config.get(
+                    "escalation_trigger_policy",
+                    self.escalation_trigger_policy,
+                )
+            ).upper()
+            == "NO_PROGRESS_AWARE"
+        ):
+            # The initial kernel may have emitted a typed signal before
+            # external validation rejected the candidate.  Consume the
+            # durable same-run signal at this recovery boundary so the
+            # canonical planning service receives MACRO_REPLAN rather than
+            # silently falling back to LOCAL.
+            from lhas.native.persistence import ReplanSignalRepository
+            from lhas.recovery_control import TYPED_ESCALATION_REASONS
+
+            typed_signals = [
+                item
+                for item in ReplanSignalRepository(self.db).list_for_run(
+                    request.run_id
+                )
+                if item.reason in TYPED_ESCALATION_REASONS
+            ]
+            if typed_signals:
+                signal = typed_signals[-1]
+                scope = RepairScope.MACRO_REPLAN
+                step.evidence["recovery_control_escalation"] = {
+                    "reason": signal.reason,
+                    "evidence": {
+                        "source": "DURABLE_RUN_REPLAN_SIGNAL",
+                        "signal_id": signal.id,
+                        **dict(signal.evidence or {}),
+                    },
+                }
+
         provenance = StepFailureProvenance(
             step_id=step.id,
             plan_id=plan.id,
@@ -530,24 +601,28 @@ class OfficialOdysRecoveryCoordinator:
         before_ids = {
             event.id for event in events.list_all() if event.id is not None
         }
-        from lhas.recovery_control import RecoveryController
-
         repair_thresholds = repair_thresholds_from_task(request.task)
-        recovery_controller = RecoveryController(
-            db=self.db,
-            task_id=context["task_id"],
-            run_id=request.run_id,
-            attempt_id=context["attempt_id"],
-            step_id=step.id,
-            expected_effects=dict(step.expected_effects),
-            **repair_thresholds,
-            escalation_policy=str(
-                request.config.get(
-                    "escalation_trigger_policy",
-                    self.escalation_trigger_policy,
-                )
-            ),
-        )
+        if recovery_controller is None:
+            # Compatibility for callers that enter recovery without first
+            # passing through prepare().  The official runtime path always
+            # creates and reuses the controller above.
+            from lhas.recovery_control import RecoveryController
+
+            recovery_controller = RecoveryController(
+                db=self.db,
+                task_id=context["task_id"],
+                run_id=request.run_id,
+                attempt_id=context["attempt_id"],
+                step_id=step.id,
+                expected_effects=dict(step.expected_effects),
+                **repair_thresholds,
+                escalation_policy=str(
+                    request.config.get(
+                        "escalation_trigger_policy",
+                        self.escalation_trigger_policy,
+                    )
+                ),
+            )
         events.append(
             EventType.STEP_FAILURE_PROVENANCE,
             payload={
@@ -571,6 +646,7 @@ class OfficialOdysRecoveryCoordinator:
             if callable(bind_phase):
                 bind_phase("recovery")
 
+        pre_replan_count = int(plan.replan_count)
         repaired_plan = await self.service.repair_after_failure(
             plan.id,
             step.id,
@@ -631,6 +707,79 @@ class OfficialOdysRecoveryCoordinator:
             },
         )
 
+        # Macro replan changes the durable graph, but the generic planning
+        # service intentionally returns after accepting that graph.  The
+        # official recovery boundary must then execute the newly proposed
+        # strategy through that same service, controller, root ledger, and
+        # validator path.  Otherwise the bridge would project the old stale
+        # step as if a repair attempt had happened and lose real lineage.
+        post_replan_step_ids: set[str] = set()
+        if (
+            scope == RepairScope.MACRO_REPLAN
+            and int(repaired_plan.replan_count) > pre_replan_count
+        ):
+            post_replan_step_ids = {
+                item.id
+                for item in repaired_plan.steps
+                if item.id != step.id
+                and item.status
+                not in {
+                    PlanStepStatus.VERIFIED,
+                    PlanStepStatus.COMPLETED,
+                    PlanStepStatus.STALE,
+                }
+            }
+            if not post_replan_step_ids:
+                raise OfficialRecoveryContractError("POST_REPLAN_STEP_MISSING")
+            repaired_plan = await self.service.execute_goal(
+                context["goal"],
+                context={
+                    "benchmark_task_id": context["task_id"],
+                    "benchmark_run_id": request.run_id,
+                    "official_benchmark_recovery": False,
+                    "experiment_macro_replan_enabled": True,
+                    "recovery_control_plane_v2": True,
+                    "escalation_trigger_policy": str(
+                        request.config.get(
+                            "escalation_trigger_policy",
+                            self.escalation_trigger_policy,
+                        )
+                    ),
+                    "bounded_recovery": True,
+                    "timeout_seconds": float(
+                        request.task.get("timeout_seconds", 60.0)
+                    ),
+                    "repair_context": {
+                        "failure_provenance": provenance.model_dump(mode="json"),
+                        "observed_state": dict(outcome.observed_state),
+                        "expected_observable_effects": dict(
+                            step.expected_effects
+                        ),
+                        "required_capabilities": list(
+                            step.required_capabilities
+                        ),
+                        "repair_scope": scope.value,
+                        "instruction": (
+                            "Execute the accepted alternate recovery strategy "
+                            "before claiming completion."
+                        ),
+                    },
+                    "_repair_progress_config": {
+                        "expected_effects": dict(step.expected_effects),
+                        "initial_state_digest": outcome.pre_repair_state_digest,
+                        **repair_thresholds,
+                    },
+                    "_recovery_controller": recovery_controller,
+                    "_execution_control": getattr(
+                        request, "execution_control", None
+                    ),
+                },
+                experiment_id=str(request.task.get("benchmark_version", ""))
+                or None,
+                resume_plan_id=repaired_plan.id,
+                repair_step_ids=post_replan_step_ids,
+            )
+
         # Project bounded recovery-control telemetry from durable events and
         # controller decisions. The policy is execution-local and never
         # becomes validator truth or benchmark input.
@@ -690,15 +839,67 @@ class OfficialOdysRecoveryCoordinator:
                 if callable(mark_replan):
                     mark_replan()
 
-        repaired_step = next(
-            item for item in repaired_plan.steps if item.id == step.id
-        )
+        if scope == RepairScope.MACRO_REPLAN:
+            repaired_step = next(
+                (
+                    item
+                    for item in repaired_plan.steps
+                    if item.id in post_replan_step_ids
+                ),
+                None,
+            )
+            if repaired_step is None:
+                raise OfficialRecoveryContractError("POST_REPLAN_STEP_MISSING")
+            # The new strategy is the repair attempt.  Carry the original
+            # failure provenance onto that new node before recording lineage.
+            repaired_step.evidence.setdefault(
+                "failure_provenance",
+                dict(step.evidence.get("failure_provenance", {})),
+            )
+        else:
+            repaired_step = next(
+                item for item in repaired_plan.steps if item.id == step.id
+            )
         if control is not None:
             control.check()
         original_attempt_id = repaired_step.evidence.get(
             "original_failure_attempt_id", context["attempt_id"]
         )
         repair_attempt_id = repaired_step.evidence.get("repair_attempt_id")
+        if scope == RepairScope.MACRO_REPLAN and not repair_attempt_id:
+            from lhas.persistence.repositories import AttemptRepository, RunRepository
+
+            if repaired_step.task_id:
+                repair_runs = RunRepository(self.db).list_for_task(
+                    repaired_step.task_id
+                )
+                if repair_runs:
+                    repair_attempts = AttemptRepository(self.db).list_for_run(
+                        repair_runs[-1].id
+                    )
+                    if repair_attempts:
+                        repair_attempt_id = repair_attempts[-1].id
+            if not repair_attempt_id or repair_attempt_id == original_attempt_id:
+                raise OfficialRecoveryContractError("REPAIR_ATTEMPT_LINEAGE_MISSING")
+            lineage = {
+                "plan_id": repaired_plan.id,
+                "step_id": repaired_step.id,
+                "original_failure_attempt_id": str(original_attempt_id),
+                "repair_attempt_id": str(repair_attempt_id),
+                "repair_number": 1,
+                "repair_scope": scope.value,
+            }
+            repaired_step.evidence["original_failure_attempt_id"] = str(
+                original_attempt_id
+            )
+            repaired_step.evidence["repair_attempt_id"] = str(repair_attempt_id)
+            repaired_step.evidence["repair_scope"] = scope.value
+            repaired_step.evidence["repair_lineage"] = [lineage]
+            PlanRepository(self.db).update(repaired_plan)
+            events.append(
+                EventType.REPAIR_COMPLETED,
+                payload={**lineage, "outcome": "ATTEMPT_CREATED"},
+            )
         if scope != RepairScope.MACRO_REPLAN and (
             not repair_attempt_id or repair_attempt_id == original_attempt_id
         ):

@@ -103,7 +103,19 @@ class ProviderFailureClassifier:
             or "TIMED OUT" in upper
         ):
             return ProviderFailureCategory.PROVIDER_TIMEOUT
-        if status in {408, 425, 500, 502, 503, 504} or any(token in upper for token in ("UNAVAILABLE", "CONNECTION RESET", "SERVICE DOWN")):
+        if status in {408, 425, 500, 502, 503, 504} or any(
+            token in upper
+            for token in (
+                "UNAVAILABLE",
+                "CONNECTION RESET",
+                "CONNECTION ERROR",
+                "SERVICE DOWN",
+                "APICONNECTIONERROR",
+                "CONNECTERROR",
+            )
+        ) or any(
+            token in error_name for token in ("APICONNECTIONERROR", "CONNECTERROR")
+        ):
             return ProviderFailureCategory.PROVIDER_UNAVAILABLE
         return ProviderFailureCategory.UNKNOWN_PROVIDER_FAILURE
 

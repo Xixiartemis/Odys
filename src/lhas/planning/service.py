@@ -20,7 +20,8 @@ from lhas.planning.models import (
 from lhas.planning.scheduler import TaskGraphScheduler, build_step_dependency_context
 from lhas.planning.planner import Planner
 from lhas.planning.replan import MacroReplanService
-from lhas.planning.replan_policy import ReplanTriggerPolicy
+from lhas.planning.replan_policy import ReplanTrigger, ReplanTriggerPolicy
+from lhas.recovery_control import TYPED_ESCALATION_REASONS
 from lhas.tools.registry import ToolRegistry
 from lhas.tools.protocol import ToolRequest, ToolResultStatus
 
@@ -718,6 +719,59 @@ class PlanExecutionService:
             failure_class=provenance.get("failure_class"),
             error_type=provenance.get("failure_type"),
         )
+        # A NO_PROGRESS_AWARE initial attempt may already have emitted a
+        # durable typed control signal before external validation runs.  Let
+        # the canonical replan policy consume that signal immediately instead
+        # of starting one more local repair attempt.  LEGACY_BOUNDED does not
+        # emit these signals and therefore retains its existing scope.
+        if (
+            context
+            and context.get("recovery_control_plane_v2")
+            and str(context.get("escalation_trigger_policy", "")).upper()
+            == "NO_PROGRESS_AWARE"
+        ):
+            signal_run_id = str(
+                provenance.get("run_id")
+                or context.get("benchmark_run_id")
+                or ""
+            )
+            trigger = (
+                ReplanTriggerPolicy(self.db).evaluate(
+                    step=failed_step,
+                    run_id=signal_run_id,
+                )
+                if signal_run_id
+                else None
+            )
+            if trigger is None and signal_run_id:
+                # The native controller's run-scoped signal is authoritative
+                # even when the Attempt projection is not yet linked to the
+                # planning step.  Re-read that same durable run projection
+                # here rather than silently falling back to LOCAL repair.
+                run_signals = [
+                    item
+                    for item in ReplanSignalRepository(self.db).list_for_run(
+                        signal_run_id
+                    )
+                    if item.reason in TYPED_ESCALATION_REASONS
+                ]
+                if run_signals:
+                    signal = run_signals[-1]
+                    trigger = ReplanTrigger(
+                        reason=signal.reason,
+                        evidence={
+                            "source": "DURABLE_RUN_REPLAN_SIGNAL",
+                            "signal_id": signal.id,
+                            "capability": failed_step.capability,
+                            **dict(signal.evidence or {}),
+                        },
+                    )
+            if trigger is not None and trigger.reason in TYPED_ESCALATION_REASONS:
+                scope = RepairScope.MACRO_REPLAN
+                failed_step.evidence["recovery_control_escalation"] = {
+                    "reason": trigger.reason,
+                    "evidence": dict(trigger.evidence),
+                }
 
         # MACRO_REPLAN: invoke canonical macro replan path, NOT local repair
         if scope == RepairScope.MACRO_REPLAN:
