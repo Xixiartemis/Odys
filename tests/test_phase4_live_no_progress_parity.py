@@ -29,9 +29,17 @@ def test_02d_uses_live_path_and_gates_alternate_effects(tmp_path):
     assert report["baseline"]["no_progress_observed"] is True
     assert report["baseline"]["no_progress_used_for_control"] is False
     assert report["baseline"]["macro_replan_executed"] is True
+    assert all(
+        "REPAIR_NO_PROGRESS" not in item["signal_reasons"]
+        for item in report["baseline"]["replan_results"]
+    )
     assert report["v2"]["no_progress_observed"] is True
     assert report["v2"]["no_progress_used_for_control"] is True
     assert report["v2"]["macro_replan_executed"] is True
+    assert any(
+        "REPAIR_NO_PROGRESS" in item["signal_reasons"]
+        for item in report["v2"]["replan_results"]
+    )
 
     for arm in ("baseline", "v2"):
         assert report[arm]["recovery_attempted"] is True

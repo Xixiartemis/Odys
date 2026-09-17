@@ -375,6 +375,7 @@ class OfficialOdysRecoveryCoordinator:
             status=PlanStatus.FAILED,
             steps=[step],
             metadata={
+                "benchmark_run_id": run_id,
                 "official_benchmark_recovery": official_benchmark_recovery,
                 "experiment_macro_replan_enabled": self.experiment_macro_replan_enabled,
                 "escalation_trigger_policy": self.escalation_trigger_policy,

@@ -472,6 +472,14 @@ class PlanExecutionService:
         repo = ReplanSignalRepository(self.db)
         for attempt in attempts:
             signals.extend(repo.list_for_attempt(attempt.id))
+        benchmark_run_id = plan.metadata.get("benchmark_run_id")
+        if benchmark_run_id:
+            known_signal_ids = {signal.id for signal in signals}
+            signals.extend(
+                signal
+                for signal in repo.list_for_run(str(benchmark_run_id))
+                if signal.id not in known_signal_ids
+            )
         # A completion authority emits validator-rejection truth before the
         # plan service knows which PlanStep owns the attempt.  Bind that
         # missing node now, at the planning boundary, so scoped macro replan
