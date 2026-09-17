@@ -19,6 +19,7 @@ the changed strategy.  It does not change frozen Phase 4 inputs.
 from __future__ import annotations
 
 import argparse
+import ast
 import asyncio
 import json
 import sys
@@ -309,6 +310,31 @@ def _event_types(record: dict[str, Any]) -> list[str]:
     return [str(item.get("event_type")) for item in record.get("execution_trace", [])]
 
 
+def _script_uses_local_monkeypatch() -> bool:
+    tree = ast.parse(Path(__file__).read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            if node.name == "_live_path_instrumentation":
+                return True
+        if not isinstance(node, ast.Assign):
+            continue
+        for target in node.targets:
+            if not isinstance(target, ast.Attribute):
+                continue
+            owner = target.value
+            if (
+                isinstance(owner, ast.Name)
+                and (owner.id, target.attr)
+                in {
+                    ("benchmark_tools_registry", "create_benchmark_tool_registry"),
+                    ("MacroReplanService", "consume"),
+                    ("RecoveryController", "emit_signal"),
+                }
+            ):
+                return True
+    return False
+
+
 async def qualify_async(
     output: Path,
     *,
@@ -394,7 +420,7 @@ async def qualify_async(
         "scripted_provider": True,
         "same_live_execution_path": True,
         "shared_effect_policy_implementation": policy.policy_id == "phase4-effect-policy-v1",
-        "script_local_monkeypatch": False,
+        "script_local_monkeypatch": _script_uses_local_monkeypatch(),
         "real_runner_uses_same_policy": policy.registry_install_count == len(ARMS),
         "runtime_tool_policy_id": policy.policy_id,
         "registry_policy_install_count": policy.registry_install_count,
