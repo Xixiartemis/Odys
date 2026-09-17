@@ -509,6 +509,25 @@ class P45BenchmarkExecutor:
                                       fault_id=fault_id, error=f"{type(exc).__name__}: {str(exc)[:500]}"))
 
         try:
+            # Build execution-local bindings before the runtime factory is
+            # constructed.  The real Odys factory creates its recovery
+            # coordinator at factory time, so the single root budget ledger
+            # must already be available then.  Keeping this binding on the
+            # copied request config does not alter frozen benchmark inputs.
+            runtime_config = dict(request.config)
+            runtime_config["run_id"] = request.run_id
+            runtime_config["_attempt_id"] = attempt_id
+            runtime_config["_workspace_root"] = str(workspace_dir)
+            runtime_config["_execution_control"] = control
+            runtime_config["_run_budget_ledger"] = self._run_budget(run_id)
+            runtime_config["_experiment_macro_replan_enabled"] = (
+                self._experiment_macro_replan_enabled
+            )
+            runtime_config.setdefault(
+                "escalation_trigger_policy",
+                "NO_PROGRESS_AWARE",
+            )
+
             # Create factory with workspace root for this task
             if self._factory_type == "real":
                 from evals.reliability.p46_provider import (
@@ -571,7 +590,7 @@ class P45BenchmarkExecutor:
                         failure_type=f"UNKNOWN_CONFIG:{config_id}",
                     )
 
-            runtime = factory.create_runtime(request.config)
+            runtime = factory.create_runtime(runtime_config)
             self._active_runtimes[request.run_id] = runtime
             root_timeout_seconds, provider_timeout_seconds = (
                 self._configure_runtime_deadlines(runtime, task)
@@ -648,23 +667,9 @@ class P45BenchmarkExecutor:
                     injector_targets.append((owner, getattr(owner, "fault_injector")))
                     owner.fault_injector = terminal_injector
 
-            # Execute through the runtime
-            runtime_config = dict(request.config)
-            # These execution-local bindings are not benchmark inputs.  They
-            # make the durable native Attempt and the recovery coordinator
-            # use the same run identity as the official Phase 4 request.
-            runtime_config["run_id"] = request.run_id
-            runtime_config["_attempt_id"] = attempt_id
-            runtime_config["_workspace_root"] = str(workspace_dir)
-            runtime_config["_execution_control"] = control
-            runtime_config["_run_budget_ledger"] = self._run_budget(run_id)
-            runtime_config["_experiment_macro_replan_enabled"] = (
-                self._experiment_macro_replan_enabled
-            )
-            runtime_config.setdefault(
-                "escalation_trigger_policy",
-                "NO_PROGRESS_AWARE",
-            )
+            # Execute through the runtime. ``runtime_config`` was prepared
+            # above so the factory and the runtime share the same execution-
+            # local identity and root budget authority.
             try:
                 outcome = await await_with_control(
                     runtime.execute(task, runtime_config),
@@ -695,9 +700,16 @@ class P45BenchmarkExecutor:
                 fired_snapshot = experiment_fault_injector.fired_kwargs.get(
                     "snapshot"
                 )
-                trigger_index = getattr(
-                    fired_snapshot, "tool_call_count", None
-                ) if fired_snapshot is not None else None
+                fired_invocation = experiment_fault_injector.fired_kwargs.get(
+                    "invocation"
+                )
+                if fired_snapshot is not None:
+                    trigger_index = getattr(fired_snapshot, "tool_call_count", None)
+                else:
+                    # AFTER_TOOL_REQUESTED faults are fired with the native
+                    # ToolInvocation, not an execution snapshot.  Preserve
+                    # the trigger ordinal instead of emitting a null index.
+                    trigger_index = getattr(fired_invocation, "ordinal", None)
                 outcome.observed_state.setdefault(
                     "fault_trigger_index", trigger_index
                 )

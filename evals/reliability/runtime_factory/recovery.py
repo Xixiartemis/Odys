@@ -562,6 +562,7 @@ class OfficialOdysRecoveryCoordinator:
                 # local policy value.
                 "official_benchmark_recovery": not self.experiment_macro_replan_enabled,
                 "experiment_macro_replan_enabled": self.experiment_macro_replan_enabled,
+                "recovery_control_plane_v2": self.experiment_macro_replan_enabled,
                 "escalation_trigger_policy": str(
                     request.config.get(
                         "escalation_trigger_policy",

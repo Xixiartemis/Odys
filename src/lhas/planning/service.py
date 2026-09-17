@@ -141,7 +141,17 @@ class _TaskGraphAgentExecutor:
             progress_config = runtime_context.get("_repair_progress_config")
             if isinstance(progress_config, Mapping):
                 context["_repair_progress_config"] = dict(progress_config)
-            if runtime_context.get("recovery_control_plane_v2") and self.db is not None:
+            # A recovery coordinator may already have constructed the
+            # authoritative controller with the arm-specific escalation
+            # policy. Reuse that in-process object instead of silently
+            # creating a second default NO_PROGRESS_AWARE controller.
+            supplied_controller = runtime_context.get("_recovery_controller")
+            if supplied_controller is not None and runtime_context.get(
+                "recovery_control_plane_v2"
+            ):
+                context["_recovery_controller"] = supplied_controller
+                context["recovery_control_plane_v2"] = True
+            elif runtime_context.get("recovery_control_plane_v2") and self.db is not None:
                 from lhas.recovery_control import RecoveryController
 
                 context["_recovery_controller"] = RecoveryController(
