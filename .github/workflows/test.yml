@@ -25,6 +25,7 @@ jobs:
       - run: uv sync --extra dev --extra live --extra agent
       - run: >-
           uv run pytest
+          tests/test_phase4_live_no_progress_initial_path.py
           tests/test_phase4_live_no_progress_final.py
           tests/test_phase4_live_no_progress_02h.py
           tests/test_phase4_live_no_progress_parity.py
