@@ -50,6 +50,7 @@ class OpenAIChatProviderAdapter:
         endpoint_identity: str | None = None,
         credential_route_id: str = "default",
         route_type: str = "chat_completions",
+        max_retries: int = 0,
     ):
         if not model or not api_key:
             raise ValueError("model and api_key are required")
@@ -60,6 +61,9 @@ class OpenAIChatProviderAdapter:
         self.requested_endpoint_identity = endpoint_identity
         self.credential_route_id = credential_route_id
         self.route_type = route_type
+        self.max_retries = int(max_retries)
+        if self.max_retries < 0:
+            raise ValueError("max_retries must be non-negative")
         self.api_key = api_key
         self.base_url = base_url
         self.extra_body = dict(extra_body or {})
@@ -69,7 +73,11 @@ class OpenAIChatProviderAdapter:
                 from openai import AsyncOpenAI
             except ImportError as exc:  # pragma: no cover - installation contract
                 raise RuntimeError("agent extra is required for the real native provider") from exc
-            client = AsyncOpenAI(api_key=api_key, base_url=base_url)
+            client = AsyncOpenAI(
+                api_key=api_key,
+                base_url=base_url,
+                max_retries=self.max_retries,
+            )
         self.client = client
 
     def bind_execution_control(self, control: ExecutionControlToken | None) -> None:

@@ -99,6 +99,8 @@ RESUME_IDENTITY_FIELDS = (
     "validator_hash",
     "fixture_set_hash",
     "budget_identity",
+    "model_identity",
+    "provider_identity",
 )
 
 

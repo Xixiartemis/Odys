@@ -22,6 +22,20 @@ class OfficialRecoveryContractError(RuntimeError):
     """Raised when the official recovery context cannot be proven."""
 
 
+def repair_thresholds_from_task(task: Mapping[str, Any]) -> dict[str, int]:
+    """Project one task-owned convergence policy for every recovery layer.
+
+    The controller and the per-attempt progress tracker must never resolve
+    independent defaults.  The task projection is the only experiment-local
+    authority; both consumers receive this same bounded mapping.
+    """
+    return {
+        "max_no_progress": int(task.get("repair_max_no_progress", 3)),
+        "max_repeated_action": int(task.get("repair_max_repeated_action", 2)),
+        "max_repeated_state": int(task.get("repair_max_repeated_state", 2)),
+    }
+
+
 def _tool_invocation_evidence(events: Any, attempt_id: str) -> list[dict[str, Any]]:
     """Join durable native request/observation events for one attempt.
 
@@ -518,6 +532,7 @@ class OfficialOdysRecoveryCoordinator:
         }
         from lhas.recovery_control import RecoveryController
 
+        repair_thresholds = repair_thresholds_from_task(request.task)
         recovery_controller = RecoveryController(
             db=self.db,
             task_id=context["task_id"],
@@ -525,15 +540,7 @@ class OfficialOdysRecoveryCoordinator:
             attempt_id=context["attempt_id"],
             step_id=step.id,
             expected_effects=dict(step.expected_effects),
-            max_no_progress=int(
-                request.task.get("repair_max_no_progress", 3)
-            ),
-            max_repeated_action=int(
-                request.task.get("repair_max_repeated_action", 2)
-            ),
-            max_repeated_state=int(
-                request.task.get("repair_max_repeated_state", 2)
-            ),
+            **repair_thresholds,
             escalation_policy=str(
                 request.config.get(
                     "escalation_trigger_policy",
@@ -615,9 +622,9 @@ class OfficialOdysRecoveryCoordinator:
                 "_repair_progress_config": {
                     "expected_effects": dict(step.expected_effects),
                     "initial_state_digest": outcome.pre_repair_state_digest,
-                    "max_no_progress": 3,
-                    "max_repeated_state": 2,
-                    "max_repeated_action": 2,
+                    # The same task projection is the single authority for
+                    # both RecoveryController and RepairProgressTracker.
+                    **repair_thresholds,
                 },
                 "_recovery_controller": recovery_controller,
                 "_execution_control": getattr(request, "execution_control", None),

@@ -54,6 +54,7 @@ FROZEN_MAX_TOKENS = 4096
 FROZEN_SEED = 42
 FROZEN_SYSTEM_PROMPT_HASH = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 FROZEN_TOOL_POLICY_HASH = "c6fb217770dcc6b5da23982cc9f9d70f19f4b45c2e343344bbdddd2f74e46f2b"
+SDK_MAX_RETRIES = 0
 
 
 def _build_benchmark_capability_contract(registry, allowed):
@@ -186,6 +187,7 @@ class RealLLMProvider:
             provider_id=provider_id,
             endpoint_identity=endpoint_identity,
             credential_route_id=credential_route_id,
+            max_retries=SDK_MAX_RETRIES,
         )
 
         actual_endpoint = self.transport_identity.endpoint_identity
@@ -405,6 +407,7 @@ def provider_identity(
         "max_tokens": provider.max_tokens,
         "system_prompt_hash": FROZEN_SYSTEM_PROMPT_HASH,
         "tool_policy_hash": FROZEN_TOOL_POLICY_HASH,
+        "sdk_max_retries": SDK_MAX_RETRIES,
     }
 
 
