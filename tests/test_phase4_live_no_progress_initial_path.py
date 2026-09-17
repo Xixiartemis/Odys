@@ -78,6 +78,12 @@ def test_v2_initial_no_progress_stops_before_root_budget_and_emits_signal(tmp_pa
         record["runtime_environment"]["validation"]["final_acceptance_status"]
         == "ACCEPTED"
     )
+    assert (
+        record["runtime_environment"]["state_evidence"][
+            "state_changed_after_repair"
+        ]
+        is True
+    )
     assert any(item.get("accepted") is True for item in policies[spec.run_id].replan_results)
     assert any(
         item.get("phase") == "post_replan" and item.get("allowed") is True
