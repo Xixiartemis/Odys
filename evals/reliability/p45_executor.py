@@ -523,6 +523,16 @@ class P45BenchmarkExecutor:
             runtime_config["_experiment_macro_replan_enabled"] = (
                 self._experiment_macro_replan_enabled
             )
+            effect_policy = request.config.get("_phase_effect_policy")
+            if effect_policy is not None:
+                # This is an explicit, execution-local experiment opt-in.
+                # The same object is passed through the normal factory and
+                # tool-registry construction path; no registry monkey-patch
+                # is needed.
+                runtime_config["_phase_effect_policy"] = effect_policy
+                bind_phase = getattr(effect_policy, "bind_provider_phase", None)
+                if callable(bind_phase):
+                    bind_phase("initial")
             runtime_config.setdefault(
                 "escalation_trigger_policy",
                 "NO_PROGRESS_AWARE",

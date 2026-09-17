@@ -422,7 +422,10 @@ def _build_minimal_components(
 
     if workspace_root is not None:
         from evals.reliability.tools.registry import create_benchmark_tool_registry
-        registry = create_benchmark_tool_registry(Path(workspace_root))
+        registry = create_benchmark_tool_registry(
+            Path(workspace_root),
+            effect_policy=config.get("_phase_effect_policy"),
+        )
     else:
         registry = ToolRegistry()
 

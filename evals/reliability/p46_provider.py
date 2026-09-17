@@ -570,7 +570,10 @@ def _build_real_minimal_components(
 
     if workspace_root is not None:
         from evals.reliability.tools.registry import create_benchmark_tool_registry
-        registry = create_benchmark_tool_registry(Path(workspace_root))
+        registry = create_benchmark_tool_registry(
+            Path(workspace_root),
+            effect_policy=config.get("_phase_effect_policy"),
+        )
     else:
         registry = ToolRegistry()
 
@@ -619,7 +622,10 @@ def _build_real_odys_kernel(
 
     if workspace_root is not None:
         from evals.reliability.tools.registry import create_benchmark_tool_registry
-        registry = create_benchmark_tool_registry(Path(workspace_root))
+        registry = create_benchmark_tool_registry(
+            Path(workspace_root),
+            effect_policy=config.get("_phase_effect_policy"),
+        )
     else:
         registry = ToolRegistry()
 
@@ -666,6 +672,7 @@ def _build_real_odys_kernel(
             config.get("escalation_trigger_policy", "NO_PROGRESS_AWARE")
         ),
         root_budget_authority=config.get("_run_budget_ledger"),
+        effect_policy=config.get("_phase_effect_policy"),
     )
     return kernel, db, recovery
 

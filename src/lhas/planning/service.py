@@ -180,12 +180,13 @@ class PlanExecutionService:
     LINEAR remains a legacy execution path and is intentionally outside the
     P3.3 selective-repair contract.
     """
-    def __init__(self, db: Database, planner: Planner, registry: ToolRegistry, agent_executor_factory=None, tool_contract=None, capability_registry=None, workflow_verifier=None, execution_control=None):
+    def __init__(self, db: Database, planner: Planner, registry: ToolRegistry, agent_executor_factory=None, tool_contract=None, capability_registry=None, workflow_verifier=None, execution_control=None, effect_policy=None):
         self.db, self.planner, self.registry, self.agent_executor_factory = db, planner, registry, agent_executor_factory
         # P3.1 verification seam: explicit verifier only, default=None (fail-closed)
         # No auto-verify, no implicit accept-all, no compatibility flag
         self.workflow_verifier = workflow_verifier
         self.execution_control = execution_control
+        self.effect_policy = effect_policy
         # If no explicit tool_contract provided, build one from default_capabilities()
         # (NOT from ToolRegistry — that would be reverse synthesis)
         if tool_contract is None and capability_registry is None:
@@ -525,6 +526,15 @@ class PlanExecutionService:
         result = await MacroReplanService(self.db, self.planner).consume(
             goal=goal, plan=plan, signals=signals, context={**context, "capabilities": self._planner_capabilities()}
         )
+        if result.accepted:
+            # Execution-local experiment policy hook.  It is deliberately
+            # generic so the planner remains independent of Phase 4; the
+            # hook flips effect authority before the caller dispatches the
+            # newly replanned strategy.
+            effect_policy = self.effect_policy or context.get("_phase_effect_policy")
+            mark_replan = getattr(effect_policy, "mark_replan_accepted", None)
+            if callable(mark_replan):
+                mark_replan()
         return result.accepted
     async def execute_goal(self, goal: Goal, *, context: dict[str, Any] | None = None, experiment_id: str | None = None, approved_step_ids: set[str] | None = None, resume_plan_id: str | None = None, repair_step_ids: set[str] | None = None) -> Plan:
         self._emit(EventType.GOAL_CREATED, {"goal": goal.model_dump(mode="json")})

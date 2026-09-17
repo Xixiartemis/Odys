@@ -234,6 +234,7 @@ class OfficialOdysRecoveryCoordinator:
         experiment_macro_replan_enabled: bool = False,
         escalation_trigger_policy: str = "NO_PROGRESS_AWARE",
         root_budget_authority: Any = None,
+        effect_policy: Any = None,
     ) -> None:
         from lhas.planning.service import PlanExecutionService
         from lhas.planning.planner import DeterministicPlanner
@@ -250,6 +251,7 @@ class OfficialOdysRecoveryCoordinator:
             escalation_trigger_policy or "NO_PROGRESS_AWARE"
         ).upper()
         self.root_budget_authority = root_budget_authority
+        self.effect_policy = effect_policy
         self.execution_control = None
         executor = _KernelTaskExecutor(
             kernel,
@@ -268,6 +270,7 @@ class OfficialOdysRecoveryCoordinator:
             tool_contract=tool_contract,
             workflow_verifier=WorkflowVerifier(db),
             execution_control=self.execution_control,
+            effect_policy=self.effect_policy,
         )
 
     def bind_execution_control(self, control: Any) -> None:
@@ -279,7 +282,13 @@ class OfficialOdysRecoveryCoordinator:
         authority = self.root_budget_authority
         reserve = getattr(authority, "reserve_replan", None)
         if callable(reserve):
-            return bool(reserve())
+            accepted = bool(reserve())
+            if self.effect_policy is not None:
+                record = getattr(self.effect_policy, "record_replan_reservation", None)
+                if callable(record):
+                    snapshot = authority.snapshot() if hasattr(authority, "snapshot") else {}
+                    record(accepted=accepted, snapshot=dict(snapshot))
+            return accepted
         # The non-opt-in official path never calls this guard.  Returning
         # false here is fail-closed if an experiment forgets to bind the
         # single root budget authority.
@@ -550,6 +559,11 @@ class OfficialOdysRecoveryCoordinator:
         if control is not None:
             control.check()
 
+        if self.effect_policy is not None:
+            bind_phase = getattr(self.effect_policy, "bind_provider_phase", None)
+            if callable(bind_phase):
+                bind_phase("recovery")
+
         repaired_plan = await self.service.repair_after_failure(
             plan.id,
             step.id,
@@ -609,6 +623,66 @@ class OfficialOdysRecoveryCoordinator:
                 "_execution_control": getattr(request, "execution_control", None),
             },
         )
+
+        # Project bounded recovery-control telemetry from durable events and
+        # controller decisions. The policy is execution-local and never
+        # becomes validator truth or benchmark input.
+        if self.effect_policy is not None:
+            record_detection = getattr(self.effect_policy, "record_detection", None)
+            if callable(record_detection):
+                for detection in recovery_controller.detections:
+                    record_detection(
+                        run_id=request.run_id,
+                        reason=str(detection.get("reason")),
+                        escalation_policy=recovery_controller.escalation_policy,
+                    )
+            after_events = [
+                event for event in events.list_all() if event.id not in before_ids
+            ]
+            signal_events = [
+                event
+                for event in after_events
+                if event.event_type.value == "REPLAN_SIGNAL_CREATED"
+            ]
+            signal_reasons = [
+                str((event.payload or {}).get("reason"))
+                for event in signal_events
+            ]
+            signal_run_ids = [
+                str((event.payload or {}).get("run_id") or request.run_id)
+                for event in signal_events
+            ]
+            record_signal = getattr(self.effect_policy, "record_signal", None)
+            if callable(record_signal):
+                for reason, signal_run_id in zip(signal_reasons, signal_run_ids):
+                    record_signal(
+                        run_id=signal_run_id,
+                        reason=reason,
+                        escalation_policy=recovery_controller.escalation_policy,
+                    )
+            record_result = getattr(self.effect_policy, "record_replan_result", None)
+            accepted_replan = False
+            if callable(record_result):
+                for event in after_events:
+                    if event.event_type.value not in {"REPLAN_ACCEPTED", "REPLAN_REJECTED"}:
+                        continue
+                    payload = dict(event.payload or {})
+                    if event.event_type.value == "REPLAN_ACCEPTED":
+                        accepted_replan = True
+                    record_result(
+                        run_id=request.run_id,
+                        plan_id=str(payload.get("plan_id") or plan.id),
+                        accepted=event.event_type.value == "REPLAN_ACCEPTED",
+                        error_type=payload.get("error_type"),
+                        signal_count=payload.get("signal_count"),
+                        signal_reasons=signal_reasons,
+                        signal_run_ids=signal_run_ids,
+                    )
+            if accepted_replan:
+                mark_replan = getattr(self.effect_policy, "mark_replan_accepted", None)
+                if callable(mark_replan):
+                    mark_replan()
+
         repaired_step = next(
             item for item in repaired_plan.steps if item.id == step.id
         )

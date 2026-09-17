@@ -13,6 +13,10 @@ def test_02d_uses_live_path_and_gates_alternate_effects(tmp_path):
     assert report["provider_executed"] is False
     assert report["scripted_provider"] is True
     assert report["same_live_execution_path"] is True
+    assert report["shared_effect_policy_implementation"] is True
+    assert report["script_local_monkeypatch"] is False
+    assert report["real_runner_uses_same_policy"] is True
+    assert report["runtime_tool_policy_id"] == "phase4-effect-policy-v1"
     assert report["planned_runs"] == 2
     assert report["valid_runs"] == 2
     assert report["invalid_runs"] == 0

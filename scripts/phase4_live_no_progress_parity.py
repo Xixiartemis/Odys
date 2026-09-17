@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import contextlib
 import json
 import sys
 from pathlib import Path
@@ -31,12 +30,10 @@ for import_root in (REPO_ROOT, REPO_ROOT / "src"):
     if str(import_root) not in sys.path:
         sys.path.insert(0, str(import_root))
 
-from evals.reliability.tools import registry as benchmark_tools_registry
+from evals.reliability.effect_policy import PhaseEffectPolicy
 from evals.reliability.fixture_packages.registry import FixtureRegistry
 from evals.reliability.p45_executor import P45BenchmarkExecutor
 from evals.reliability.p46_provider import CHEAP_MODEL, FROZEN_PROVIDER
-from evals.reliability.runtime_factory.recovery import OfficialOdysRecoveryCoordinator
-from lhas.recovery_control import RecoveryController
 from evals.reliability.run_phase4 import (
     ConfigLoader,
     FixtureManager,
@@ -46,8 +43,6 @@ from evals.reliability.run_phase4 import (
 )
 from lhas.native.models import RuntimeTarget
 from lhas.native.transport import canonical_transport_identity
-from lhas.planning.replan import MacroReplanService
-from lhas.tools.protocol import ToolRequest, ToolResult, ToolResultStatus
 
 
 EXPERIMENT_ID = "phase4-live-no-progress-parity-02d"
@@ -57,164 +52,6 @@ REPEATS = 1
 ARMS = (("baseline", "LEGACY_BOUNDED"), ("v2", "NO_PROGRESS_AWARE"))
 EXPECTED_PROTOCOL_HASH = "993eae04290fe683d40fcf845b9e7325b9572b227e78e7cb3090dd7ee37637c3"
 DEFAULT_OUTPUT = REPO_ROOT / "results" / EXPERIMENT_ID
-
-
-class PhaseEffectPolicy:
-    """Authorize only the state transition valid for the current phase."""
-
-    def __init__(self) -> None:
-        self.phase = "initial"
-        self.replanned = False
-        self.denied: list[dict[str, Any]] = []
-        self.allowed: list[dict[str, Any]] = []
-        self.replan_reservations: list[dict[str, Any]] = []
-        self.replan_results: list[dict[str, Any]] = []
-        self.replan_signal_reasons: list[dict[str, Any]] = []
-        self.recovery_detections: list[dict[str, Any]] = []
-
-    def bind_provider_phase(self, phase: str) -> None:
-        if phase == "initial":
-            # Each official run gets an independent phase state.  The
-            # qualification executes both arms through one in-process
-            # provider object, so a prior arm's accepted replan must not
-            # leak into the next arm's initial phase.
-            self.replanned = False
-            self.phase = "initial"
-        elif phase in {"recovery", "repair"}:
-            self.phase = "post_replan" if self.replanned else "local_repair"
-
-    def mark_replan_accepted(self) -> None:
-        self.replanned = True
-        self.phase = "post_replan"
-
-    @staticmethod
-    def _is_alternate(arguments: Any) -> bool:
-        if not isinstance(arguments, dict):
-            return False
-        if arguments.get("new_string"):
-            return "alternate" in str(arguments["new_string"]) or "verified" in str(arguments["new_string"])
-        return "alternate" in str(arguments.get("content", "")) or "verified" in str(arguments.get("content", ""))
-
-    def authorize(self, capability: str, arguments: Any) -> bool:
-        alternate = self._is_alternate(arguments)
-        allowed = not alternate or self.phase == "post_replan"
-        event = {
-            "phase": self.phase,
-            "capability": capability,
-            "alternate_effect": alternate,
-            "allowed": allowed,
-        }
-        (self.allowed if allowed else self.denied).append(event)
-        return allowed
-
-
-_ACTIVE_POLICY: PhaseEffectPolicy | None = None
-
-
-class _PhaseGuardedTool:
-    """Preserve the concrete tool contract while adding an experiment gate."""
-
-    def __init__(self, inner: Any, policy: PhaseEffectPolicy):
-        self._inner = inner
-        self._policy = policy
-
-    @property
-    def capability(self) -> Any:
-        return self._inner.capability
-
-    async def execute(self, request: ToolRequest) -> ToolResult:
-        if not self._policy.authorize(request.capability_id, request.arguments):
-            return ToolResult(
-                # The policy blocks the alternate mutation while preserving a
-                # syntactically successful, observable no-op.  This is what
-                # lets the real convergence controller see repeated
-                # equivalent repair actions instead of terminating on the
-                # first ordinary tool failure.
-                status=ToolResultStatus.SUCCESS,
-                output={"path": request.arguments.get("path"), "replaced": False},
-                metadata={
-                    "effect_policy": "DENIED_BY_PHASE_EFFECT_POLICY",
-                    "phase": self._policy.phase,
-                    "observed_mutation": False,
-                },
-            )
-        return await self._inner.execute(request)
-
-
-@contextlib.contextmanager
-def _live_path_instrumentation():
-    """Install only observation/authorization hooks around the live path."""
-    global _ACTIVE_POLICY
-    original_registry_factory = benchmark_tools_registry.create_benchmark_tool_registry
-    original_consume = MacroReplanService.consume
-    original_emit_signal = RecoveryController.emit_signal
-    original_record_detection = RecoveryController._record_detection
-
-    def guarded_registry(workspace_root: Path):
-        registry = original_registry_factory(workspace_root)
-        policy = _ACTIVE_POLICY
-        if policy is not None:
-            for capability in ("workspace.edit", "workspace.edit_lines"):
-                registry._tools[capability] = _PhaseGuardedTool(  # type: ignore[attr-defined]
-                    registry.resolve(capability), policy
-                )
-        return registry
-
-    async def observed_consume(self, *, goal, plan, signals, context=None):
-        result = await original_consume(
-            self, goal=goal, plan=plan, signals=signals, context=context
-        )
-        if _ACTIVE_POLICY is not None:
-            _ACTIVE_POLICY.replan_results.append(
-                {
-                    "accepted": bool(result.accepted),
-                    "error_type": result.error_type,
-                    "signal_count": result.signal_count,
-                    "plan_id": str(plan.id),
-                    "signal_reasons": [str(item.reason) for item in signals],
-                    "signal_run_ids": [str(item.run_id) for item in signals],
-                }
-            )
-        if result.accepted and _ACTIVE_POLICY is not None:
-            _ACTIVE_POLICY.mark_replan_accepted()
-        return result
-
-    def observed_emit_signal(controller, reason, progress, *, extra=None):
-        if _ACTIVE_POLICY is not None:
-            _ACTIVE_POLICY.replan_signal_reasons.append(
-                {
-                    "reason": str(reason),
-                    "run_id": str(controller.run_id),
-                    "escalation_policy": str(controller.escalation_policy),
-                }
-            )
-        return original_emit_signal(
-            controller, reason, progress, extra=extra
-        )
-
-    def observed_record_detection(controller, reason, progress):
-        if _ACTIVE_POLICY is not None:
-            _ACTIVE_POLICY.recovery_detections.append(
-                {
-                    "reason": str(reason),
-                    "run_id": str(controller.run_id),
-                    "escalation_policy": str(controller.escalation_policy),
-                }
-            )
-        return original_record_detection(controller, reason, progress)
-
-    benchmark_tools_registry.create_benchmark_tool_registry = guarded_registry
-    MacroReplanService.consume = observed_consume
-    RecoveryController.emit_signal = observed_emit_signal
-    RecoveryController._record_detection = observed_record_detection
-    try:
-        yield
-    finally:
-        benchmark_tools_registry.create_benchmark_tool_registry = original_registry_factory
-        MacroReplanService.consume = original_consume
-        RecoveryController.emit_signal = original_emit_signal
-        RecoveryController._record_detection = original_record_detection
-        _ACTIVE_POLICY = None
 
 
 class _ParityFixture:
@@ -252,11 +89,11 @@ def _fixture_registry() -> FixtureRegistry:
     return registry
 
 
-def _task(snapshot: ProtocolSnapshot) -> dict[str, Any]:
+def _task(snapshot: ProtocolSnapshot, *, experiment_id: str = EXPERIMENT_ID) -> dict[str, Any]:
     fixture_id = "fixture-replan-v1"
     fixture = snapshot.fixtures["fixtures"][fixture_id]
     return {
-        "benchmark_version": EXPERIMENT_ID,
+        "benchmark_version": experiment_id,
         "task_id": TASK_ID,
         "family": "COMPLEX_WORKFLOW_REPLAN",
         "title": "Provider-free live-path no-progress parity",
@@ -428,8 +265,15 @@ class _DeterministicProvider:
         }
 
 
-def _build_runner(snapshot: ProtocolSnapshot, output: Path, policy: PhaseEffectPolicy, provider: _DeterministicProvider) -> tuple[Phase4Runner, tuple[RunSpec, ...]]:
-    task = _task(snapshot)
+def _build_runner(
+    snapshot: ProtocolSnapshot,
+    output: Path,
+    policy: PhaseEffectPolicy,
+    provider: _DeterministicProvider,
+    *,
+    experiment_id: str = EXPERIMENT_ID,
+) -> tuple[Phase4Runner, tuple[RunSpec, ...]]:
+    task = _task(snapshot, experiment_id=experiment_id)
     specs: list[RunSpec] = []
     loader = ConfigLoader(snapshot)
     for arm, escalation_policy in ARMS:
@@ -437,6 +281,7 @@ def _build_runner(snapshot: ProtocolSnapshot, output: Path, policy: PhaseEffectP
         config["_experiment_macro_replan_enabled"] = True
         config["escalation_trigger_policy"] = escalation_policy
         config["experiment_arm"] = arm
+        config["_phase_effect_policy"] = policy
         specs.append(RunSpec(task=task, config=config, repeat_index=1, arm_id=arm))
     executor = P45BenchmarkExecutor(
         fixture_registry=_fixture_registry(),
@@ -452,7 +297,7 @@ def _build_runner(snapshot: ProtocolSnapshot, output: Path, policy: PhaseEffectP
         fixture_manager=FixtureManager(snapshot),
         model=CHEAP_MODEL,
         provider=FROZEN_PROVIDER,
-        benchmark_version=EXPERIMENT_ID,
+        benchmark_version=experiment_id,
         repo_root=REPO_ROOT,
         trace_path=output / "traces.jsonl",
         require_trace=True,
@@ -464,7 +309,11 @@ def _event_types(record: dict[str, Any]) -> list[str]:
     return [str(item.get("event_type")) for item in record.get("execution_trace", [])]
 
 
-async def qualify_async(output: Path) -> dict[str, Any]:
+async def qualify_async(
+    output: Path,
+    *,
+    experiment_id: str = EXPERIMENT_ID,
+) -> dict[str, Any]:
     snapshot = ProtocolSnapshot.load()
     if snapshot.protocol_hash != EXPECTED_PROTOCOL_HASH:
         raise RuntimeError("FROZEN_PROTOCOL_HASH_CHANGED")
@@ -473,27 +322,14 @@ async def qualify_async(output: Path) -> dict[str, Any]:
     output.mkdir(parents=True, exist_ok=True)
     policy = PhaseEffectPolicy()
     provider = _DeterministicProvider(policy)
-    global _ACTIVE_POLICY
-    _ACTIVE_POLICY = policy
-    original_reserve_replan = OfficialOdysRecoveryCoordinator._reserve_replan
-
-    def observed_reserve_replan(coordinator: OfficialOdysRecoveryCoordinator) -> bool:
-        result = original_reserve_replan(coordinator)
-        authority = coordinator.root_budget_authority
-        snapshot = authority.snapshot() if hasattr(authority, "snapshot") else {}
-        policy.replan_reservations.append(
-            {"accepted": bool(result), "snapshot": dict(snapshot)}
-        )
-        return result
-
-    OfficialOdysRecoveryCoordinator._reserve_replan = observed_reserve_replan
-    try:
-        with _live_path_instrumentation():
-            runner, specs = _build_runner(snapshot, output, policy, provider)
-            counts = await runner.run(specs)
-    finally:
-        OfficialOdysRecoveryCoordinator._reserve_replan = original_reserve_replan
-        _ACTIVE_POLICY = None
+    runner, specs = _build_runner(
+        snapshot,
+        output,
+        policy,
+        provider,
+        experiment_id=experiment_id,
+    )
+    counts = await runner.run(specs)
 
     raw_records = [json.loads(line) for line in (output / "raw.jsonl").read_text(encoding="utf-8").splitlines()]
     trace_records = [json.loads(line) for line in (output / "traces.jsonl").read_text(encoding="utf-8").splitlines()]
@@ -553,10 +389,15 @@ async def qualify_async(output: Path) -> dict[str, Any]:
     baseline = arms["baseline"]
     v2 = arms["v2"]
     report = {
-        "experiment_id": EXPERIMENT_ID,
+        "experiment_id": experiment_id,
         "provider_executed": False,
         "scripted_provider": True,
         "same_live_execution_path": True,
+        "shared_effect_policy_implementation": policy.policy_id == "phase4-effect-policy-v1",
+        "script_local_monkeypatch": False,
+        "real_runner_uses_same_policy": policy.registry_install_count == len(ARMS),
+        "runtime_tool_policy_id": policy.policy_id,
+        "registry_policy_install_count": policy.registry_install_count,
         "protocol_hash": snapshot.protocol_hash,
         "planned_runs": len(specs),
         "valid_runs": counts["valid"],
@@ -585,13 +426,19 @@ async def qualify_async(output: Path) -> dict[str, Any]:
     return report
 
 
-def qualify(output: Path | None = None) -> dict[str, Any]:
+def qualify(
+    output: Path | None = None,
+    *,
+    experiment_id: str = EXPERIMENT_ID,
+) -> dict[str, Any]:
     if output is None:
         import tempfile
 
         with tempfile.TemporaryDirectory(prefix="phase4-02d-") as directory:
-            return asyncio.run(qualify_async(Path(directory)))
-    return asyncio.run(qualify_async(output))
+            return asyncio.run(
+                qualify_async(Path(directory), experiment_id=experiment_id)
+            )
+    return asyncio.run(qualify_async(output, experiment_id=experiment_id))
 
 
 def main(argv: list[str] | None = None) -> int:
