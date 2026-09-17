@@ -55,6 +55,35 @@ EXPECTED_PROTOCOL_HASH = "993eae04290fe683d40fcf845b9e7325b9572b227e78e7cb3090dd
 DEFAULT_OUTPUT = REPO_ROOT / "results" / EXPERIMENT_ID
 
 
+class QualificationInvalidRunError(RuntimeError):
+    """Fail closed with the real invalid-run evidence from the qualification."""
+
+    def __init__(self, counts: dict[str, Any], invalid_records: list[dict[str, Any]]) -> None:
+        self.counts = dict(counts)
+        self.invalid_records = list(invalid_records)
+        details = "; ".join(
+            f"{item.get('run_id', '<missing-run-id>')}"
+            f":{item.get('failure_type') or item.get('invalid_reason') or item.get('error_type') or '<unknown>'}"
+            for item in self.invalid_records
+        )
+        if not details:
+            details = "<invalid.jsonl empty or unavailable>"
+        super().__init__(
+            "PHASE4_QUALIFICATION_INVALID_RUNS: "
+            f"invalid={self.counts.get('invalid', 0)}; {details}"
+        )
+
+
+def _load_jsonl(path: Path) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    return [
+        json.loads(line)
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+
+
 class _ParityFixture:
     task_id = TASK_ID
 
@@ -357,8 +386,13 @@ async def qualify_async(
     )
     counts = await runner.run(specs)
 
-    raw_records = [json.loads(line) for line in (output / "raw.jsonl").read_text(encoding="utf-8").splitlines()]
-    trace_records = [json.loads(line) for line in (output / "traces.jsonl").read_text(encoding="utf-8").splitlines()]
+    if counts.get("invalid", 0):
+        raise QualificationInvalidRunError(
+            counts,
+            _load_jsonl(output / "invalid.jsonl"),
+        )
+    raw_records = _load_jsonl(output / "raw.jsonl")
+    trace_records = _load_jsonl(output / "traces.jsonl")
     by_run = {item["benchmark_run_id"]: item for item in raw_records}
     trace_by_run = {item["run_id"]: item for item in trace_records}
     arms: dict[str, Any] = {}

@@ -31,11 +31,13 @@ class _FakeCompletions:
     def __init__(self, mode: str = "success") -> None:
         self.mode = mode
         self.calls = 0
+        self.started = asyncio.Event()
         self.request = httpx.Request("POST", FROZEN_ENDPOINT + "/chat/completions")
 
     async def create(self, **kwargs):
         del kwargs
         self.calls += 1
+        self.started.set()
         if self.mode == "timeout":
             raise APITimeoutError(request=self.request)
         if self.mode == "connect_timeout":
@@ -123,7 +125,10 @@ def test_real_odys_adapter_stack_consumes_timeout_without_orphans(tmp_path):
         if mode == "pending":
             from lhas.execution_control import ExecutionControlToken
 
-            control = ExecutionControlToken("p4-infra-race", timeout_seconds=2.0)
+            # Do not start a short wall-clock deadline while the runtime is
+            # still being constructed.  The test must reach the pending SDK
+            # request first, then deterministically exercise root cancellation.
+            control = ExecutionControlToken("p4-infra-race", timeout_seconds=30.0)
         workspace = tmp_path / mode
         workspace.mkdir()
         runtime = RealLLMOdysRuntimeFactory(
@@ -146,7 +151,15 @@ def test_real_odys_adapter_stack_consumes_timeout_without_orphans(tmp_path):
         previous = loop.get_exception_handler()
         loop.set_exception_handler(lambda _loop, context: errors.append(context))
         try:
-            outcome = loop.run_until_complete(runtime.execute(task, config))
+            execution = loop.create_task(runtime.execute(task, config))
+            if mode == "pending":
+                loop.run_until_complete(client.chat.completions.started.wait())
+                assert client.chat.completions.calls == 1
+                assert control is not None
+                assert control.cancel("ROOT_DEADLINE_EXCEEDED", source="test-timeout-race")
+                outcome = loop.run_until_complete(execution)
+            else:
+                outcome = loop.run_until_complete(execution)
             loop.run_until_complete(asyncio.sleep(0))
         finally:
             loop.set_exception_handler(previous)
