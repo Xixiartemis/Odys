@@ -714,10 +714,36 @@ class OfficialOdysRecoveryCoordinator:
         # validator path.  Otherwise the bridge would project the old stale
         # step as if a repair attempt had happened and lose real lineage.
         post_replan_step_ids: set[str] = set()
+        accepted_replan = False
         if (
             scope == RepairScope.MACRO_REPLAN
             and int(repaired_plan.replan_count) > pre_replan_count
         ):
+            # The planner's accepted result is not enough by itself: the
+            # effect authority may transition only after the corresponding
+            # durable event has been written for this plan and run boundary.
+            accepted_replan = any(
+                event.id not in before_ids
+                and event.event_type.value == "REPLAN_ACCEPTED"
+                and str((event.payload or {}).get("plan_id") or "")
+                == str(repaired_plan.id)
+                for event in events.list_all()
+            )
+            if not accepted_replan:
+                raise OfficialRecoveryContractError(
+                    "REPLAN_ACCEPTANCE_NOT_DURABLE"
+                )
+            # This is intentionally before post-replan execute_goal().  The
+            # service hook normally performs the same transition immediately
+            # after MacroReplanService persists acceptance; the guarded call
+            # here closes the runtime boundary without a late duplicate.
+            mark_replan = getattr(
+                self.effect_policy, "mark_replan_accepted", None
+            )
+            if callable(mark_replan) and getattr(
+                self.effect_policy, "phase", None
+            ) != "post_replan":
+                mark_replan()
             post_replan_step_ids = {
                 item.id
                 for item in repaired_plan.steps
@@ -817,7 +843,6 @@ class OfficialOdysRecoveryCoordinator:
                         escalation_policy=recovery_controller.escalation_policy,
                     )
             record_result = getattr(self.effect_policy, "record_replan_result", None)
-            accepted_replan = False
             if callable(record_result):
                 for event in after_events:
                     if event.event_type.value not in {"REPLAN_ACCEPTED", "REPLAN_REJECTED"}:
@@ -834,11 +859,6 @@ class OfficialOdysRecoveryCoordinator:
                         signal_reasons=signal_reasons,
                         signal_run_ids=signal_run_ids,
                     )
-            if accepted_replan:
-                mark_replan = getattr(self.effect_policy, "mark_replan_accepted", None)
-                if callable(mark_replan):
-                    mark_replan()
-
         if scope == RepairScope.MACRO_REPLAN:
             repaired_step = next(
                 (

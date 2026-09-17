@@ -74,6 +74,15 @@ def test_v2_initial_no_progress_stops_before_root_budget_and_emits_signal(tmp_pa
     assert record["runtime_environment"]["recovery"]["repair_scope"] == "MACRO_REPLAN"
     assert record["runtime_environment"]["recovery"]["recovery_success"] is True
     assert record["verified_completion"] is True
+    assert (
+        record["runtime_environment"]["validation"]["final_acceptance_status"]
+        == "ACCEPTED"
+    )
+    assert any(item.get("accepted") is True for item in policies[spec.run_id].replan_results)
+    assert any(
+        item.get("phase") == "post_replan" and item.get("allowed") is True
+        for item in policies[spec.run_id].allowed
+    )
     assert any(
         item.get("reason") == "REPAIR_NO_PROGRESS"
         for item in policies[spec.run_id].recovery_detections
