@@ -834,6 +834,15 @@ class OfficialOdysRecoveryCoordinator:
                 bind_phase("recovery")
 
         pre_replan_count = int(plan.replan_count)
+        repair_lease_available = True
+
+        def consume_repair_lease() -> bool:
+            nonlocal repair_lease_available
+            if not repair_lease_available:
+                return False
+            repair_lease_available = False
+            return True
+
         repaired_plan = await self.service.repair_after_failure(
             plan.id,
             step.id,
@@ -862,9 +871,14 @@ class OfficialOdysRecoveryCoordinator:
                 # The root ledger reservation is consumed before entering
                 # this boundary.  This authorizes that one repair only; it
                 # never allocates a fresh repair budget.
-                "_repair_budget_guard": (lambda: True),
+                "_repair_budget_guard": consume_repair_lease,
                 "root_budget_snapshot": self._root_budget_snapshot(),
                 "bounded_recovery": True,
+                # Local repair still uses its bounded internal attempts so the
+                # controller can observe no-progress. If that boundary escalates
+                # to macro replan, the resumed strategy must switch to the external
+                # validator authority before it is executed.
+                "_external_validator_on_replan": True,
                 "repair_scope": scope.value,
                 "timeout_seconds": float(
                     request.task.get("timeout_seconds", 60.0)
@@ -1055,7 +1069,24 @@ class OfficialOdysRecoveryCoordinator:
             ]
             record_signal = getattr(self.effect_policy, "record_signal", None)
             if callable(record_signal):
+                seen_signal_keys: set[tuple[str, str]] = set()
+                for signal in list(getattr(recovery_controller, "signals", []) or []):
+                    signal_run_id = str(signal.get("run_id") or request.run_id)
+                    reason = str(signal.get("reason") or "")
+                    key = (signal_run_id, reason)
+                    if not reason or key in seen_signal_keys:
+                        continue
+                    seen_signal_keys.add(key)
+                    record_signal(
+                        run_id=signal_run_id,
+                        reason=reason,
+                        escalation_policy=recovery_controller.escalation_policy,
+                    )
                 for reason, signal_run_id in zip(signal_reasons, signal_run_ids):
+                    key = (str(signal_run_id), str(reason))
+                    if key in seen_signal_keys:
+                        continue
+                    seen_signal_keys.add(key)
                     record_signal(
                         run_id=signal_run_id,
                         reason=reason,
@@ -1144,6 +1175,26 @@ class OfficialOdysRecoveryCoordinator:
         ):
             raise OfficialRecoveryContractError("REPAIR_ATTEMPT_LINEAGE_MISSING")
 
+        projected_post_replan_step_id = next(iter(post_replan_step_ids), None)
+        projected_post_replan_plan_version = (
+            str(repaired_plan.version)
+            if scope == RepairScope.MACRO_REPLAN
+            else None
+        )
+        if projected_post_replan_step_id is None:
+            after_acceptance = False
+            for event in events.list_all():
+                if event.id in before_ids:
+                    continue
+                payload = dict(event.payload or {})
+                if event.event_type.value == "REPLAN_ACCEPTED" and str(payload.get("plan_id") or "") == str(plan.id):
+                    accepted_replan = True
+                    after_acceptance = True
+                    projected_post_replan_plan_version = str(payload.get("new_version") or "") or None
+                    continue
+                if after_acceptance and event.event_type.value == "PLAN_STEP_STARTED" and str(payload.get("plan_id") or "") == str(plan.id):
+                    projected_post_replan_step_id = str(payload.get("step_id") or "") or None
+                    break
         trace = self._project_events(
             events,
             before_ids=before_ids,
@@ -1151,6 +1202,10 @@ class OfficialOdysRecoveryCoordinator:
             task_id=context["task_id"],
             original_attempt_id=str(original_attempt_id),
             repair_attempt_id=str(repair_attempt_id or original_attempt_id),
+            recovery_step_id=str(step.id),
+            recovery_plan_version=str(plan.version),
+            post_replan_step_id=projected_post_replan_step_id,
+            post_replan_plan_version=projected_post_replan_plan_version,
         )
         required = {"StepFailureProvenance"}
         if scope != RepairScope.MACRO_REPLAN:
@@ -1243,6 +1298,10 @@ class OfficialOdysRecoveryCoordinator:
         task_id: str,
         original_attempt_id: str,
         repair_attempt_id: str,
+        recovery_step_id: str,
+        recovery_plan_version: str,
+        post_replan_step_id: str | None = None,
+        post_replan_plan_version: str | None = None,
     ) -> list[dict[str, Any]]:
         mapped = {
             "STEP_FAILURE_PROVENANCE": "StepFailureProvenance",
@@ -1278,13 +1337,35 @@ class OfficialOdysRecoveryCoordinator:
                 "MODEL_OUTPUT_PARSE_FAILED",
             }:
                 if not replan_accepted_seen:
-                    if str(event.attempt_id or "") != str(repair_attempt_id):
+                    if str(payload.get("plan_id") or "") != str(plan_id):
                         continue
-                # After durable acceptance, post-replan execution may create
-                # fresh native attempts.  The native request/response event
-                # payload is intentionally bounded and does not carry plan_id;
-                # the run-scoped event stream and the acceptance boundary are
-                # the authority for joining those events to this replan.
+                    if str(payload.get("step_id") or "") != str(recovery_step_id):
+                        continue
+                    if str(payload.get("plan_version") or "") != str(recovery_plan_version):
+                        continue
+                    if str(payload.get("execution_phase") or "initial") not in {
+                        "initial", "local_repair", "recovery"
+                    }:
+                        continue
+                else:
+                    # After durable acceptance, post-replan execution may create
+                    # fresh native attempts. Native event payloads carry bounded
+                    # plan/version/step/phase identity, so do not join an
+                    # unrelated event merely because it occurred later in the run.
+                    if post_replan_step_id is None:
+                        continue
+                    if str(payload.get("plan_id") or "") != str(plan_id):
+                        continue
+                    if str(payload.get("step_id") or "") != str(post_replan_step_id):
+                        continue
+                    if str(payload.get("execution_phase") or "") != "post_replan":
+                        continue
+                    if (
+                        post_replan_plan_version is not None
+                        and str(payload.get("plan_version") or "")
+                        != str(post_replan_plan_version)
+                    ):
+                        continue
                 if event_type == "MODEL_OUTPUT_PARSE_FAILED" and payload.get(
                     "failure_stage"
                 ) != "MODEL_OUTPUT_PARSE":

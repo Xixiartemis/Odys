@@ -70,8 +70,21 @@ def test_only_authoritative_validator_can_turn_candidate_into_verified():
     decision, progress = controller.observe(
         before_state={"ready": False},
         after_state={"ready": True},
-        action={"capability": "workspace.edit", "args_sha256": "a" * 64},
-        observation={"bounded_output": {"ready": True}},
+        action={
+            "capability": "workspace.edit",
+            "args_sha256": "a" * 64,
+            "active_step_contract": {
+                "step_id": "step",
+                "capability": "workspace.edit",
+                "inputs": {"path": "state.json"},
+            },
+            "planner_owned_arguments_match": True,
+        },
+        observation={
+            "status": "SUCCESS",
+            "observed_mutation": True,
+            "bounded_output": {"ready": True},
+        },
     )
 
     assert decision is RecoveryDecision.VALIDATE_CANDIDATE

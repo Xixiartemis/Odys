@@ -152,6 +152,21 @@ def _plan_step_arguments_match(request: AgentRequest, call: ProviderToolCall) ->
     )
 
 
+def _execution_provenance(request: AgentRequest, snapshot: ExecutionSnapshot) -> dict[str, Any]:
+    """Return bounded plan/phase identity for native event correlation."""
+    context = request.context if isinstance(request.context, Mapping) else {}
+    contract = context.get("active_step_contract")
+    controller = request.metadata.get("_recovery_controller") if isinstance(request.metadata, Mapping) else None
+    return {
+        "plan_id": str(contract.get("plan_id", "")) if isinstance(contract, Mapping) else None,
+        "plan_version": str(contract.get("plan_version", "")) if isinstance(contract, Mapping) else None,
+        "step_id": str(contract.get("step_id", "")) if isinstance(contract, Mapping) else str(snapshot.taskgraph_position or ""),
+        "attempt_id": str(snapshot.attempt_id),
+        "strategy_epoch": int(getattr(controller, "strategy_epoch", 0)) if controller is not None else 0,
+        "execution_phase": str(context.get("execution_phase", "initial")),
+    }
+
+
 def _build_runtime_capability_registry(registry) -> CapabilityRegistry:
     """Build the runtime view from the explicit core catalog only.
 
@@ -364,6 +379,7 @@ class NativeToolDispatcher:
             run_id=snapshot.run_id,
             attempt_id=snapshot.attempt_id,
             payload={
+                **_execution_provenance(request, snapshot),
                 "invocation_id": invocation.id,
                 "capability": invocation.capability,
                 "ordinal": invocation.ordinal,
@@ -382,19 +398,19 @@ class NativeToolDispatcher:
 
         # --- Policy boundary (NativeToolDispatcher owns these) ---
         if definition is None:
-            return self._finish_denied(invocation, "UNKNOWN_CAPABILITY")
+            return self._finish_denied(invocation, "UNKNOWN_CAPABILITY", _execution_provenance(request, snapshot))
         if call.name not in self.allowed_capabilities or call.name not in request.allowed_capabilities:
-            return self._finish_denied(invocation, "CAPABILITY_NOT_ALLOWED")
+            return self._finish_denied(invocation, "CAPABILITY_NOT_ALLOWED", _execution_provenance(request, snapshot))
         active_contract = request.context.get("active_step_contract") if isinstance(request.context, Mapping) else None
         if isinstance(active_contract, dict) and call.name == active_contract.get("capability"):
             if not _plan_step_arguments_match(request, call):
-                return self._finish_denied(invocation, "PLAN_STEP_ARGUMENTS_MISMATCH")
+                return self._finish_denied(invocation, "PLAN_STEP_ARGUMENTS_MISMATCH", _execution_provenance(request, snapshot))
         if call.name == "platform.delegate" and len(snapshot.delegation_dependencies) >= request.budget.max_delegations:
-            return self._finish_denied(invocation, "DELEGATION_BUDGET_EXHAUSTED")
+            return self._finish_denied(invocation, "DELEGATION_BUDGET_EXHAUSTED", _execution_provenance(request, snapshot))
         if concrete_spec is not None and concrete_spec.side_effect and call.name not in self.allowed_side_effect_capabilities:
-            return self._finish_denied(invocation, "SIDE_EFFECT_NOT_ALLOWED")
+            return self._finish_denied(invocation, "SIDE_EFFECT_NOT_ALLOWED", _execution_provenance(request, snapshot))
         if concrete_spec is not None and concrete_spec.requires_human_approval:
-            return self._finish_denied(invocation, "HUMAN_APPROVAL_REQUIRED")
+            return self._finish_denied(invocation, "HUMAN_APPROVAL_REQUIRED", _execution_provenance(request, snapshot))
 
         effect_class = self._effect_class(call.name, definition, concrete_spec)
         receipt = None
@@ -429,7 +445,17 @@ class NativeToolDispatcher:
         invocation.state = InvocationState.STARTED
         invocation.started_at = utcnow()
         self.invocations.update(invocation)
-        self.events.append(EventType.NATIVE_TOOL_STARTED, task_id=snapshot.task_id, run_id=snapshot.run_id, attempt_id=snapshot.attempt_id, payload={"invocation_id": invocation.id, "capability": invocation.capability})
+        self.events.append(
+            EventType.NATIVE_TOOL_STARTED,
+            task_id=snapshot.task_id,
+            run_id=snapshot.run_id,
+            attempt_id=snapshot.attempt_id,
+            payload={
+                **_execution_provenance(request, snapshot),
+                "invocation_id": invocation.id,
+                "capability": invocation.capability,
+            },
+        )
         self.fault_injector.hit(NativeFaultPoint.AFTER_TOOL_STARTED, invocation=invocation)
         if execution_control is not None:
             execution_control.check()
@@ -530,6 +556,12 @@ class NativeToolDispatcher:
             "safe_summary": _safe_value(summary, 8_000),
             "bounded_output": _safe_value(output, 12_000),
             "duration_ms": duration_ms,
+            "active_step_contract_present": isinstance(active_contract, Mapping),
+            "planner_owned_arguments_match": bool(
+                isinstance(active_contract, Mapping)
+                and call.name == active_contract.get("capability")
+                and _plan_step_arguments_match(request, call)
+            ),
         }
         before = summary.get("before_sha256") or output.get("before_sha256")
         after = summary.get("after_sha256") or output.get("after_sha256")
@@ -561,6 +593,7 @@ class NativeToolDispatcher:
             run_id=snapshot.run_id,
             attempt_id=snapshot.attempt_id,
             payload={
+                **_execution_provenance(request, snapshot),
                 "invocation_id": invocation.id,
                 "capability": invocation.capability,
                 "ordinal": invocation.ordinal,
@@ -585,7 +618,7 @@ class NativeToolDispatcher:
         self.fault_injector.hit(NativeFaultPoint.AFTER_TOOL_OBSERVED, invocation=invocation)
         return model_observation
 
-    def _finish_denied(self, invocation: ToolInvocation, error_type: str) -> dict[str, Any]:
+    def _finish_denied(self, invocation: ToolInvocation, error_type: str, provenance: Mapping[str, Any] | None = None) -> dict[str, Any]:
         invocation.state = InvocationState.FINISHED
         invocation.result_status = ToolResultStatus.FAILURE.value
         invocation.error_type = error_type
@@ -593,7 +626,7 @@ class NativeToolDispatcher:
         invocation.finished_at = utcnow()
         invocation.duration_ms = 0
         self.invocations.update(invocation)
-        self.events.append(EventType.NATIVE_TOOL_OBSERVED, task_id=invocation.task_id, run_id=invocation.run_id, attempt_id=invocation.attempt_id, payload={"invocation_id": invocation.id, **invocation.result_summary})
+        self.events.append(EventType.NATIVE_TOOL_OBSERVED, task_id=invocation.task_id, run_id=invocation.run_id, attempt_id=invocation.attempt_id, payload={**dict(provenance or {}), "invocation_id": invocation.id, **invocation.result_summary})
         return {"tool_call_id": invocation.id, "safe_summary": invocation.result_summary, **invocation.result_summary}
 
     async def reconcile_unfinished(self, attempt_id: str) -> list[dict[str, Any]]:

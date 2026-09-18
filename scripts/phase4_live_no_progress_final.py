@@ -566,6 +566,27 @@ def _run_qualification(
         post_replan_event_types = {
             str(item.get("event_type")) for item in post_replan_events
         }
+        post_replan_tool_requested_count = sum(
+            item.get("event_type") == "TOOL_CALL_REQUESTED"
+            for item in post_replan_events
+        )
+        post_replan_provider_call_count = sum(
+            item.get("event_type") == "PROVIDER_RESPONSE_SUCCESS"
+            for item in post_replan_events
+        )
+        post_replan_mutation_count = sum(
+            bool(item.get("metadata", {}).get("observed_mutation"))
+            for item in post_replan_events
+            if item.get("event_type") == "TOOL_CALL_OBSERVED"
+        )
+        # A same-step post-replan retry is redundant once the accepted
+        # planner-owned mutation has been observed.
+        post_replan_redundant_tool_calls = max(
+            0, post_replan_tool_requested_count - 1
+        )
+        post_replan_redundant_provider_calls = max(
+            0, post_replan_provider_call_count - 1
+        )
         # New traces carry an explicit start event.  Older replay traces may
         # not, so an actual provider/tool event *after the durable acceptance*
         # is the conservative fallback; REPLAN_ACCEPTED alone is deliberately
@@ -603,7 +624,12 @@ def _run_qualification(
             "post_replan_execution_started": post_replan_started,
             "post_replan_provider_called": post_replan_provider_called,
             "post_replan_tool_requested": post_replan_tool_requested,
+            "post_replan_tool_requested_count": post_replan_tool_requested_count,
+            "post_replan_provider_call_count": post_replan_provider_call_count,
             "post_replan_mutation_observed": post_replan_mutation_observed,
+            "post_replan_mutation_count": post_replan_mutation_count,
+            "post_replan_redundant_tool_calls": post_replan_redundant_tool_calls,
+            "post_replan_redundant_provider_calls": post_replan_redundant_provider_calls,
             "post_replan_executed": post_replan_started and (
                 post_replan_provider_called or post_replan_tool_requested
             ),
@@ -677,6 +703,9 @@ async def _smoke(output: Path) -> dict[str, Any]:
         and item["macro_replan_executed"]
         and item["post_replan_executed"]
         and item["post_replan_alternate_mutation_allowed"]
+        and item["post_replan_mutation_count"] == 1
+        and item["post_replan_redundant_tool_calls"] == 0
+        and item["post_replan_redundant_provider_calls"] == 0
         and item["final_validator"] == "ACCEPTED"
         for item in per_run
     )
@@ -716,6 +745,15 @@ async def _smoke(output: Path) -> dict[str, Any]:
         ),
         "post_replan_alternate_mutation_allowed": all(
             item["post_replan_alternate_mutation_allowed"] for item in per_run
+        ),
+        "post_replan_mutation_count": sum(
+            item["post_replan_mutation_count"] for item in per_run
+        ),
+        "post_replan_redundant_tool_calls": sum(
+            item["post_replan_redundant_tool_calls"] for item in per_run
+        ),
+        "post_replan_redundant_provider_calls": sum(
+            item["post_replan_redundant_provider_calls"] for item in per_run
         ),
         "recovery_events_observed": sum(item["post_replan_executed"] for item in per_run),
         "effect_policy_evidence_count": len(evidence_records),

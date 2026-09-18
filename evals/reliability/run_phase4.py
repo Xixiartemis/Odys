@@ -763,9 +763,30 @@ def _invalid_outcome(exc: BaseException) -> dict[str, Any]:
 
 def _execution_accounting(outcome: ExecutionOutcome) -> dict[str, Any]:
     """Project only accounting observed by the execution adapter."""
+    records = [dict(item) for item in outcome.provider_call_records]
+    phase_counts: dict[str, int] = {}
+    for record in records:
+        phase = str(record.get("phase") or "unspecified")
+        phase_counts[phase] = phase_counts.get(phase, 0) + 1
+    trace = [
+        item for item in outcome.execution_trace if isinstance(item, Mapping)
+    ]
+    repair_lineage = outcome.observed_state.get("repair_lineage")
     return {
         "provider_calls": int(outcome.provider_calls),
+        "root_provider_calls": phase_counts.get("initial", 0),
+        "nested_provider_calls": sum(
+            count for phase, count in phase_counts.items() if phase != "initial"
+        ),
         "model_calls": int(outcome.model_calls),
+        "provider_call_records_count": len(records),
+        "provider_calls_match_records": int(outcome.provider_calls) == len(records),
+        "provider_call_record_exclusion_reason": (
+            None
+            if int(outcome.provider_calls) == len(records)
+            else "adapter_record_gap_or_non_billed_call"
+        ),
+        "provider_call_phase_counts": phase_counts,
         "root_attempt_count": int(outcome.root_attempt_count),
         "nested_attempt_count": int(outcome.nested_attempt_count),
         "provider_attempt_count": int(outcome.provider_attempt_count),
@@ -780,12 +801,25 @@ def _execution_accounting(outcome: ExecutionOutcome) -> dict[str, Any]:
         "provider_timeout_seconds": outcome.provider_timeout_seconds,
         "budget_exhausted": bool(outcome.budget_exhausted),
         "budget_failure_type": outcome.budget_failure_type,
-        "provider_call_records": [
-            dict(item) for item in outcome.provider_call_records
-        ],
+        "provider_call_records": records,
         "tool_invocations": [
             dict(item) for item in outcome.tool_invocation_evidence
         ],
+        "tool_invocation_evidence_count": len(outcome.tool_invocation_evidence),
+        "tool_calls_match_evidence": int(outcome.tool_calls)
+        == len(outcome.tool_invocation_evidence),
+        "repair_lineage_count": (
+            len(repair_lineage) if isinstance(repair_lineage, list) else 0
+        ),
+        "repair_completed_trace_count": sum(
+            str(item.get("event_type")) == "REPAIR_COMPLETED" for item in trace
+        ),
+        "replan_accepted_trace_count": sum(
+            str(item.get("event_type")) == "REPLAN_ACCEPTED" for item in trace
+        ),
+        "replan_rejected_trace_count": sum(
+            str(item.get("event_type")) == "REPLAN_REJECTED" for item in trace
+        ),
         "tokens_input": outcome.tokens_input,
         "tokens_output": outcome.tokens_output,
         "total_tokens": outcome.total_tokens,
@@ -1815,6 +1849,37 @@ class Phase4Runner:
                 "validator_observed_repaired_state": repaired.validator_observed_repaired_state,
             }
         )
+        durable_external_verification = repaired.observed_state.get(
+            "durable_external_verification"
+        )
+        if isinstance(durable_external_verification, Mapping):
+            # Evidence-only projection: the validator remains the sole
+            # acceptance authority, while the trace exposes the durable
+            # plan finalization needed for an external audit.
+            merged_trace.append(
+                _trace_event(
+                    "DURABLE_EXTERNAL_VERIFICATION",
+                    task_id=spec.task["task_id"],
+                    attempt_id=repair_event_attempt_id,
+                    status=str(
+                        durable_external_verification.get(
+                            "acceptance_status", "NOT_EVALUATED"
+                        )
+                    ).casefold(),
+                    metadata={
+                        key: durable_external_verification.get(key)
+                        for key in (
+                            "acceptance_status",
+                            "durable_plan_step_status",
+                            "durable_plan_status",
+                            "plan_id",
+                            "step_id",
+                            "budget_issued",
+                        )
+                        if key in durable_external_verification
+                    },
+                )
+            )
         if final_validation.acceptance_status == "ACCEPTED":
             merged_trace.append(
                 _trace_event(
@@ -1933,6 +1998,22 @@ class Phase4Runner:
             "state_changed_after_repair": outcome.state_changed_after_repair,
             "validator_observed_repaired_state": outcome.validator_observed_repaired_state,
         }
+        durable_external_verification = outcome.observed_state.get(
+            "durable_external_verification"
+        )
+        if isinstance(durable_external_verification, Mapping):
+            state_evidence["durable_external_verification"] = {
+                key: durable_external_verification.get(key)
+                for key in (
+                    "acceptance_status",
+                    "durable_plan_step_status",
+                    "durable_plan_status",
+                    "plan_id",
+                    "step_id",
+                    "budget_issued",
+                )
+                if key in durable_external_verification
+            }
         recovery_identity["recovery_action"] = outcome.recovery_action
         convergence = outcome.observed_state.get("repair_convergence")
         if isinstance(convergence, Mapping):

@@ -410,8 +410,22 @@ class RecoveryController:
             action=action,
             observation=observation,
         )
-        if progress.status is ProgressStatus.SATISFIED:
+        if self._is_authoritative_candidate(action, observation, progress):
+            progress.evidence["candidate_for_validation"] = True
             return RecoveryDecision.VALIDATE_CANDIDATE, progress
+        if str((observation or {}).get("error_type") or "") == "PLAN_STEP_ARGUMENTS_MISMATCH":
+            # A planner-owned contract rejection proves that this local
+            # strategy produced no executable progress. Legacy records the
+            # detection; the opted-in policy may consume it for escalation.
+            self._record_detection("REPAIR_NO_PROGRESS", progress)
+            if self._no_progress_aware:
+                self.emit_signal("REPAIR_NO_PROGRESS", progress)
+                return RecoveryDecision.ESCALATE_MACRO_REPLAN, progress
+        if progress.status is ProgressStatus.SATISFIED:
+            progress.evidence["candidate_for_validation"] = False
+            progress.evidence["candidate_rejection_reason"] = (
+                self._candidate_rejection_reason(action, observation, progress)
+            )
         if progress.status is ProgressStatus.OSCILLATING:
             self._record_detection("REPAIR_STATE_OSCILLATION", progress)
             if self._no_progress_aware:
@@ -454,6 +468,46 @@ class RecoveryController:
                 return RecoveryDecision.ESCALATE_MACRO_REPLAN, progress
             return RecoveryDecision.CONTINUE_LOCAL_REPAIR, progress
         return RecoveryDecision.CONTINUE_LOCAL_REPAIR, progress
+
+    @staticmethod
+    def _candidate_rejection_reason(
+        action: Mapping[str, Any] | None,
+        observation: Mapping[str, Any] | None,
+        progress: EffectProgress,
+    ) -> str:
+        action = action if isinstance(action, Mapping) else {}
+        observation = observation if isinstance(observation, Mapping) else {}
+        contract = action.get("active_step_contract")
+        if not isinstance(contract, Mapping):
+            return "ACTIVE_STEP_CONTRACT_MISSING"
+        if str(action.get("capability", "")) != str(contract.get("capability", "")):
+            return "ACTIVE_CAPABILITY_MISMATCH"
+        if action.get("planner_owned_arguments_match") is not True:
+            return "PLANNER_OWNED_ARGUMENTS_MISMATCH"
+        if str(observation.get("status", "")) != "SUCCESS":
+            return "TOOL_EXECUTION_NOT_SUCCESS"
+        if not bool((progress.evidence or {}).get("confirmed_observed_mutation")):
+            return "CONFIRMED_MUTATION_MISSING"
+        return "CANDIDATE_CONTRACT_NOT_SATISFIED"
+
+    @classmethod
+    def _is_authoritative_candidate(
+        cls,
+        action: Mapping[str, Any] | None,
+        observation: Mapping[str, Any] | None,
+        progress: EffectProgress,
+    ) -> bool:
+        action = action if isinstance(action, Mapping) else {}
+        observation = observation if isinstance(observation, Mapping) else {}
+        contract = action.get("active_step_contract")
+        return bool(
+            isinstance(contract, Mapping)
+            and str(action.get("capability", ""))
+            == str(contract.get("capability", ""))
+            and action.get("planner_owned_arguments_match") is True
+            and str(observation.get("status", "")) == "SUCCESS"
+            and bool((progress.evidence or {}).get("confirmed_observed_mutation"))
+        )
 
     def validator_rejected(self) -> RecoveryDecision:
         """Feed an authoritative rejection back into bounded recovery.

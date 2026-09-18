@@ -345,6 +345,7 @@ class NativeAgentKernel:
                 run_id=run_id,
                 attempt_id=attempt_id,
                 payload={
+                    **self._execution_correlation(request, snapshot),
                     **self._response_shape(raw, turn=next_turn),
                     "transport_status": "SUCCESS",
                     **call_identity,
@@ -371,7 +372,13 @@ class NativeAgentKernel:
                     "category": str(exc)[:128],
                     **parse_evidence,
                 }
-                self.events.append(EventType.MODEL_RESPONSE_REJECTED, task_id=task_id, run_id=run_id, attempt_id=attempt_id, payload=rejected)
+                self.events.append(
+                    EventType.MODEL_RESPONSE_REJECTED,
+                    task_id=task_id,
+                    run_id=run_id,
+                    attempt_id=attempt_id,
+                    payload={**self._execution_correlation(request, snapshot), **rejected},
+                )
                 self.events.append(EventType.NATIVE_MODEL_RESPONSE_REJECTED, task_id=task_id, run_id=run_id, attempt_id=attempt_id, payload=rejected)
                 self._create_replan(snapshot, "PROVIDER_MALFORMED_RESPONSE", {"category": str(exc)[:128]})
                 failed = self._failed(
@@ -394,6 +401,7 @@ class NativeAgentKernel:
                 run_id=run_id,
                 attempt_id=attempt_id,
                 payload={
+                    **self._execution_correlation(request, snapshot),
                     "turn": next_turn,
                     "content_length": len(response.content),
                     "tool_call_count": len(response.tool_calls),
@@ -466,6 +474,14 @@ class NativeAgentKernel:
                             action={
                                 "capability": observation.get("capability") or call.name,
                                 "args_sha256": observation.get("args_sha256"),
+                                "active_step_contract": (
+                                    request.context.get("active_step_contract")
+                                    if isinstance(request.context, dict)
+                                    else None
+                                ),
+                                "planner_owned_arguments_match": observation.get(
+                                    "planner_owned_arguments_match", False
+                                ),
                             },
                             observation=observation,
                         )
@@ -720,6 +736,23 @@ class NativeAgentKernel:
     def _save(self, snapshot: ExecutionSnapshot) -> None:
         self.snapshots.save(snapshot)
         self.events.append(EventType.NATIVE_EXECUTION_SNAPSHOT, task_id=snapshot.task_id, run_id=snapshot.run_id, attempt_id=snapshot.attempt_id, payload={"snapshot_id": snapshot.id, "version": snapshot.version, "phase": snapshot.phase.value, "model_turn_count": snapshot.model_turn_count, "tool_call_count": snapshot.tool_call_count, "workspace_mutation_version": snapshot.workspace_mutation_version, "completion_candidate_id": snapshot.completion_candidate_id})
+
+    @staticmethod
+    def _execution_correlation(
+        request: AgentRequest,
+        snapshot: ExecutionSnapshot,
+    ) -> dict[str, Any]:
+        context = request.context if isinstance(request.context, dict) else {}
+        contract = context.get("active_step_contract")
+        controller = request.metadata.get("_recovery_controller") if isinstance(request.metadata, dict) else None
+        return {
+            "plan_id": str(contract.get("plan_id", "")) if isinstance(contract, dict) else None,
+            "plan_version": str(contract.get("plan_version", "")) if isinstance(contract, dict) else None,
+            "step_id": str(contract.get("step_id", "")) if isinstance(contract, dict) else str(snapshot.taskgraph_position or ""),
+            "attempt_id": str(snapshot.attempt_id),
+            "strategy_epoch": int(getattr(controller, "strategy_epoch", 0)) if controller is not None else 0,
+            "execution_phase": str(context.get("execution_phase", "initial")),
+        }
 
     def _provider_failure(self, request: AgentRequest, snapshot: ExecutionSnapshot, error_type: str | ProviderFailureCategory, turn: int, detail: str | None = None) -> AgentResult:
         category = ProviderFailureCategory(error_type)

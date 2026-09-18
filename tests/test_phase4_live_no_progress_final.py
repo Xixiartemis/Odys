@@ -40,6 +40,9 @@ def test_02g_provider_free_smoke_uses_the_same_policy_path(tmp_path):
     assert report["initial_alternate_mutation_denied"] is True
     assert report["local_repair_alternate_mutation_denied"] is True
     assert report["post_replan_alternate_mutation_allowed"] is True
+    assert report["post_replan_mutation_count"] == 6
+    assert report["post_replan_redundant_tool_calls"] == 0
+    assert report["post_replan_redundant_provider_calls"] == 0
     assert report["baseline_final_validator_accepted"] is True
     assert report["v2_final_validator_accepted"] is True
     assert report["fault_trigger_index_1"] is True

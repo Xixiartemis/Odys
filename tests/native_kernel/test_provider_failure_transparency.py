@@ -149,12 +149,19 @@ def test_native_valid_empty_and_provider_exception_are_distinct(db, make_task):
     assert EventType.MODEL_RESPONSE_RECEIVED in empty_types
     assert EventType.MODEL_RESPONSE_PARSED in empty_types
     assert EventType.MODEL_RESPONSE_REJECTED not in empty_types
-    assert empty_parsed.payload == {
+    assert {
+        "turn": empty_parsed.payload["turn"],
+        "content_length": empty_parsed.payload["content_length"],
+        "tool_call_count": empty_parsed.payload["tool_call_count"],
+        "completion_claim": empty_parsed.payload["completion_claim"],
+    } == {
         "turn": 1,
         "content_length": 0,
         "tool_call_count": 0,
         "completion_claim": False,
     }
+    assert empty_parsed.payload["execution_phase"] == "initial"
+    assert empty_parsed.payload["attempt_id"]
 
     provider_failure = _kernel_case(
         db,

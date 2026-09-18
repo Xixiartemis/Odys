@@ -305,8 +305,21 @@ def test_recovery_context_candidate_does_not_grant_verified_status():
     decision, progress = controller.observe(
         before_state={"ready": False},
         after_state={"ready": True},
-        action={"capability": "workspace.edit", "args_sha256": "a" * 64},
-        observation={"bounded_output": {"ready": True}},
+        action={
+            "capability": "workspace.edit",
+            "args_sha256": "a" * 64,
+            "active_step_contract": {
+                "step_id": "step",
+                "capability": "workspace.edit",
+                "inputs": {"path": "state.json"},
+            },
+            "planner_owned_arguments_match": True,
+        },
+        observation={
+            "status": "SUCCESS",
+            "observed_mutation": True,
+            "bounded_output": {"ready": True},
+        },
     )
     assert decision is RecoveryDecision.VALIDATE_CANDIDATE
     assert progress.status is ProgressStatus.SATISFIED
