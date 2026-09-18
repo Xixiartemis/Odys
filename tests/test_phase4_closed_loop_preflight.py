@@ -4,11 +4,22 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+from types import SimpleNamespace
 
 from lhas.agent.models import AgentBudget, AgentRequest, AgentRole
+from lhas.domain.enums import EventType
 from lhas.native.models import ExecutionSnapshot, ProviderToolCall
 from lhas.native.tools import NativeToolDispatcher, _safe_tool_arguments
-from lhas.planning.models import PlanStep, compute_step_semantic_fingerprint
+from lhas.persistence.event_store import EventStore
+from lhas.persistence.planning_repositories import PlanRepository
+from lhas.planning.models import (
+    Plan,
+    PlanMode,
+    PlanStatus,
+    PlanStep,
+    PlanStepStatus,
+    compute_step_semantic_fingerprint,
+)
 from lhas.recovery_control import RecoveryController, RecoveryDecision, ProgressStatus
 from lhas.tools.registry import ToolRegistry
 from lhas.workspace import (
@@ -18,7 +29,13 @@ from lhas.workspace import (
     register_staged_workspace_tools,
     register_workspace_tools,
 )
-from evals.reliability.run_phase4 import ExecutionOutcome, ExternalObservableValidator, _validator_observation_view
+from evals.reliability.run_phase4 import (
+    ExecutionOutcome,
+    ExternalObservableValidator,
+    ValidationOutcome,
+    _validator_observation_view,
+)
+from evals.reliability.runtime_factory.recovery import OfficialOdysRecoveryCoordinator
 
 
 def _request(contract: dict) -> AgentRequest:
@@ -222,6 +239,114 @@ def test_fixture_observation_cannot_be_overridden_by_runtime_claim():
 
     assert view["route"] == "local"
     assert result.acceptance_status == "REJECTED"
+
+
+def test_external_acceptance_clears_prevalidation_failure_type():
+    task = {"expected_observable_effects": {"route": "alternate"}}
+    outcome = ExecutionOutcome(
+        observed_state={"fixture_observations": {"route": "alternate"}},
+        failure_type="VERIFICATION_REJECTED",
+    )
+
+    result = ExternalObservableValidator().validate(task, None, outcome)
+
+    assert result.validator_execution_status == "SUCCESS"
+    assert result.acceptance_status == "ACCEPTED"
+    assert result.verified_completion is True
+    assert result.failure_type is None
+
+
+def _waiting_plan(plan_id: str, step_id: str) -> Plan:
+    return Plan(
+        id=plan_id,
+        goal_id=f"goal-{plan_id}",
+        mode=PlanMode.SIMPLE_DEPENDENCY,
+        status=PlanStatus.WAITING_FOR_VERIFICATION,
+        steps=[
+            PlanStep(
+                id=step_id,
+                title="complete step",
+                objective="Complete the step",
+                capability="workspace.edit",
+                status=PlanStepStatus.WAITING_FOR_VERIFICATION,
+                task_id=f"task-{plan_id}",
+            )
+        ],
+    )
+
+
+def _coordinator_for_external_finalization(db, plan_id: str, step_id: str, run_id: str):
+    coordinator = object.__new__(OfficialOdysRecoveryCoordinator)
+    coordinator.db = db
+    coordinator._pending_external_finalizations = {
+        run_id: {"plan_id": plan_id, "step_id": step_id}
+    }
+    return coordinator
+
+
+def test_external_acceptance_finalizes_durable_plan_and_step(db):
+    plan = _waiting_plan("plan-external-accepted", "step-external-accepted")
+    PlanRepository(db).create(plan)
+    run_id = "run-external-accepted"
+    coordinator = _coordinator_for_external_finalization(
+        db, plan.id, plan.steps[0].id, run_id
+    )
+
+    result = asyncio.run(
+        coordinator.finalize_after_external_validation(
+            SimpleNamespace(run_id=run_id),
+            ExecutionOutcome(),
+            ValidationOutcome(
+                verified_completion=True,
+                validity="VALIDATED_PASS",
+                acceptance_status="ACCEPTED",
+            ),
+        )
+    )
+
+    reloaded = PlanRepository(db).get(plan.id)
+    assert result["durable_plan_step_status"] == PlanStepStatus.VERIFIED.value
+    assert result["durable_plan_status"] == PlanStatus.COMPLETED.value
+    assert reloaded.steps[0].status is PlanStepStatus.VERIFIED
+    assert reloaded.status is PlanStatus.COMPLETED
+    assert reloaded.steps[0].evidence["external_validation"]["acceptance_status"] == "ACCEPTED"
+    event_types = [event.event_type for event in EventStore(db).list_all()]
+    assert EventType.VALIDATION_PASSED in event_types
+    assert EventType.PLAN_COMPLETED in event_types
+    assert result["budget_issued"] is False
+
+
+def test_external_rejection_finalizes_terminal_failure_without_recovery(db):
+    plan = _waiting_plan("plan-external-rejected", "step-external-rejected")
+    PlanRepository(db).create(plan)
+    run_id = "run-external-rejected"
+    coordinator = _coordinator_for_external_finalization(
+        db, plan.id, plan.steps[0].id, run_id
+    )
+
+    result = asyncio.run(
+        coordinator.finalize_after_external_validation(
+            SimpleNamespace(run_id=run_id),
+            ExecutionOutcome(),
+            ValidationOutcome(
+                verified_completion=False,
+                validity="VALIDATED_FAIL",
+                failure_type="VERIFICATION_REJECTED",
+                acceptance_status="REJECTED",
+            ),
+        )
+    )
+
+    reloaded = PlanRepository(db).get(plan.id)
+    assert result["durable_plan_step_status"] == PlanStepStatus.CLASSIFIED_FAILURE.value
+    assert result["durable_plan_status"] == PlanStatus.FAILED.value
+    assert reloaded.steps[0].status is PlanStepStatus.CLASSIFIED_FAILURE
+    assert reloaded.status is PlanStatus.FAILED
+    event_types = [event.event_type for event in EventStore(db).list_all()]
+    assert EventType.VALIDATION_FAILED in event_types
+    assert EventType.PLAN_FAILED in event_types
+    assert EventType.REPAIR_STARTED not in event_types
+    assert result["budget_issued"] is False
 
 
 def test_verified_work_fingerprint_includes_acceptance_and_authority_contract():

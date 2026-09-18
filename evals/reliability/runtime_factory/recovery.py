@@ -318,6 +318,10 @@ class OfficialOdysRecoveryCoordinator:
         self.kernel = kernel
         self.registry = registry
         self._contexts: dict[str, dict[str, Any]] = {}
+        # External validation runs after ``recover_after_validation`` returns.
+        # Keep only the durable plan/step identity needed to finalize that
+        # candidate; no second recovery authority is created here.
+        self._pending_external_finalizations: dict[str, dict[str, Any]] = {}
         # One controller is created at the run boundary and reused by the
         # initial native attempt and the canonical recovery path.  Keeping the
         # object here is intentionally in-process only; durable escalation
@@ -370,6 +374,115 @@ class OfficialOdysRecoveryCoordinator:
         release the in-process reference without touching durable evidence.
         """
         self._controllers.pop(str(run_id), None)
+
+    async def finalize_after_external_validation(
+        self,
+        request: Any,
+        outcome: ExecutionOutcome,
+        validation: Any,
+    ) -> dict[str, Any] | None:
+        """Commit the authoritative external verdict to the durable plan.
+
+        The post-replan execution intentionally stops at
+        ``WAITING_FOR_VERIFICATION``.  This method is the only bridge from
+        the benchmark's external validator back to durable planning state;
+        it never allocates repair/replan budget and therefore cannot create a
+        second recovery attempt.
+        """
+        pending = self._pending_external_finalizations.pop(
+            str(request.run_id), None
+        )
+        if pending is None:
+            return None
+
+        from lhas.domain.enums import EventType
+        from lhas.persistence.event_store import EventStore
+        from lhas.persistence.planning_repositories import PlanRepository
+        from lhas.planning.models import PlanStatus, PlanStepStatus, transition_step
+
+        plans = PlanRepository(self.db)
+        plan = plans.get(str(pending["plan_id"]))
+        if plan is None:
+            raise OfficialRecoveryContractError("EXTERNAL_FINALIZATION_PLAN_MISSING")
+        step = next(
+            (item for item in plan.steps if item.id == str(pending["step_id"])),
+            None,
+        )
+        if step is None:
+            raise OfficialRecoveryContractError("EXTERNAL_FINALIZATION_STEP_MISSING")
+
+        events = EventStore(self.db)
+        accepted = (
+            str(getattr(validation, "acceptance_status", "")) == "ACCEPTED"
+            and bool(getattr(validation, "verified_completion", False))
+        )
+        evidence = {
+            "run_id": str(request.run_id),
+            "validator_execution_status": str(
+                getattr(validation, "validator_execution_status", "NOT_EXECUTED")
+            ),
+            "acceptance_status": "ACCEPTED" if accepted else "REJECTED",
+            "failure_type": getattr(validation, "failure_type", None),
+        }
+        step.evidence["external_validation"] = evidence
+        if accepted:
+            if step.status is not PlanStepStatus.VERIFIED:
+                transition_step(
+                    step,
+                    PlanStepStatus.VERIFIED,
+                    "external_validator_accepted",
+                    events,
+                    plan_id=plan.id,
+                    extra_payload=evidence,
+                )
+            events.append(EventType.VALIDATION_PASSED, payload={
+                "plan_id": plan.id,
+                "step_id": step.id,
+                **evidence,
+            })
+            if all(
+                item.status in {PlanStepStatus.VERIFIED, PlanStepStatus.STALE}
+                for item in plan.steps
+            ) and any(item.status is PlanStepStatus.VERIFIED for item in plan.steps):
+                plan.status = PlanStatus.COMPLETED
+                events.append(EventType.PLAN_COMPLETED, payload={"plan_id": plan.id})
+            elif any(
+                item.status is PlanStepStatus.WAITING_FOR_VERIFICATION
+                for item in plan.steps
+            ):
+                plan.status = PlanStatus.WAITING_FOR_VERIFICATION
+            else:
+                plan.status = PlanStatus.RUNNING
+        else:
+            if step.status is not PlanStepStatus.CLASSIFIED_FAILURE:
+                transition_step(
+                    step,
+                    PlanStepStatus.CLASSIFIED_FAILURE,
+                    "external_validator_rejected",
+                    events,
+                    plan_id=plan.id,
+                    extra_payload=evidence,
+                )
+            events.append(EventType.VALIDATION_FAILED, payload={
+                "plan_id": plan.id,
+                "step_id": step.id,
+                **evidence,
+            })
+            plan.status = PlanStatus.FAILED
+            events.append(EventType.PLAN_FAILED, payload={
+                "plan_id": plan.id,
+                "reason": "external_validator_rejected",
+            })
+        plans.update(plan)
+        return {
+            "finalized": True,
+            "acceptance_status": evidence["acceptance_status"],
+            "plan_id": plan.id,
+            "step_id": step.id,
+            "durable_plan_step_status": step.status.value,
+            "durable_plan_status": plan.status.value,
+            "budget_issued": False,
+        }
 
     def _reserve_replan(self) -> bool:
         authority = self.root_budget_authority
@@ -904,6 +1017,13 @@ class OfficialOdysRecoveryCoordinator:
                 resume_plan_id=repaired_plan.id,
                 repair_step_ids=post_replan_step_ids,
             )
+            # The post-replan candidate is intentionally left at
+            # WAITING_FOR_VERIFICATION.  Phase4Runner will call the narrow
+            # finalization hook after the external fixture validator returns.
+            self._pending_external_finalizations[str(request.run_id)] = {
+                "plan_id": str(repaired_plan.id),
+                "step_id": str(replanned_step.id),
+            }
 
         # Project bounded recovery-control telemetry from durable events and
         # controller decisions. The policy is execution-local and never
@@ -1061,6 +1181,11 @@ class OfficialOdysRecoveryCoordinator:
         if repaired_step.status is PlanStepStatus.VERIFIED:
             convergence["repair_stop_reason"] = "VERIFIED"
         state["repair_convergence"] = convergence
+        awaiting_external_validation = str(request.run_id) in self._pending_external_finalizations
+        if awaiting_external_validation:
+            state["external_validation_pending"] = True
+            state["durable_plan_step_status"] = repaired_step.status.value
+            state["durable_plan_status"] = repaired_plan.status.value
         repair_tool_calls = 0
         invocations = getattr(self.kernel.dispatcher, "invocations", None)
         if invocations is not None and repair_attempt_id:
@@ -1073,12 +1198,19 @@ class OfficialOdysRecoveryCoordinator:
         verified = repaired_step.status is PlanStepStatus.VERIFIED
         is_macro_replan = scope == RepairScope.MACRO_REPLAN
         return ExecutionOutcome(
-            claimed_complete=verified,
+            # A candidate awaiting external validation is still a completion
+            # claim, but it is not yet VERIFIED and cannot report recovery
+            # success until the validator finalization hook runs.
+            claimed_complete=verified or awaiting_external_validation,
             observed_state=state,
-            failure_type=None if verified else "VERIFICATION_REJECTED",
+            failure_type=(
+                None
+                if verified or awaiting_external_validation
+                else "VERIFICATION_REJECTED"
+            ),
             recovery_required=True,
             recovery_attempted=True,
-            recovery_success=verified,
+            recovery_success=verified and not awaiting_external_validation,
             repair_scope=scope.value,
             repair_attempts=0 if is_macro_replan else 1,
             # The runner adds the initial attempt count to this recovery

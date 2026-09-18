@@ -653,7 +653,15 @@ class ExternalObservableValidator:
         return ValidationOutcome(
             verified_completion=verified,
             validity="VALIDATED_PASS" if verified else "VALIDATED_FAIL",
-            failure_type=outcome.failure_type,
+            # The external validator owns the final acceptance boundary.  A
+            # candidate may carry an earlier runtime/recovery failure while
+            # it is still awaiting validation, but ACCEPTED must never retain
+            # that pre-validation failure as if it were a rejection.
+            failure_type=(
+                None
+                if verified
+                else (outcome.failure_type or "VERIFICATION_REJECTED")
+            ),
             validator_execution_status="SUCCESS",
             acceptance_status="ACCEPTED" if verified else "REJECTED",
         )
@@ -1738,6 +1746,29 @@ class Phase4Runner:
             )
 
         final_validation = self.validator.validate(spec.task, fixture, repaired)
+        finalize_external = getattr(
+            self.executor, "finalize_after_external_validation", None
+        )
+        if callable(finalize_external):
+            durable_finalization = finalize_external(
+                request,
+                repaired,
+                final_validation,
+            )
+            if inspect.isawaitable(durable_finalization):
+                durable_finalization = await durable_finalization
+            if durable_finalization is not None:
+                repaired.observed_state["durable_external_verification"] = dict(
+                    durable_finalization
+                )
+        if final_validation.acceptance_status == "ACCEPTED":
+            repaired.failure_type = None
+            repaired.recovery_success = True
+        else:
+            repaired.failure_type = (
+                final_validation.failure_type or "VERIFICATION_REJECTED"
+            )
+            repaired.recovery_success = False
         # Keep the initial rejection in the trace and append a separate,
         # explicitly labelled revalidation result.
         merged_trace.append(
