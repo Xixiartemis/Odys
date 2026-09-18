@@ -43,6 +43,18 @@ class EchoTool:
         return ToolResult(status=ToolResultStatus.SUCCESS, output={"value": request.arguments["value"]})
 
 
+class MutatingEchoTool(EchoTool):
+    async def execute(self, request):
+        self.calls.append(request.arguments)
+        return ToolResult(
+            status=ToolResultStatus.SUCCESS,
+            output={
+                "value": request.arguments["value"],
+                "before_sha256": "a" * 64,
+                "after_sha256": "b" * 64,
+            },
+        )
+
 class SequenceValidator:
     def __init__(self, values):
         self.values = list(values)
@@ -354,7 +366,7 @@ def test_recovery_controller_escalates_kernel_after_bounded_no_progress(db, make
 
 
 def test_recovery_controller_hands_satisfied_effect_to_authoritative_boundary(db, make_task):
-    tool = EchoTool()
+    tool = MutatingEchoTool()
     case = _kernel_case(
         db,
         make_task,
@@ -376,6 +388,11 @@ def test_recovery_controller_hands_satisfied_effect_to_authoritative_boundary(db
         expected_effects={"value": "target"},
     )
     case[5].metadata["_recovery_controller"] = controller
+    case[5].context["active_step_contract"] = {
+        "step_id": "step-1",
+        "capability": "test.echo",
+        "inputs": {"value": "target"},
+    }
 
     result = asyncio.run(case[4].run(case[5]))
 
