@@ -561,6 +561,12 @@ def _validator_observation_view(
     expected = task.get("expected_observable_effects", {})
     if isinstance(expected, Mapping):
         for key in expected:
+            # A concrete fixture observation is the external truth boundary.
+            # Runtime fields are only declaration-shaped fallback values for
+            # keys the fixture did not observe; they may never overwrite a
+            # fixture key with an agent/runtime claim.
+            if isinstance(fixture_observed, Mapping) and key in fixture_observed:
+                continue
             if key in observed:
                 source[str(key)] = observed[key]
             else:

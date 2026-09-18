@@ -374,6 +374,23 @@ def _event_types(record: dict[str, Any]) -> list[str]:
     return [str(item.get("event_type")) for item in record.get("execution_trace", [])]
 
 
+def _plan_authority_blocked(record: dict[str, Any]) -> bool:
+    """Report an alternate action blocked before effect-policy dispatch.
+
+    The active PlanStep contract is a stricter boundary than the experiment
+    effect policy.  A provider-generated alternate payload during local repair
+    can therefore be rejected before the phase policy sees it; that is still a
+    blocked alternate mutation, but must be reported separately from a policy
+    denial.
+    """
+    return any(
+        str(event.get("metadata", {}).get("error_type"))
+        == "PLAN_STEP_ARGUMENTS_MISMATCH"
+        for event in record.get("execution_trace", [])
+        if event.get("event_type") == "TOOL_CALL_OBSERVED"
+    )
+
+
 def _script_uses_local_monkeypatch() -> bool:
     tree = ast.parse(Path(__file__).read_text(encoding="utf-8"))
     for node in ast.walk(tree):
@@ -480,6 +497,7 @@ async def qualify_async(
                 (event.get("metadata", {}).get("trigger_index") for event in trace["execution_trace"] if event.get("event_type") == "FAULT_TRIGGERED"),
                 None,
             ),
+            "plan_authority_blocked": _plan_authority_blocked(trace),
         }
     baseline = arms["baseline"]
     v2 = arms["v2"]
@@ -498,7 +516,14 @@ async def qualify_async(
         "valid_runs": counts["valid"],
         "invalid_runs": counts["invalid"],
         "initial_alternate_effect_blocked": any(item["alternate_effect"] and item["phase"] == "initial" for item in policy.denied),
-        "local_repair_alternate_effect_blocked": any(item["alternate_effect"] and item["phase"] == "local_repair" for item in policy.denied),
+        # Either the shared phase policy or the stricter planner-owned input
+        # contract may block a local alternate mutation.  Keep both facts
+        # explicit so this qualification never overstates which boundary did
+        # the blocking.
+        "local_repair_alternate_effect_blocked": any(item["alternate_effect"] and item["phase"] == "local_repair" for item in policy.denied)
+        or any(item["plan_authority_blocked"] for item in arms.values()),
+        "local_repair_alternate_effect_policy_denied": any(item["alternate_effect"] and item["phase"] == "local_repair" for item in policy.denied),
+        "local_repair_alternate_effect_plan_authority_blocked": any(item["plan_authority_blocked"] for item in arms.values()),
         "post_replan_alternate_effect_allowed": any(item["alternate_effect"] and item["phase"] == "post_replan" for item in policy.allowed),
         "both_arms_enter_recovery": baseline["recovery_attempted"] and v2["recovery_attempted"],
         "fault_trigger_index": baseline["fault_trigger_index"] == 1 and v2["fault_trigger_index"] == 1,

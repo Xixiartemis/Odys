@@ -349,6 +349,51 @@ class ExecutionControlToken:
 T = TypeVar("T")
 
 
+def _consume_task_result(task: asyncio.Future[Any]) -> None:
+    """Consume a detached task's terminal exception without changing control flow."""
+    try:
+        task.result()
+    except BaseException:
+        # The caller already classified the authoritative timeout/cancellation
+        # boundary.  A late provider/SDK exception must not become an
+        # ``Task exception was never retrieved`` warning.
+        pass
+
+
+async def _cancel_and_drain(
+    operation: asyncio.Future[Any],
+    *,
+    grace_seconds: float = 0.1,
+) -> bool:
+    """Cancel an operation with a bounded cleanup window.
+
+    SDKs and socket adapters are not uniformly cancellation-cooperative.  A
+    root deadline must therefore not wait indefinitely for cleanup.  If the
+    operation outlives the small grace period, it is detached with a callback
+    that consumes its eventual result/exception.  The root control boundary
+    remains authoritative while late task failures stay observable through
+    the caller's existing durable classification.
+    """
+    if operation.done():
+        _consume_task_result(operation)
+        return True
+    # Do not send a second cancellation to a coroutine that is already in its
+    # own cancellation cleanup.  Some SDKs treat the second CancelledError as
+    # a hard abort and never finish the cleanup they had begun.
+    if not operation.cancelling():
+        operation.cancel()
+    try:
+        await asyncio.wait_for(asyncio.shield(operation), timeout=grace_seconds)
+        return True
+    except BaseException:
+        if not operation.done():
+            operation.add_done_callback(_consume_task_result)
+            return False
+        else:
+            _consume_task_result(operation)
+            return True
+
+
 async def await_with_control(
     awaitable: Awaitable[T],
     *,
@@ -397,6 +442,7 @@ async def await_with_control(
 
     operation = asyncio.ensure_future(awaitable)
     terminal_wait = asyncio.create_task(control.wait_terminal())
+    cleanup_detached = False
     try:
         done, _ = await asyncio.wait(
             {operation, terminal_wait},
@@ -404,8 +450,7 @@ async def await_with_control(
             return_when=asyncio.FIRST_COMPLETED,
         )
         if not done:
-            operation.cancel()
-            await asyncio.gather(operation, return_exceptions=True)
+            cleanup_detached = not await _cancel_and_drain(operation)
             # asyncio.wait() may wake a few clock ticks before the monotonic
             # deadline. If the root deadline was the selected ceiling, the
             # root authority still owns this terminal classification; do not
@@ -423,8 +468,7 @@ async def await_with_control(
                 absolute_deadline=control.absolute_deadline,
             )
         if terminal_wait in done:
-            operation.cancel()
-            await asyncio.gather(operation, return_exceptions=True)
+            cleanup_detached = not await _cancel_and_drain(operation)
             control.check()
             raise AssertionError("terminal waiter returned without terminal control state")
         result = operation.result()
@@ -434,9 +478,8 @@ async def await_with_control(
         if not terminal_wait.done():
             terminal_wait.cancel()
         await asyncio.gather(terminal_wait, return_exceptions=True)
-        if not operation.done():
-            operation.cancel()
-            await asyncio.gather(operation, return_exceptions=True)
+        if not operation.done() and not cleanup_detached:
+            await _cancel_and_drain(operation)
 
 
 __all__ = [

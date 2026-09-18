@@ -25,13 +25,13 @@ def test_historical_replays_stop_at_first_bounded_non_progress_signal():
     assert (r1.stop_turn, r1.stop_reason, r1.typed_signal, r1.avoided_turns) == (
         3,
         "NO_PROGRESS",
-        "REPAIR_NO_PROGRESS",
+        None,
         15,
     )
     assert (r2.stop_turn, r2.stop_reason, r2.typed_signal, r2.avoided_turns) == (
         3,
         "NO_PROGRESS",
-        "REPAIR_NO_PROGRESS",
+        None,
         16,
     )
     assert r1.tracker_snapshot["validation_candidate_count"] == 0

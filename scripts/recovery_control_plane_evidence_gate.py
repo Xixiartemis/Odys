@@ -41,6 +41,10 @@ def _synthetic_replay_row(label: str, turns: int) -> dict[str, Any]:
             },
             "result_summary": {"status": "SUCCESS"},
             "status": "SUCCESS",
+            # Historical replay has only bounded tool evidence, not an
+            # authoritative external-state digest.  Do not reinterpret that
+            # evidence as a durable no-progress signal.
+            "observed_mutation": True,
         }
         for index in range(1, turns + 1)
     ]
@@ -131,12 +135,15 @@ def replay_historical_trace(
             },
             observation=observation,
         )
-        if not tracker_decision.continue_repair:
-            stop_turn = turn
-            stop_reason = tracker_decision.stop_reason
-        elif controller_decision is RecoveryDecision.ESCALATE_MACRO_REPLAN:
+        # Always feed the same observation to the control plane before
+        # applying the legacy tracker stop.  Otherwise the tracker can break
+        # first and the durable typed escalation signal is never produced.
+        if controller_decision is RecoveryDecision.ESCALATE_MACRO_REPLAN:
             stop_turn = turn
             stop_reason = progress.status.value
+        elif not tracker_decision.continue_repair:
+            stop_turn = turn
+            stop_reason = tracker_decision.stop_reason
         if stop_turn is not None:
             typed_signal = controller.signals[-1]["reason"] if controller.signals else None
             break

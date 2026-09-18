@@ -143,6 +143,7 @@ def _agent_request() -> AgentRequest:
         agent_id="agent-p0a",
         role=AgentRole.WORKER,
         objective="offline control test",
+        allowed_capabilities={"test.blocked"},
         metadata={"task_id": "task-p0a", "run_id": "run-p0a", "attempt_id": "attempt-p0a"},
     )
 
@@ -178,6 +179,48 @@ async def test_tool_local_ceiling_wins_without_cancelling_root():
     assert raised.value.failure_type == "TOOL_TIMEOUT"
     assert control.terminal is False
     control.cancel("USER_CANCEL")
+
+
+@pytest.mark.asyncio
+async def test_non_cooperative_operation_has_bounded_cleanup_and_consumed_late_failure():
+    late_failure = []
+    loop = asyncio.get_running_loop()
+    loop_errors = []
+    previous_handler = loop.get_exception_handler()
+
+    def capture(_loop, context):
+        loop_errors.append(context)
+
+    loop.set_exception_handler(capture)
+
+    async def non_cooperative():
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            # Simulate an SDK/socket coroutine that performs delayed cleanup
+            # and then fails after the authoritative timeout has returned.
+            await asyncio.sleep(0.15)
+            late_failure.append("completed")
+            raise RuntimeError("late SDK failure")
+
+    started = asyncio.get_running_loop().time()
+    try:
+        with pytest.raises(ExecutionLayerTimeout) as raised:
+            await await_with_control(
+                non_cooperative(),
+                control=ExecutionControlToken("run-bounded-cleanup", timeout_seconds=10),
+                local_ceiling=0.01,
+                timeout_failure_type="PROVIDER_TIMEOUT",
+                source="provider",
+            )
+        elapsed = asyncio.get_running_loop().time() - started
+        assert raised.value.failure_type == "PROVIDER_TIMEOUT"
+        assert elapsed < 0.14
+        await asyncio.sleep(0.2)
+        assert late_failure == ["completed"]
+        assert loop_errors == []
+    finally:
+        loop.set_exception_handler(previous_handler)
 
 
 @pytest.mark.asyncio

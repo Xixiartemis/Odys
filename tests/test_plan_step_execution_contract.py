@@ -69,6 +69,8 @@ def test_taskgraph_projection_is_bounded_and_narrows_task_capabilities():
     assert result.status is ExecutionStatus.SUCCESS
     projected = captured[0].context["active_step_contract"]
     assert projected == {
+        "plan_id": "accepted-plan",
+        "plan_version": "P-0.1",
         "step_id": "accepted-step",
         "objective": "Apply the accepted alternate route.",
         "capability": "workspace.edit_lines",
@@ -79,10 +81,16 @@ def test_taskgraph_projection_is_bounded_and_narrows_task_capabilities():
     assert captured[0].context["allowed_capabilities"] == ["workspace.edit_lines"]
     assert captured[0].context["taskgraph"]["active_step_contract"] == projected
     assert captured[0].context["execution_contract_telemetry"] == {
+        "accepted_plan_id": "accepted-plan",
+        "accepted_plan_version": "P-0.1",
         "accepted_plan_step_id": "accepted-step",
         "accepted_plan_step_capability": "workspace.edit_lines",
+        "accepted_plan_step_inputs_sha256": "aef36c2a8c07da5d9eb8416807160ca1427a9a3c64a60c7571755fba0e99bc1a",
+        "active_execution_plan_id": "accepted-plan",
+        "active_execution_plan_version": "P-0.1",
         "active_execution_step_id": "accepted-step",
         "active_execution_capability": "workspace.edit_lines",
+        "active_execution_inputs_sha256": "aef36c2a8c07da5d9eb8416807160ca1427a9a3c64a60c7571755fba0e99bc1a",
     }
 
 
@@ -125,10 +133,16 @@ def test_kernel_active_contract_blocks_unrelated_task_capability():
     assert captured[0].allowed_capabilities == {"workspace.edit_lines"}
     assert captured[0].objective == "Apply the accepted alternate route."
     assert result.artifacts["execution_contract_telemetry"] == {
+        "accepted_plan_id": "",
+        "accepted_plan_version": "",
         "accepted_plan_step_id": "accepted-step",
         "accepted_plan_step_capability": "workspace.edit_lines",
+        "accepted_plan_step_inputs_sha256": "6fd3710af5dbc771bc5052cd6228e45844880b3abf1c3ffb1ac970ba00bc4f54",
+        "active_execution_plan_id": "",
+        "active_execution_plan_version": "",
         "active_execution_step_id": "accepted-step",
         "active_execution_capability": "workspace.edit_lines",
+        "active_execution_inputs_sha256": "6fd3710af5dbc771bc5052cd6228e45844880b3abf1c3ffb1ac970ba00bc4f54",
     }
 
 

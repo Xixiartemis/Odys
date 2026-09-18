@@ -131,7 +131,13 @@ class EffectProgressEvaluator:
         observation = dict(observation or {})
         if before_state is None:
             before_state = self.last_state_projection
-        after = after_state if after_state is not None else observation
+        external_state = observation.get("external_observed_state")
+        if isinstance(external_state, Mapping):
+            after = dict(external_state)
+            progress_source = "EXTERNAL_OBSERVATION"
+        else:
+            after = after_state if after_state is not None else observation
+            progress_source = "ACTION_OBSERVATION"
         state_digest = _digest(after)
         before_digest = _digest(before_state) if before_state is not None else None
         action_fingerprint = _digest(dict(action or {}))
@@ -167,6 +173,15 @@ class EffectProgressEvaluator:
         self.last_state_digest = state_digest
         self.last_action_fingerprint = action_fingerprint
         self.last_state_projection = after
+        confirmed_mutation = bool(
+            observation.get("observed_mutation")
+            or observation.get("meaningful_mutation")
+            or any(
+                isinstance(observation.get(container), Mapping)
+                and observation[container].get("meaningful_mutation")
+                for container in ("safe_summary", "result_summary", "bounded_output")
+            )
+        )
         return EffectProgress(
             status=status,
             state_digest=state_digest,
@@ -179,6 +194,9 @@ class EffectProgressEvaluator:
                 "repeated_action": repeated_action,
                 "oscillating": oscillating,
                 "matched_effect_keys": list(matched),
+                "confirmed_observed_mutation": confirmed_mutation,
+                "progress_source": progress_source,
+                "effect_progress_authoritative": progress_source == "EXTERNAL_OBSERVATION",
             },
         )
 
@@ -351,6 +369,32 @@ class RecoveryController:
         # explicitly opted-in policy.
         self.detections: list[dict[str, Any]] = []
         self.projector = RecoveryContextProjector()
+        self.strategy_epoch = 0
+        self._epoch_emitted_signals: set[str] = set()
+        self.begin_strategy_epoch(self.step_id, expected_effects)
+
+    def begin_strategy_epoch(
+        self,
+        step_id: str | None,
+        expected_effects: Mapping[str, Any] | None = None,
+    ) -> int:
+        """Start a new strategy while preserving durable recovery history.
+
+        Convergence-only observations belong to the strategy that produced
+        them.  Durable signals/detections and the root budget remain shared
+        across epochs so a replan cannot erase the causal history or mint a
+        second budget authority.
+        """
+
+        self.strategy_epoch += 1
+        self.step_id = str(step_id) if step_id is not None else None
+        self.evaluator = EffectProgressEvaluator(expected_effects)
+        self.no_progress_count = 0
+        self.repeated_action_count = 0
+        self.repeated_state_count = 0
+        self.validator_rejection_count = 0
+        self._epoch_emitted_signals = set()
+        return self.strategy_epoch
 
     def observe(
         self,
@@ -379,7 +423,15 @@ class RecoveryController:
             self.repeated_action_count += 1
         if evidence.get("repeated_state"):
             self.repeated_state_count += 1
-        if progress.status in {ProgressStatus.NO_PROGRESS, ProgressStatus.CHANGED_UNKNOWN}:
+        confirmed_mutation = bool(
+            (progress.evidence or {}).get("confirmed_observed_mutation")
+        )
+        if progress.status is ProgressStatus.CHANGED_UNKNOWN and confirmed_mutation:
+            # A changed observable state whose semantic effect is not yet
+            # known is not evidence of no progress.  Only the authoritative
+            # validator may decide whether it is acceptable.
+            self.no_progress_count = 0
+        elif progress.status in {ProgressStatus.NO_PROGRESS, ProgressStatus.CHANGED_UNKNOWN}:
             self.no_progress_count += 1
         else:
             self.no_progress_count = 0
@@ -439,6 +491,11 @@ class RecoveryController:
                 "progress_status": progress.status.value,
                 "state_digest": progress.state_digest,
                 "action_fingerprint": progress.action_fingerprint,
+                "progress_source": (progress.evidence or {}).get("progress_source"),
+                "effect_progress_authoritative": bool(
+                    (progress.evidence or {}).get("effect_progress_authoritative")
+                ),
+                "strategy_epoch": self.strategy_epoch,
             }
         )
 
@@ -463,6 +520,12 @@ class RecoveryController:
     def emit_signal(self, reason: str, progress: EffectProgress, *, extra: Mapping[str, Any] | None = None) -> dict[str, Any]:
         if reason not in TYPED_ESCALATION_REASONS:
             raise ValueError(f"unsupported typed escalation reason: {reason}")
+        for existing in reversed(self.signals):
+            if (
+                existing.get("reason") == reason
+                and existing.get("strategy_epoch") == self.strategy_epoch
+            ):
+                return existing
         evidence = {
             "source": "RecoveryController",
             "progress_status": progress.status.value,
@@ -471,8 +534,9 @@ class RecoveryController:
             "matched_effect_keys": list(progress.matched_effect_keys),
             **dict(progress.evidence or {}),
             **dict(extra or {}),
+            "strategy_epoch": self.strategy_epoch,
         }
-        signal = {"reason": reason, "task_id": self.task_id, "run_id": self.run_id, "attempt_id": self.attempt_id, "step_id": self.step_id, "evidence": evidence}
+        signal = {"reason": reason, "task_id": self.task_id, "run_id": self.run_id, "attempt_id": self.attempt_id, "step_id": self.step_id, "strategy_epoch": self.strategy_epoch, "evidence": evidence}
         self.signals.append(signal)
         if self.signal_sink is not None:
             self.signal_sink(reason, evidence)

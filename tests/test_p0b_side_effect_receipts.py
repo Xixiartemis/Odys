@@ -232,6 +232,18 @@ class _ReceiptTrackingTool:
         )
 
 
+class _DeniedReceiptTool(_ReceiptTrackingTool):
+    async def execute(self, request: ToolRequest) -> ToolResult:
+        return ToolResult(
+            status=ToolResultStatus.SUCCESS,
+            output={"path": request.arguments.get("path"), "replaced": False},
+            metadata={
+                "effect_policy": "DENIED_BY_PHASE_EFFECT_POLICY",
+                "observed_mutation": False,
+            },
+        )
+
+
 def _receipt_definition() -> CapabilityDefinition:
     return CapabilityDefinition(
         id="test.receipt_mutation",
@@ -289,6 +301,42 @@ async def test_native_dispatch_projects_runtime_receipt_without_owning_it(db):
     assert receipts[0].run_id == "run-1"
     assert receipts[0].step_id == "attempt:attempt-1"
     assert receipts[0].status is ReceiptStatus.OBSERVED
+
+
+@pytest.mark.asyncio
+async def test_denied_success_noop_receipt_is_reconciled_without_commit(db):
+    tools = ToolRegistry()
+    tools.register(_DeniedReceiptTool())
+    cap_registry = CapabilityRegistry(tools, definitions=[_receipt_definition()])
+    dispatcher = NativeToolDispatcher(
+        db=db,
+        registry=tools,
+        capability_registry=cap_registry,
+        allowed_capabilities={"test.receipt_mutation"},
+        allowed_side_effect_capabilities={"test.receipt_mutation"},
+    )
+    request = AgentRequest(
+        agent_id="agent-denied",
+        role=AgentRole.WORKER,
+        objective="no-op mutation",
+        allowed_capabilities={"test.receipt_mutation"},
+        budget=AgentBudget(max_turns=2, max_tool_calls=2),
+        metadata={"task_id": "task-denied", "run_id": "run-denied", "attempt_id": "attempt-denied"},
+    )
+    snapshot = ExecutionSnapshot(
+        task_id="task-denied", run_id="run-denied", attempt_id="attempt-denied", goal="no-op"
+    )
+    observation = await dispatcher.dispatch(
+        ProviderToolCall(id="call-denied", name="test.receipt_mutation", arguments={}),
+        request,
+        snapshot,
+    )
+    assert observation["status"] == "SUCCESS"
+    assert observation["side_effect_receipt"]["status"] == ReceiptStatus.RECONCILED.value
+    receipts = dispatcher.receipts.receipts.list_for_attempt("attempt-denied")
+    assert len(receipts) == 1
+    assert receipts[0].status is ReceiptStatus.RECONCILED
+    assert dispatcher.receipts.replay_decision(receipts[0].receipt_id) is ReplayDecision.SAFE_TO_RETRY
 
 
 def test_tool_contract_exposes_effect_capability_facts(db):

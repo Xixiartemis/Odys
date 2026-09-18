@@ -110,6 +110,17 @@ def _event_timestamp_utc(value: Any) -> str:
     return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def _signal_counts_by_epoch(controller: Any) -> dict[int, int]:
+    counts: dict[int, int] = {}
+    for signal in list(getattr(controller, "signals", []) or []):
+        try:
+            epoch = int(signal.get("strategy_epoch", 0))
+        except (TypeError, ValueError):
+            epoch = 0
+        counts[epoch] = counts.get(epoch, 0) + 1
+    return counts
+
+
 class _KernelTaskExecutor:
     """Adapt the existing native kernel to the planning executor protocol."""
 
@@ -123,7 +134,10 @@ class _KernelTaskExecutor:
         from lhas.agent.models import AgentBudget, AgentRequest, AgentRole, AgentStatus
         from lhas.domain.enums import ExecutionStatus
         from lhas.executors.protocol import ExecutionResult
-        from lhas.planning.execution_contract import contract_from_context
+        from lhas.planning.execution_contract import (
+            contract_from_context,
+            contract_telemetry as build_contract_telemetry,
+        )
         from lhas.repair_progress import RepairProgressTracker
 
         task = request.task if isinstance(request.task, Mapping) else {}
@@ -157,15 +171,10 @@ class _KernelTaskExecutor:
             "run_id": request.run_id,
             "attempt_id": request.attempt_id,
         }
-        contract_telemetry = None
+        execution_contract_metadata = None
         if active_contract is not None:
-            contract_telemetry = {
-                "accepted_plan_step_id": active_contract["step_id"],
-                "accepted_plan_step_capability": active_contract["capability"],
-                "active_execution_step_id": active_contract["step_id"],
-                "active_execution_capability": active_contract["capability"],
-            }
-            metadata["execution_contract_telemetry"] = contract_telemetry
+            execution_contract_metadata = build_contract_telemetry(active_contract)
+            metadata["execution_contract_telemetry"] = execution_contract_metadata
         if progress_tracker is not None:
             # In-process only: never place the tracker in prompt context or
             # durable plan JSON.  The static config is the only persisted
@@ -182,7 +191,7 @@ class _KernelTaskExecutor:
                 run_id=request.run_id,
                 task_id=request.task_id,
                 attempt_id=request.attempt_id,
-                phase="repair",
+                phase=str(context.get("execution_phase", "repair")),
             )
         agent_request = AgentRequest(
             agent_id=f"odys-repair-{request.run_id}",
@@ -217,8 +226,35 @@ class _KernelTaskExecutor:
         result = await self.kernel.run(agent_request, execution_control=control)
         completed = result.status is AgentStatus.COMPLETED
         artifacts = dict(result.artifacts or {})
-        if contract_telemetry is not None:
-            artifacts["execution_contract_telemetry"] = contract_telemetry
+        if execution_contract_metadata is not None:
+            artifacts["execution_contract_telemetry"] = execution_contract_metadata
+        artifacts["provider_phase"] = str(context.get("execution_phase", "repair"))
+        artifacts["model_visible_capabilities"] = sorted(agent_request.allowed_capabilities)
+        budget_snapshot = dict(context.get("root_budget_snapshot", {}))
+        artifacts["root_budget_snapshot"] = budget_snapshot
+        artifacts["root_repair_attempts"] = budget_snapshot.get("repair_attempts")
+        artifacts["root_replan_attempts"] = budget_snapshot.get("replan_attempts")
+        artifacts["remaining_provider_calls_at_escalation"] = budget_snapshot.get(
+            "remaining_provider_calls"
+        )
+        artifacts["executed_capabilities"] = [
+            {
+                "capability": str(item.get("capability")),
+                "args_sha256": str(item.get("args_sha256")),
+            }
+            for item in list(result.safe_trace or [])
+            if isinstance(item, Mapping)
+            and item.get("capability")
+            and item.get("args_sha256")
+        ]
+        if recovery_controller is not None:
+            artifacts["strategy_epoch"] = int(
+                getattr(recovery_controller, "strategy_epoch", 0)
+            )
+            artifacts["controller_signal_count_by_epoch"] = {
+                str(epoch): count
+                for epoch, count in _signal_counts_by_epoch(recovery_controller).items()
+            }
         if progress_tracker is not None:
             if result.status is AgentStatus.COMPLETED:
                 progress_tracker.stop("VERIFIED")
@@ -351,6 +387,11 @@ class OfficialOdysRecoveryCoordinator:
         # single root budget authority.
         return False
 
+    def _root_budget_snapshot(self) -> dict[str, Any]:
+        authority = self.root_budget_authority
+        snapshot = getattr(authority, "snapshot", None)
+        return dict(snapshot()) if callable(snapshot) else {}
+
     def prepare(
         self,
         *,
@@ -420,12 +461,21 @@ class OfficialOdysRecoveryCoordinator:
                 f"RECOVERY_CAPABILITY_UNAVAILABLE:{task_id}"
             )
 
+        configured_inputs = task.get("experiment_step_inputs", {})
+        step_inputs = (
+            dict(configured_inputs.get(candidates[0], {}))
+            if isinstance(configured_inputs, Mapping)
+            and isinstance(configured_inputs.get(candidates[0], {}), Mapping)
+            else {}
+        )
+
         step_id = f"{run_id}::recovery-step"
         step = PlanStep(
             id=step_id,
             title=str(task.get("title", task_id)),
             objective=objective,
             capability=candidates[0],
+            inputs=step_inputs,
             required_capabilities=list(task.get("required_capabilities", [])),
             task_id=task_id,
             status=PlanStepStatus.CLASSIFIED_FAILURE,
@@ -696,6 +746,11 @@ class OfficialOdysRecoveryCoordinator:
                     if self.experiment_macro_replan_enabled
                     else None
                 ),
+                # The root ledger reservation is consumed before entering
+                # this boundary.  This authorizes that one repair only; it
+                # never allocates a fresh repair budget.
+                "_repair_budget_guard": (lambda: True),
+                "root_budget_snapshot": self._root_budget_snapshot(),
                 "bounded_recovery": True,
                 "repair_scope": scope.value,
                 "timeout_seconds": float(
@@ -781,6 +836,15 @@ class OfficialOdysRecoveryCoordinator:
             }
             if not post_replan_step_ids:
                 raise OfficialRecoveryContractError("POST_REPLAN_STEP_MISSING")
+            replanned_step = next(
+                item for item in repaired_plan.steps if item.id in post_replan_step_ids
+            )
+            begin_epoch = getattr(recovery_controller, "begin_strategy_epoch", None)
+            if callable(begin_epoch):
+                begin_epoch(
+                    replanned_step.id,
+                    dict(replanned_step.expected_effects),
+                )
             repaired_plan = await self.service.execute_goal(
                 context["goal"],
                 context={
@@ -796,6 +860,12 @@ class OfficialOdysRecoveryCoordinator:
                         )
                     ),
                     "bounded_recovery": True,
+                    "execution_phase": "post_replan",
+                    # The Phase 4 fixture/validator is the final authority
+                    # for this benchmark boundary.  Internal WorkflowVerifier
+                    # must not turn a successful mutation into a second local
+                    # repair before external observation occurs.
+                    "external_validator_authority": True,
                     "timeout_seconds": float(
                         request.task.get("timeout_seconds", 60.0)
                     ),
@@ -820,6 +890,11 @@ class OfficialOdysRecoveryCoordinator:
                         **repair_thresholds,
                     },
                     "_recovery_controller": recovery_controller,
+                    "_replan_budget_guard": self._reserve_replan,
+                    # Replan is the single escalation boundary.  A later
+                    # rejection cannot silently mint another repair lease.
+                    "_repair_budget_guard": (lambda: False),
+                    "root_budget_snapshot": self._root_budget_snapshot(),
                     "_execution_control": getattr(
                         request, "execution_control", None
                     ),
@@ -1043,6 +1118,7 @@ class OfficialOdysRecoveryCoordinator:
             "REPAIR_COMPLETED": "REPAIR_COMPLETED",
             "REPLAN_ACCEPTED": "REPLAN_ACCEPTED",
             "REPLAN_REJECTED": "REPLAN_REJECTED",
+            "PLAN_STEP_STARTED": "POST_REPLAN_EXECUTION_STARTED",
             "NATIVE_TOOL_REQUESTED": "TOOL_CALL_REQUESTED",
             "NATIVE_TOOL_OBSERVED": "TOOL_CALL_OBSERVED",
             "MODEL_RESPONSE_RECEIVED": "PROVIDER_RESPONSE_SUCCESS",
@@ -1050,11 +1126,17 @@ class OfficialOdysRecoveryCoordinator:
             "MODEL_RESPONSE_REJECTED": "MODEL_OUTPUT_PARSE_FAILED",
         }
         output: list[dict[str, Any]] = []
+        replan_accepted_seen = False
         for event in events.list_all():
             event_value = event.event_type.value
             if event.id in before_ids or event_value not in mapped:
                 continue
             payload = dict(event.payload or {})
+            # A PLAN_STEP_STARTED emitted for the first bounded repair is not
+            # post-replan execution.  Only project this evidence after the
+            # durable acceptance event for the new strategy has been seen.
+            if event_value == "PLAN_STEP_STARTED" and not replan_accepted_seen:
+                continue
             event_type = mapped[event_value]
             if event_type in {
                 "TOOL_CALL_REQUESTED",
@@ -1063,14 +1145,22 @@ class OfficialOdysRecoveryCoordinator:
                 "MODEL_OUTPUT_PARSE_SUCCEEDED",
                 "MODEL_OUTPUT_PARSE_FAILED",
             }:
-                if str(event.attempt_id or "") != str(repair_attempt_id):
-                    continue
+                if not replan_accepted_seen:
+                    if str(event.attempt_id or "") != str(repair_attempt_id):
+                        continue
+                # After durable acceptance, post-replan execution may create
+                # fresh native attempts.  The native request/response event
+                # payload is intentionally bounded and does not carry plan_id;
+                # the run-scoped event stream and the acceptance boundary are
+                # the authority for joining those events to this replan.
                 if event_type == "MODEL_OUTPUT_PARSE_FAILED" and payload.get(
                     "failure_stage"
                 ) != "MODEL_OUTPUT_PARSE":
                     continue
             elif payload.get("plan_id") != plan_id:
                 continue
+            if event_value == "REPLAN_ACCEPTED":
+                replan_accepted_seen = True
             event_attempt_id = str(
                 payload.get("repair_attempt_id")
                 or payload.get("attempt_id")

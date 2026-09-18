@@ -289,6 +289,12 @@ class EditLinesTool(_BaseTool):
                 "properties": {
                     "path": {"type": "string"},
                     "replaced": {"type": "boolean"},
+                    "before_sha256": {"type": "string"},
+                    "after_sha256": {"type": "string"},
+                    "old_string_sha256": {"type": "string"},
+                    "new_string_sha256": {"type": "string"},
+                    "old_string_length": {"type": "integer"},
+                    "new_string_length": {"type": "integer"},
                 },
             },
             side_effect=True,
@@ -308,8 +314,19 @@ class EditLinesTool(_BaseTool):
             if old_string not in content:
                 return self._failure("INVALID_ARGUMENT", "old_string not found in file")
             updated = content.replace(old_string, new_string, 1)
+            before_sha256 = hashlib.sha256(content.encode("utf-8")).hexdigest()
+            after_sha256 = hashlib.sha256(updated.encode("utf-8")).hexdigest()
             target.write_text(updated, encoding="utf-8")
-            return self._success({"path": path, "replaced": True})
+            return self._success({
+                "path": path,
+                "replaced": True,
+                "before_sha256": before_sha256,
+                "after_sha256": after_sha256,
+                "old_string_sha256": hashlib.sha256(old_string.encode("utf-8")).hexdigest(),
+                "new_string_sha256": hashlib.sha256(new_string.encode("utf-8")).hexdigest(),
+                "old_string_length": len(old_string),
+                "new_string_length": len(new_string),
+            })
         except Exception as exc:
             return self._failure("EXECUTION_FAILED", str(exc))
 

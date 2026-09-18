@@ -25,7 +25,7 @@ import hashlib
 import json
 import re
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from typing import Any
 
 from lhas.agent.models import AgentRequest
@@ -112,7 +112,44 @@ def _safe_tool_arguments(capability: str, arguments: Any) -> dict[str, Any]:
             encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
             safe[f"{key}_sha256"] = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
             safe[f"{key}_count"] = len(value) if isinstance(value, list) else 1
+        for source_key, label in (("old_string", "old_string"), ("new_string", "new_string")):
+            if source_key in arguments:
+                value = str(arguments[source_key])
+                safe[f"{label}_sha256"] = hashlib.sha256(
+                    value.encode("utf-8")
+                ).hexdigest()
+                safe[f"{label}_length"] = len(value)
     return safe
+
+
+def _json_semantically_equal(left: Any, right: Any) -> bool:
+    """Compare planner-owned input values without lossy string coercion."""
+
+    try:
+        return json.dumps(
+            left, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str
+        ) == json.dumps(
+            right, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str
+        )
+    except (TypeError, ValueError):
+        return left == right
+
+
+def _plan_step_arguments_match(request: AgentRequest, call: ProviderToolCall) -> bool:
+    """Require every planner-owned input on the active step to be exact."""
+
+    context = request.context if isinstance(request.context, Mapping) else {}
+    contract = context.get("active_step_contract")
+    if not isinstance(contract, dict):
+        return True
+    expected = contract.get("inputs", {})
+    actual = call.arguments if isinstance(call.arguments, dict) else {}
+    if not isinstance(expected, dict):
+        return True
+    return all(
+        key in actual and _json_semantically_equal(actual[key], value)
+        for key, value in expected.items()
+    )
 
 
 def _build_runtime_capability_registry(registry) -> CapabilityRegistry:
@@ -348,6 +385,10 @@ class NativeToolDispatcher:
             return self._finish_denied(invocation, "UNKNOWN_CAPABILITY")
         if call.name not in self.allowed_capabilities or call.name not in request.allowed_capabilities:
             return self._finish_denied(invocation, "CAPABILITY_NOT_ALLOWED")
+        active_contract = request.context.get("active_step_contract") if isinstance(request.context, Mapping) else None
+        if isinstance(active_contract, dict) and call.name == active_contract.get("capability"):
+            if not _plan_step_arguments_match(request, call):
+                return self._finish_denied(invocation, "PLAN_STEP_ARGUMENTS_MISMATCH")
         if call.name == "platform.delegate" and len(snapshot.delegation_dependencies) >= request.budget.max_delegations:
             return self._finish_denied(invocation, "DELEGATION_BUDGET_EXHAUSTED")
         if concrete_spec is not None and concrete_spec.side_effect and call.name not in self.allowed_side_effect_capabilities:
@@ -452,12 +493,19 @@ class NativeToolDispatcher:
         if receipt is not None:
             if result.status is ToolResultStatus.SUCCESS:
                 result_output = result.output if isinstance(result.output, dict) else None
-                self.receipts.mark_committed(
-                    receipt.receipt_id,
-                    result=result.output,
-                    workspace_before_digest=(result_output or {}).get("before_sha256"),
-                    workspace_after_digest=(result_output or {}).get("after_sha256"),
-                )
+                metadata = result.metadata if isinstance(result.metadata, Mapping) else {}
+                if metadata.get("effect_policy") == "DENIED_BY_PHASE_EFFECT_POLICY":
+                    # A policy-denied no-op is a dispatched request with no
+                    # committed effect.  Reconcile it as absent rather than
+                    # turning ToolResultStatus.SUCCESS into COMMITTED.
+                    self.receipts.reconcile(receipt.receipt_id, effect_present=False)
+                else:
+                    self.receipts.mark_committed(
+                        receipt.receipt_id,
+                        result=result.output,
+                        workspace_before_digest=(result_output or {}).get("before_sha256"),
+                        workspace_after_digest=(result_output or {}).get("after_sha256"),
+                    )
             else:
                 # A failed response after dispatch does not prove that no
                 # external effect happened. Preserve uncertainty instead of
@@ -489,7 +537,7 @@ class NativeToolDispatcher:
             summary.get("meaningful_mutation")
             or (before and after and before != after)
             or (
-                call.name in {"workspace.edit", "workspace.edit_lines"}
+                call.name == "workspace.edit"
                 and result.status is ToolResultStatus.SUCCESS
                 and isinstance(output, dict)
                 and any(
@@ -499,6 +547,7 @@ class NativeToolDispatcher:
             )
             or (call.name == "platform.delegate" and result.status is ToolResultStatus.SUCCESS)
         )
+        model_observation["observed_mutation"] = invocation.observed_mutation
         invocation.state = InvocationState.FINISHED
         invocation.result_status = result.status.value
         invocation.error_type = result.error_type

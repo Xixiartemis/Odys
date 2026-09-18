@@ -84,6 +84,16 @@ def test_root_budget_exhaustion_is_typed_and_not_recoverable():
         raise AssertionError("expected a root budget failure")
 
 
+def test_replan_reservation_requires_remaining_provider_capacity():
+    ledger = RunBudgetLedger(max_provider_calls=1, max_replan_attempts=1)
+    ledger.reserve("initial")
+
+    assert ledger.remaining_provider_calls == 0
+    assert ledger.reserve_replan() is False
+    assert ledger.replan_attempts == 0
+    assert ledger.snapshot()["root_budget_single_authority"] is True
+
+
 def test_native_generic_budget_is_classified_from_observed_attempt_counters():
     result = SimpleNamespace(
         error_type="BUDGET_EXHAUSTED",

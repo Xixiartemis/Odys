@@ -19,7 +19,7 @@ from lhas.planning.models import (
 )
 from lhas.planning.scheduler import TaskGraphScheduler, build_step_dependency_context
 from lhas.planning.planner import Planner
-from lhas.planning.execution_contract import active_step_execution_contract
+from lhas.planning.execution_contract import active_step_execution_contract, contract_telemetry
 from lhas.planning.replan import MacroReplanService
 from lhas.planning.replan_policy import ReplanTrigger, ReplanTriggerPolicy
 from lhas.recovery_control import TYPED_ESCALATION_REASONS
@@ -134,7 +134,7 @@ class _TaskGraphAgentExecutor:
                 return ExecutionResult(status=ExecutionStatus.FAILURE, error_type="STALE_PLAN", error_message="plan version is no longer authoritative")
         completed=[item.id for item in self.plan.steps if item.status in {PlanStepStatus.COMPLETED, PlanStepStatus.VERIFIED}]
         pending=[item.id for item in self.plan.steps if item.id != self.step.id and item.status in {PlanStepStatus.PENDING,PlanStepStatus.READY,PlanStepStatus.RUNNING}]
-        active_contract = active_step_execution_contract(self.step)
+        active_contract = active_step_execution_contract(self.step, self.plan)
         context={
             **request.context,
             "taskgraph": {
@@ -150,12 +150,7 @@ class _TaskGraphAgentExecutor:
             # task-wide fallback capabilities widen the active step.
             "allowed_capabilities": [self.step.capability],
             "acceptance_criteria": list(self.step.success_criteria),
-            "execution_contract_telemetry": {
-                "accepted_plan_step_id": self.step.id,
-                "accepted_plan_step_capability": self.step.capability,
-                "active_execution_step_id": self.step.id,
-                "active_execution_capability": self.step.capability,
-            },
+            "execution_contract_telemetry": contract_telemetry(active_contract),
         }
         runtime_context = self.step.execution_context.get("runtime", {})
         if isinstance(runtime_context, Mapping):
@@ -165,6 +160,14 @@ class _TaskGraphAgentExecutor:
             progress_config = runtime_context.get("_repair_progress_config")
             if isinstance(progress_config, Mapping):
                 context["_repair_progress_config"] = dict(progress_config)
+            for runtime_key in (
+                "_replan_budget_guard",
+                "_repair_budget_guard",
+                "execution_phase",
+                "external_validator_authority",
+            ):
+                if runtime_key in runtime_context:
+                    context[runtime_key] = runtime_context[runtime_key]
             # A recovery coordinator may already have constructed the
             # authoritative controller with the arm-specific escalation
             # policy. Reuse that in-process object instead of silently
@@ -813,6 +816,16 @@ class PlanExecutionService:
         # Check repair budget
         repair_count = failed_step.evidence.get("repair_attempt_count", 0)
         max_repair_attempts = failed_step.budget.get("max_repair_attempts", 3)
+        repair_budget_guard = context.get("_repair_budget_guard") if context else None
+        if callable(repair_budget_guard) and not repair_budget_guard():
+            self._emit(EventType.REPAIR_COMPLETED, {
+                "plan_id": plan.id,
+                "repair_step_ids": sorted(repair_scope),
+                "outcome": "BUDGET_EXHAUSTED",
+                "error_type": "REPAIR_BUDGET_EXHAUSTED",
+                "repair_attempt_count": repair_count,
+            })
+            return plan
         if repair_count >= max_repair_attempts:
             self._emit(EventType.REPAIR_COMPLETED, {
                 "plan_id": plan.id,
@@ -914,13 +927,16 @@ class PlanExecutionService:
             if s.status == PlanStepStatus.CLAIMED_COMPLETE:
                 execution_context["steps"][s.id]=s.execution_context.get("steps",{}).get(s.id,{"capability":s.capability,"output":s.output,"artifacts":{}, "usage":{}})
                 if self.workflow_verifier is not None:
-                    vresult = self.workflow_verifier.verify(s, plan, events)
-                    if vresult.accepted:
-                        transition_step(s, PlanStepStatus.VERIFIED, "deferred_verification_accepted", events, plan_id=plan.id)
+                    if context.get("external_validator_authority"):
+                        transition_step(s, PlanStepStatus.WAITING_FOR_VERIFICATION, "awaiting_external_validator", events, plan_id=plan.id)
                     else:
-                        provenance, scope, affected_ids = self._handle_verification_rejection(s, plan, vresult, events)
-                        if provenance is not None and scope == RepairScope.LOCAL:
-                            self._prepare_inline_local_repair(s, provenance, scope, events, plan.id)
+                        vresult = self.workflow_verifier.verify(s, plan, events)
+                        if vresult.accepted:
+                            transition_step(s, PlanStepStatus.VERIFIED, "deferred_verification_accepted", events, plan_id=plan.id)
+                        else:
+                            provenance, scope, affected_ids = self._handle_verification_rejection(s, plan, vresult, events)
+                            if provenance is not None and scope == RepairScope.LOCAL:
+                                self._prepare_inline_local_repair(s, provenance, scope, events, plan.id)
                 else:
                     transition_step(s, PlanStepStatus.WAITING_FOR_VERIFICATION, "deferred_no_verifier", events, plan_id=plan.id)
         plans.update(plan)
@@ -1043,25 +1059,28 @@ class PlanExecutionService:
 
                 # Verification seam: explicit verifier only, default fail-closed
                 if self.workflow_verifier is not None:
-                    vresult = self.workflow_verifier.verify(step, plan, events)
-                    if vresult.accepted:
-                        transition_step(step, PlanStepStatus.VERIFIED, "verification_accepted", events, plan_id=plan.id)
+                    if context.get("external_validator_authority"):
+                        transition_step(step, PlanStepStatus.WAITING_FOR_VERIFICATION, "awaiting_external_validator", events, plan_id=plan.id)
                     else:
-                        provenance, scope, affected_ids = self._handle_verification_rejection(step, plan, vresult, events)
-                        if context.get("official_benchmark_recovery"):
-                            plan.status = PlanStatus.FAILED
-                            plans.update(plan)
-                            self._emit(EventType.REPAIR_COMPLETED, {
-                                "plan_id": plan.id,
-                                "repair_step_ids": [step.id],
-                                "outcome": "FAILED",
-                                "bounded_recovery": True,
-                            })
-                            return plan
-                        if provenance is not None and scope == RepairScope.LOCAL:
-                            if self._prepare_inline_local_repair(step, provenance, scope, events, plan.id):
+                        vresult = self.workflow_verifier.verify(step, plan, events)
+                        if vresult.accepted:
+                            transition_step(step, PlanStepStatus.VERIFIED, "verification_accepted", events, plan_id=plan.id)
+                        else:
+                            provenance, scope, affected_ids = self._handle_verification_rejection(step, plan, vresult, events)
+                            if context.get("official_benchmark_recovery"):
+                                plan.status = PlanStatus.FAILED
                                 plans.update(plan)
-                                continue
+                                self._emit(EventType.REPAIR_COMPLETED, {
+                                    "plan_id": plan.id,
+                                    "repair_step_ids": [step.id],
+                                    "outcome": "FAILED",
+                                    "bounded_recovery": True,
+                                })
+                                return plan
+                            if provenance is not None and scope == RepairScope.LOCAL:
+                                if self._prepare_inline_local_repair(step, provenance, scope, events, plan.id):
+                                    plans.update(plan)
+                                    continue
                 else:
                     transition_step(step, PlanStepStatus.WAITING_FOR_VERIFICATION, "no_verifier_configured", events, plan_id=plan.id)
 

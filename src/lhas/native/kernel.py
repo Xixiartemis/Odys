@@ -47,6 +47,22 @@ from lhas.repair_progress import RepairProgressTracker
 OFFICIAL_PROVIDER_TIMEOUT_SECONDS = 300.0
 
 
+def _identity_hash(value: Any) -> str:
+    """Hash execution-visible identity without persisting prompt/tool content."""
+    encoded = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _text_hash(value: str) -> str:
+    return hashlib.sha256(str(value).encode("utf-8")).hexdigest()
+
+
 class NativeAgentKernel:
     """Own every turn boundary and accept completion only after validation."""
 
@@ -208,6 +224,26 @@ class NativeAgentKernel:
                 validation_failures=failures,
                 replan_signals=signals,
             )
+            visible_tools = self.dispatcher.tool_schemas(request.allowed_capabilities)
+            system_message = next(
+                (
+                    item
+                    for item in context.messages
+                    if isinstance(item, dict) and item.get("role") == "system"
+                ),
+                {},
+            )
+            call_identity = {
+                "system_prompt_hash": _text_hash(str(system_message.get("content", ""))),
+                "context_sections_sha256": _identity_hash(context.sections),
+                "model_visible_tool_schema_sha256": _identity_hash(visible_tools),
+                "model_visible_capabilities": sorted(request.allowed_capabilities),
+                "active_step_contract_sha256": _identity_hash(
+                    context.sections.get("active_step_contract", {})
+                    if isinstance(context.sections, dict)
+                    else {}
+                ),
+            }
             next_turn = snapshot.model_turn_count + 1
             if progress_tracker is not None:
                 progress_tracker.begin_turn()
@@ -234,9 +270,10 @@ class NativeAgentKernel:
                     "provider_id": actual_target.provider_id if isinstance(actual_target, RuntimeTarget) else None,
                     "model_id": actual_target.model_id if isinstance(actual_target, RuntimeTarget) else None,
                     "endpoint_fingerprint": actual_target.endpoint_fingerprint if isinstance(actual_target, RuntimeTarget) else None,
+                    **call_identity,
                 },
             )
-            self.events.append(EventType.NATIVE_MODEL_TURN_STARTED, task_id=task_id, run_id=run_id, attempt_id=attempt_id, payload={"turn": next_turn, "model_turn_ordinal": next_turn, "provider": getattr(self.provider, "name", type(self.provider).__name__), **target_payload, "context_chars": context.chars_used, "context_budget": context.budget_chars})
+            self.events.append(EventType.NATIVE_MODEL_TURN_STARTED, task_id=task_id, run_id=run_id, attempt_id=attempt_id, payload={"turn": next_turn, "model_turn_ordinal": next_turn, "provider": getattr(self.provider, "name", type(self.provider).__name__), **target_payload, "context_chars": context.chars_used, "context_budget": context.budget_chars, **call_identity})
             if recovery_controller is not None:
                 try:
                     recovery_controller.acquire_local_turn()
@@ -275,7 +312,7 @@ class NativeAgentKernel:
                 raw = await await_with_control(
                     self.provider.generate(
                         context=context,
-                        tools=self.dispatcher.tool_schemas(request.allowed_capabilities),
+                        tools=visible_tools,
                         timeout_seconds=self.provider_timeout_seconds,
                     ),
                     control=control,
@@ -310,6 +347,7 @@ class NativeAgentKernel:
                 payload={
                     **self._response_shape(raw, turn=next_turn),
                     "transport_status": "SUCCESS",
+                    **call_identity,
                 },
             )
             try:

@@ -110,6 +110,7 @@ class RunBudgetLedger:
         """Consume the explicit macro-replan allowance on this root ledger."""
         if (
             self.exhausted
+            or self.remaining_provider_calls <= 0
             or self.replan_attempts >= self.max_replan_attempts
         ):
             return False
@@ -129,6 +130,9 @@ class RunBudgetLedger:
             "remaining_provider_calls": self.remaining_provider_calls,
             "blocked_provider_calls": self.blocked_provider_calls,
             "repair_attempts": self.repair_attempts,
+            "replan_attempts": self.replan_attempts,
+            "phase_history": list(self._phases),
+            "root_budget_single_authority": True,
             "exhausted": self.exhausted,
         }
 

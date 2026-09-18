@@ -143,6 +143,15 @@ def _task_projection_hash(task: dict[str, Any]) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def _projection_hash(value: Any) -> str:
+    payload = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _implementation_hash(path: Path) -> str:
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
 def _build_specs(
     snapshot: ProtocolSnapshot,
     *,
@@ -223,6 +232,47 @@ def _preflight(output: Path) -> dict[str, Any]:
     if any(task[key] != value for key, value in RECOVERY_THRESHOLDS.items()):
         raise RuntimeError("RECOVERY_THRESHOLD_PROJECTION_MISMATCH")
 
+    baseline_task_hash = _task_projection_hash(task)
+    v2_task_hash = _task_projection_hash(task)
+    fault_projection = {
+        "fault_id": FAULT_ID,
+        "fault": fault,
+        "fault_timing": task["fault_timing"],
+    }
+    baseline_fault_hash = _projection_hash(fault_projection)
+    v2_fault_hash = _projection_hash(fault_projection)
+    validator_projection = {
+        "validator_id": task["validator_id"],
+        "acceptance_criteria": task["acceptance_criteria"],
+        "expected_observable_effects": task["expected_observable_effects"],
+    }
+    baseline_validator_hash = _projection_hash(validator_projection)
+    v2_validator_hash = _projection_hash(validator_projection)
+    budget_projection = {
+        key: task[key]
+        for key in (
+            "max_turns",
+            "max_model_calls",
+            "timeout_seconds",
+            "repair_max_no_progress",
+            "repair_max_repeated_action",
+            "repair_max_repeated_state",
+        )
+    }
+    baseline_budget_hash = _projection_hash(budget_projection)
+    v2_budget_hash = _projection_hash(budget_projection)
+    capability_projection = {"required_capabilities": task["required_capabilities"]}
+    baseline_capability_hash = _projection_hash(capability_projection)
+    v2_capability_hash = _projection_hash(capability_projection)
+    if not (
+        baseline_task_hash == v2_task_hash
+        and baseline_fault_hash == v2_fault_hash
+        and baseline_validator_hash == v2_validator_hash
+        and baseline_budget_hash == v2_budget_hash
+        and baseline_capability_hash == v2_capability_hash
+    ):
+        raise RuntimeError("PAIRED_FROZEN_PROJECTION_MISMATCH")
+
     executor_source = sys.modules["evals.reliability.p45_executor"]
     factory_source = sys.modules["evals.reliability.p46_provider"]
     p45_text = Path(executor_source.__file__).read_text(encoding="utf-8")
@@ -255,6 +305,15 @@ def _preflight(output: Path) -> dict[str, Any]:
         "fixture_set_hash": snapshot.fixture_set_hash,
         "validator_hash": snapshot.validator_hash,
         "budget_identity": snapshot.budget_identity,
+        "fixture_runtime_implementation_hash": _implementation_hash(
+            REPO_ROOT / "scripts" / "phase4_live_no_progress_parity.py"
+        ),
+        "validator_runtime_implementation_hash": _implementation_hash(
+            REPO_ROOT / "evals" / "reliability" / "run_phase4.py"
+        ),
+        "effect_policy_implementation_hash": _implementation_hash(
+            REPO_ROOT / "evals" / "reliability" / "effect_policy.py"
+        ),
         "model_identity": CHEAP_MODEL,
         "provider_identity": FROZEN_PROVIDER,
         "endpoint_identity": FROZEN_ENDPOINT,
@@ -262,11 +321,28 @@ def _preflight(output: Path) -> dict[str, Any]:
         "max_tokens": FROZEN_MAX_TOKENS,
         "seed": FROZEN_SEED,
         "same_task_across_arms": baseline is not None and v2 is not None,
-        "same_validator_across_arms": baseline.get("validator_id") == v2.get("validator_id"),
-        "same_fault_across_arms": task["fault_injection"] == task["fault_injection"],
-        "same_budget_across_arms": baseline.get("max_model_calls") == v2.get("max_model_calls"),
-        "same_capability_set_across_arms": baseline.get("tool_capability_set") == v2.get("tool_capability_set"),
-        "only_primary_causal_variable": True,
+        "same_validator_across_arms": baseline_validator_hash == v2_validator_hash,
+        "same_fault_across_arms": baseline_fault_hash == v2_fault_hash,
+        "same_budget_across_arms": baseline_budget_hash == v2_budget_hash,
+        "same_capability_set_across_arms": baseline_capability_hash == v2_capability_hash,
+        "baseline_capability_projection_hash": baseline_capability_hash,
+        "v2_capability_projection_hash": v2_capability_hash,
+        "baseline_task_projection_hash": baseline_task_hash,
+        "v2_task_projection_hash": v2_task_hash,
+        "baseline_fault_projection_hash": baseline_fault_hash,
+        "v2_fault_projection_hash": v2_fault_hash,
+        "baseline_validator_projection_hash": baseline_validator_hash,
+        "v2_validator_projection_hash": v2_validator_hash,
+        "baseline_budget_projection_hash": baseline_budget_hash,
+        "v2_budget_projection_hash": v2_budget_hash,
+        "only_primary_causal_variable": (
+            not _effective_config_diff(baseline, v2)
+            and baseline_task_hash == v2_task_hash
+            and baseline_fault_hash == v2_fault_hash
+            and baseline_validator_hash == v2_validator_hash
+            and baseline_budget_hash == v2_budget_hash
+            and baseline_capability_hash == v2_capability_hash
+        ),
         "expected_runs": EXPECTED_RUNS,
         "baseline_policy": "LEGACY_BOUNDED",
         "v2_policy": "NO_PROGRESS_AWARE",
@@ -414,6 +490,15 @@ def _write_experiment_manifest(
         "fixture_hash": snapshot.fixture_set_hash,
         "validator_hash": snapshot.validator_hash,
         "budget_identity": snapshot.budget_identity,
+        "fixture_runtime_implementation_hash": _implementation_hash(
+            REPO_ROOT / "scripts" / "phase4_live_no_progress_parity.py"
+        ),
+        "validator_runtime_implementation_hash": _implementation_hash(
+            REPO_ROOT / "evals" / "reliability" / "run_phase4.py"
+        ),
+        "effect_policy_implementation_hash": _implementation_hash(
+            REPO_ROOT / "evals" / "reliability" / "effect_policy.py"
+        ),
         "task_projection_hash": _task_projection_hash(task),
         "task_projection": task,
         "run_order": [spec.run_id for spec in specs],
@@ -468,6 +553,42 @@ def _run_qualification(
         )
         validation = record.get("runtime_environment", {}).get("validation", {})
         policy = evidence[run_id]
+        replan_indices = [
+            index
+            for index, item in enumerate(events)
+            if item.get("event_type") == "REPLAN_ACCEPTED"
+        ]
+        post_replan_events = (
+            events[replan_indices[-1] + 1 :]
+            if replan_indices
+            else []
+        )
+        post_replan_event_types = {
+            str(item.get("event_type")) for item in post_replan_events
+        }
+        # New traces carry an explicit start event.  Older replay traces may
+        # not, so an actual provider/tool event *after the durable acceptance*
+        # is the conservative fallback; REPLAN_ACCEPTED alone is deliberately
+        # insufficient.
+        post_replan_provider_called = "PROVIDER_RESPONSE_SUCCESS" in post_replan_event_types
+        post_replan_tool_requested = "TOOL_CALL_REQUESTED" in post_replan_event_types
+        post_replan_started = (
+            "POST_REPLAN_EXECUTION_STARTED" in post_replan_event_types
+            or post_replan_provider_called
+            or post_replan_tool_requested
+        )
+        post_replan_mutation_observed = any(
+            bool(item.get("metadata", {}).get("observed_mutation"))
+            for item in post_replan_events
+            if item.get("event_type") == "TOOL_CALL_OBSERVED"
+        )
+        local_repair_plan_authority_blocked = any(
+            str(item.get("metadata", {}).get("error_type"))
+            == "PLAN_STEP_ARGUMENTS_MISMATCH"
+            for item in events
+            if item.get("event_type") == "TOOL_CALL_OBSERVED"
+            and item not in post_replan_events
+        )
         results.append({
             "run_id": run_id,
             "arm": evidence[run_id]["arm"],
@@ -478,9 +599,27 @@ def _run_qualification(
             "repair_no_progress_observed": policy["repair_no_progress_observed"],
             "no_progress_used_for_control": policy["no_progress_used_for_control"],
             "macro_replan_executed": policy["macro_replan_executed"],
-            "post_replan_executed": "REPLAN_ACCEPTED" in event_types,
+            "replan_accepted": "REPLAN_ACCEPTED" in event_types,
+            "post_replan_execution_started": post_replan_started,
+            "post_replan_provider_called": post_replan_provider_called,
+            "post_replan_tool_requested": post_replan_tool_requested,
+            "post_replan_mutation_observed": post_replan_mutation_observed,
+            "post_replan_executed": post_replan_started and (
+                post_replan_provider_called or post_replan_tool_requested
+            ),
             "initial_alternate_mutation_denied": policy["initial_alternate_mutation_denied"],
-            "local_repair_alternate_mutation_denied": policy["local_repair_alternate_mutation_denied"],
+            # The planner-owned active-step contract can reject a provider's
+            # local alternate payload before PhaseEffectPolicy sees it.  That
+            # is still a real local-repair block, but retain the source
+            # boundary separately for evidence consumers.
+            "local_repair_alternate_mutation_denied": (
+                policy["local_repair_alternate_mutation_denied"]
+                or local_repair_plan_authority_blocked
+            ),
+            "local_repair_alternate_mutation_policy_denied": policy[
+                "local_repair_alternate_mutation_denied"
+            ],
+            "local_repair_alternate_mutation_plan_authority_blocked": local_repair_plan_authority_blocked,
             "post_replan_alternate_mutation_allowed": policy["post_replan_alternate_mutation_allowed"],
             "local_reserve_at_escalation": policy["local_reserve_at_escalation"],
         })
