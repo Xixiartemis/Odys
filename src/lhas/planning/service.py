@@ -19,6 +19,7 @@ from lhas.planning.models import (
 )
 from lhas.planning.scheduler import TaskGraphScheduler, build_step_dependency_context
 from lhas.planning.planner import Planner
+from lhas.planning.execution_contract import active_step_execution_contract
 from lhas.planning.replan import MacroReplanService
 from lhas.planning.replan_policy import ReplanTrigger, ReplanTriggerPolicy
 from lhas.recovery_control import TYPED_ESCALATION_REASONS
@@ -133,7 +134,29 @@ class _TaskGraphAgentExecutor:
                 return ExecutionResult(status=ExecutionStatus.FAILURE, error_type="STALE_PLAN", error_message="plan version is no longer authoritative")
         completed=[item.id for item in self.plan.steps if item.status in {PlanStepStatus.COMPLETED, PlanStepStatus.VERIFIED}]
         pending=[item.id for item in self.plan.steps if item.id != self.step.id and item.status in {PlanStepStatus.PENDING,PlanStepStatus.READY,PlanStepStatus.RUNNING}]
-        context={**request.context,"taskgraph":{"plan_id":self.plan.id,"active_node":self.step.id,"completed_nodes":completed,"pending_nodes":pending,"depends_on":list(self.step.depends_on)}}
+        active_contract = active_step_execution_contract(self.step)
+        context={
+            **request.context,
+            "taskgraph": {
+                "plan_id": self.plan.id,
+                "active_node": self.step.id,
+                "completed_nodes": completed,
+                "pending_nodes": pending,
+                "depends_on": list(self.step.depends_on),
+                "active_step_contract": active_contract,
+            },
+            "active_step_contract": active_contract,
+            # A canonical PlanStep is the execution authority.  Do not let
+            # task-wide fallback capabilities widen the active step.
+            "allowed_capabilities": [self.step.capability],
+            "acceptance_criteria": list(self.step.success_criteria),
+            "execution_contract_telemetry": {
+                "accepted_plan_step_id": self.step.id,
+                "accepted_plan_step_capability": self.step.capability,
+                "active_execution_step_id": self.step.id,
+                "active_execution_capability": self.step.capability,
+            },
+        }
         runtime_context = self.step.execution_context.get("runtime", {})
         if isinstance(runtime_context, Mapping):
             repair_context = runtime_context.get("repair_context")
@@ -164,11 +187,6 @@ class _TaskGraphAgentExecutor:
                     expected_effects=dict(self.step.expected_effects),
                 )
                 context["recovery_control_plane_v2"] = True
-            if self.step.required_capabilities:
-                context.setdefault(
-                    "allowed_capabilities",
-                    list(self.step.required_capabilities),
-                )
         return await self.executor.execute(request.model_copy(update={"context":context}))
     async def resume(self, request): return await self.execute(request)
     async def cancel(self, run_id): return await self.executor.cancel(run_id)

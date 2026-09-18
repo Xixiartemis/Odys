@@ -275,7 +275,7 @@ class NativeAgentKernel:
                 raw = await await_with_control(
                     self.provider.generate(
                         context=context,
-                        tools=self.dispatcher.tool_schemas(),
+                        tools=self.dispatcher.tool_schemas(request.allowed_capabilities),
                         timeout_seconds=self.provider_timeout_seconds,
                     ),
                     control=control,

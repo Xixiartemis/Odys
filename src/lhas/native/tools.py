@@ -189,7 +189,7 @@ class NativeToolDispatcher:
             available_tools=available,
         )
 
-    def tool_schemas(self) -> list[dict[str, Any]]:
+    def tool_schemas(self, allowed_capabilities: set[str] | None = None) -> list[dict[str, Any]]:
         """Return tool schemas from CapabilityDefinitions (semantic contract).
 
         Only explicitly declared capabilities are exposed to the model.
@@ -198,7 +198,12 @@ class NativeToolDispatcher:
         model-facing schemas.
         """
         schemas = []
-        for name in sorted(self.allowed_capabilities):
+        effective_capabilities = self.allowed_capabilities
+        if allowed_capabilities is not None:
+            # The dispatcher is the static upper bound; the request is the
+            # per-attempt lower bound projected from the active PlanStep.
+            effective_capabilities = effective_capabilities.intersection(allowed_capabilities)
+        for name in sorted(effective_capabilities):
             try:
                 definition = self.capability_registry.get(name)
             except KeyError:
@@ -341,7 +346,7 @@ class NativeToolDispatcher:
         # --- Policy boundary (NativeToolDispatcher owns these) ---
         if definition is None:
             return self._finish_denied(invocation, "UNKNOWN_CAPABILITY")
-        if call.name not in self.allowed_capabilities:
+        if call.name not in self.allowed_capabilities or call.name not in request.allowed_capabilities:
             return self._finish_denied(invocation, "CAPABILITY_NOT_ALLOWED")
         if call.name == "platform.delegate" and len(snapshot.delegation_dependencies) >= request.budget.max_delegations:
             return self._finish_denied(invocation, "DELEGATION_BUDGET_EXHAUSTED")

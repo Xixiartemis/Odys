@@ -185,6 +185,19 @@ def _tool_call(call_id: str) -> dict[str, Any]:
     }
 
 
+def _tool_call_with_arguments(
+    call_id: str, capability: str, arguments: dict[str, Any]
+) -> dict[str, Any]:
+    return {
+        "id": call_id,
+        "type": "function",
+        "function": {
+            "name": capability,
+            "arguments": json.dumps(arguments),
+        },
+    }
+
+
 class _DeterministicProvider:
     """Offline provider double with real-adapter response semantics."""
 
@@ -237,7 +250,7 @@ class _DeterministicProvider:
         self._run_budget = ledger
 
     async def generate(self, *, context: Any, tools: list[dict[str, Any]], timeout_seconds: float) -> dict[str, Any]:
-        del context, tools, timeout_seconds
+        del tools, timeout_seconds
         if self._execution_control is not None:
             self._execution_control.check()
         phase = self.policy.phase
@@ -257,6 +270,28 @@ class _DeterministicProvider:
             "total_tokens": 15,
         }
         self.call_records.append(record)
+
+        # Keep the qualification provider compatible with the generic
+        # active-step contract.  Local repair is still an alternate no-op,
+        # but it must use the capability selected by the current PlanStep;
+        # post-replan uses the exact durable inputs projected to the model.
+        sections = getattr(context, "sections", {})
+        active_contract = sections.get("active_step_contract") if isinstance(sections, dict) else None
+        if isinstance(active_contract, dict) and active_contract.get("capability"):
+            capability = str(active_contract["capability"])
+            if capability == "workspace.edit":
+                arguments = {
+                    "path": "state.json",
+                    "content": '{"route":"alternate","state_status":"verified"}\n',
+                }
+            else:
+                arguments = dict(active_contract.get("inputs", {}))
+            return {
+                "id": f"phase4-02d-{len(self.call_records)}",
+                "model": CHEAP_MODEL,
+                "choices": [{"message": {"content": "Executing active plan step.", "tool_calls": [_tool_call_with_arguments(f"active-step-{len(self.call_records)}", capability, arguments)]}}],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+            }
 
         if phase == "post_replan" and not self._post_replan_edit_sent:
             self._post_replan_edit_sent = True

@@ -9,6 +9,7 @@ from typing import Any
 from lhas.agent.context import ContextAssembler, ContextPriority, ContextSource
 from lhas.agent.models import AgentRequest
 from lhas.native.models import ExecutionSnapshot, ModelContext, ReplanSignal, ValidationFailure
+from lhas.planning.execution_contract import contract_from_context
 from lhas.recovery_control import RecoveryContextProjector
 
 
@@ -35,6 +36,7 @@ class NativeContextAssembler:
     ) -> ModelContext:
         runtime = request.context if isinstance(request.context, dict) else {}
         canonical_graph = runtime.get("taskgraph") if isinstance(runtime.get("taskgraph"), dict) else {}
+        active_contract = contract_from_context(runtime)
         graph = {
             "goal_id": runtime.get("goal_id") or runtime.get("runtime", {}).get("goal_id"),
             "plan_id": canonical_graph.get("plan_id") or runtime.get("plan_id"),
@@ -42,6 +44,8 @@ class NativeContextAssembler:
             "completed_nodes": snapshot.completed_nodes,
             "pending_nodes": snapshot.pending_nodes,
         }
+        if active_contract is not None:
+            graph["active_step_contract"] = active_contract
         execution = {
             "phase": snapshot.phase.value,
             "attempt_id": snapshot.attempt_id,
@@ -92,6 +96,10 @@ class NativeContextAssembler:
         sources = [
             ContextSource("goal", request.objective, ContextPriority.REQUIRED, 20_000),
             ContextSource("acceptance", runtime.get("acceptance_criteria", []), ContextPriority.REQUIRED, 8_000),
+            # Keep the accepted PlanStep explicit and high priority.  The
+            # model must receive the exact capability and inputs selected by
+            # the durable planner, not rediscover a strategy from the goal.
+            ContextSource("active_step_contract", active_contract or {}, ContextPriority.REQUIRED, 12_000),
             ContextSource("taskgraph", graph, ContextPriority.HIGH, 8_000),
             ContextSource("execution_state", execution, ContextPriority.HIGH, 18_000),
             ContextSource("repair_context", runtime.get("repair_context", {}), ContextPriority.HIGH, 12_000),

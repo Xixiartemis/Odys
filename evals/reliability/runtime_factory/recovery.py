@@ -123,6 +123,7 @@ class _KernelTaskExecutor:
         from lhas.agent.models import AgentBudget, AgentRequest, AgentRole, AgentStatus
         from lhas.domain.enums import ExecutionStatus
         from lhas.executors.protocol import ExecutionResult
+        from lhas.planning.execution_contract import contract_from_context
         from lhas.repair_progress import RepairProgressTracker
 
         task = request.task if isinstance(request.task, Mapping) else {}
@@ -139,6 +140,14 @@ class _KernelTaskExecutor:
             list(task.get("acceptance_criteria", [])),
         )
         context.setdefault("taskgraph", {})
+        active_contract = contract_from_context(context)
+        if active_contract is not None:
+            # The accepted durable step is authoritative for this native
+            # attempt.  Task-level capabilities remain only a fallback for
+            # non-taskgraph callers that have no active step contract.
+            context["active_step_contract"] = active_contract
+            context["allowed_capabilities"] = [active_contract["capability"]]
+            context["acceptance_criteria"] = list(active_contract["success_criteria"])
         budget = AgentBudget(
             max_turns=int(task.get("max_turns", 20)),
             max_tool_calls=int(task.get("max_model_calls", 20)),
@@ -148,6 +157,15 @@ class _KernelTaskExecutor:
             "run_id": request.run_id,
             "attempt_id": request.attempt_id,
         }
+        contract_telemetry = None
+        if active_contract is not None:
+            contract_telemetry = {
+                "accepted_plan_step_id": active_contract["step_id"],
+                "accepted_plan_step_capability": active_contract["capability"],
+                "active_execution_step_id": active_contract["step_id"],
+                "active_execution_capability": active_contract["capability"],
+            }
+            metadata["execution_contract_telemetry"] = contract_telemetry
         if progress_tracker is not None:
             # In-process only: never place the tracker in prompt context or
             # durable plan JSON.  The static config is the only persisted
@@ -169,18 +187,22 @@ class _KernelTaskExecutor:
         agent_request = AgentRequest(
             agent_id=f"odys-repair-{request.run_id}",
             role=AgentRole.WORKER,
-            objective=str(task.get("objective", "")),
+            objective=str((active_contract or {}).get("objective") or task.get("objective", "")),
             context=context,
             messages=[],
-            allowed_capabilities=set(
-                task.get("required_capabilities", [])
-                or context.get("allowed_capabilities", [])
-                or (
-                    context.get("repair_context", {}).get(
-                        "required_capabilities", []
+            allowed_capabilities=(
+                {active_contract["capability"]}
+                if active_contract is not None
+                else set(
+                    task.get("required_capabilities", [])
+                    or context.get("allowed_capabilities", [])
+                    or (
+                        context.get("repair_context", {}).get(
+                            "required_capabilities", []
+                        )
+                        if isinstance(context.get("repair_context"), Mapping)
+                        else []
                     )
-                    if isinstance(context.get("repair_context"), Mapping)
-                    else []
                 )
             ),
             budget=budget,
@@ -195,6 +217,8 @@ class _KernelTaskExecutor:
         result = await self.kernel.run(agent_request, execution_control=control)
         completed = result.status is AgentStatus.COMPLETED
         artifacts = dict(result.artifacts or {})
+        if contract_telemetry is not None:
+            artifacts["execution_contract_telemetry"] = contract_telemetry
         if progress_tracker is not None:
             if result.status is AgentStatus.COMPLETED:
                 progress_tracker.stop("VERIFIED")
