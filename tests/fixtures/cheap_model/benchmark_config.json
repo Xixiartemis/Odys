@@ -1,0 +1,13 @@
+{
+  "api_version": "chat-completions-v1",
+  "base_protocol_hash": "993eae04290fe683d40fcf845b9e7325b9572b227e78e7cb3090dd7ee37637c3",
+  "base_protocol_version": "phase4-v1",
+  "benchmark_version": "phase4-v1-cheap-model",
+  "endpoint_hash": "1453e3c75fe3fed68aa7c975dba43fe9d5a5e589b7e29f6080213c889eec1006",
+  "max_tokens": 4096,
+  "model_identity": "mimo-v2.5",
+  "provider_identity": "xiaomimimo-openai-compatible",
+  "system_prompt_hash": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+  "temperature": 0.0,
+  "tool_policy_hash": "c6fb217770dcc6b5da23982cc9f9d70f19f4b45c2e343344bbdddd2f74e46f2b"
+}

@@ -40,6 +40,15 @@ def compute_step_semantic_fingerprint(step: "PlanStep", by_id: dict[str, "PlanSt
                     "capability": _semantic_value(dependency.capability),
                     "objective": _semantic_value(dependency.objective),
                     "inputs": _semantic_value(dependency.inputs),
+                    "success_criteria": _semantic_value(dependency.success_criteria),
+                    "expected_effects": _semantic_value(dependency.expected_effects),
+                    "preconditions": _semantic_value(
+                        [item.model_dump(mode="json") for item in dependency.preconditions]
+                    ),
+                    "risk_class": _semantic_value(dependency.risk_class),
+                    "required_capabilities": _semantic_value(
+                        dependency.required_capabilities
+                    ),
                     "depends_on": [
                         compute_step_semantic_fingerprint(dependency, by_id, seen)
                         if dependency_id not in seen else "cycle"
@@ -49,6 +58,15 @@ def compute_step_semantic_fingerprint(step: "PlanStep", by_id: dict[str, "PlanSt
         "capability": _semantic_value(step.capability),
         "objective": _semantic_value(step.objective),
         "inputs": _semantic_value(step.inputs),
+        "success_criteria": _semantic_value(step.success_criteria),
+        "expected_effects": _semantic_value(step.expected_effects),
+        "preconditions": _semantic_value(
+            [item.model_dump(mode="json") for item in step.preconditions]
+        ),
+        "risk_class": _semantic_value(step.risk_class),
+        "required_capabilities": _semantic_value(step.required_capabilities),
+        "checkpoint_policy": _semantic_value(step.checkpoint_policy),
+        "recovery_policy": _semantic_value(step.recovery_policy),
         "dependency_semantics": dependency_semantics,
     }
     return hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8")).hexdigest()

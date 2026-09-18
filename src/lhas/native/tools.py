@@ -25,7 +25,7 @@ import hashlib
 import json
 import re
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from typing import Any
 
 from lhas.agent.models import AgentRequest
@@ -37,7 +37,9 @@ from lhas.capability_registry import (
 )
 from lhas.domain.enums import EventType
 from lhas.domain.models import utcnow
+from lhas.execution_control import ExecutionControlError, ExecutionControlToken, ExecutionLayerTimeout, await_with_control
 from lhas.inner_agent.tool_adapter import ToolAwareObserver, _args_signature, safe_tool_summary
+from lhas.side_effects import EffectClass, ReceiptStatus, SideEffectReceiptManager
 from lhas.native.models import (
     ExecutionSnapshot,
     InvocationState,
@@ -55,6 +57,7 @@ from lhas.tools.protocol import ToolRequest, ToolResult, ToolResultStatus
 
 
 _SECRET = re.compile(r"(?i)(api[_-]?key|authorization|token|secret|password)\s*[:=]\s*[^\s,;]+")
+_SECRET_KEY = re.compile(r"(?i)(api[_-]?key|authorization|token|secret|password|credential)")
 
 
 def _safe_value(value: Any, limit: int = 12_000) -> Any:
@@ -65,8 +68,103 @@ def _safe_value(value: Any, limit: int = 12_000) -> Any:
     if isinstance(value, list):
         return [_safe_value(item, max(256, limit // 20)) for item in value[:100]]
     if isinstance(value, dict):
-        return {str(key)[:128]: _safe_value(item, max(256, limit // 20)) for key, item in list(value.items())[:100]}
+        return {
+            str(key)[:128]: (
+                "[REDACTED]"
+                if _SECRET_KEY.search(str(key))
+                else _safe_value(item, max(256, limit // 20))
+            )
+            for key, item in list(value.items())[:100]
+        }
     return _safe_value(str(value), limit)
+
+
+def _safe_tool_arguments(capability: str, arguments: Any) -> dict[str, Any]:
+    """Return bounded forensic arguments without persisting arbitrary input.
+
+    The invocation fingerprint remains the identity for the complete request.
+    For diagnostics, only workspace-edit routing fields are projected; file
+    contents are represented by a digest and length so a secret in a proposed
+    edit cannot become durable event data.  Other tools expose their argument
+    names only, which is enough to diagnose schema/shape drift without copying
+    arbitrary model input into the event store.
+    """
+    if not isinstance(arguments, dict):
+        return {"argument_type": type(arguments).__name__}
+
+    safe: dict[str, Any] = {
+        "argument_keys": sorted(str(key)[:128] for key in arguments),
+    }
+    if capability in {"workspace.edit", "workspace.edit_lines"}:
+        if "path" in arguments:
+            safe["path"] = _safe_value(arguments["path"], 512)
+        for key in ("start_line", "end_line"):
+            if key in arguments:
+                safe[key] = _safe_value(arguments[key], 64)
+        if "content" in arguments:
+            content = str(arguments["content"])
+            safe["content_sha256"] = hashlib.sha256(content.encode("utf-8")).hexdigest()
+            safe["content_length"] = len(content)
+        for key in ("replacement", "line", "lines"):
+            if key not in arguments:
+                continue
+            value = arguments[key]
+            encoded = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            safe[f"{key}_sha256"] = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+            safe[f"{key}_count"] = len(value) if isinstance(value, list) else 1
+        for source_key, label in (("old_string", "old_string"), ("new_string", "new_string")):
+            if source_key in arguments:
+                value = str(arguments[source_key])
+                safe[f"{label}_sha256"] = hashlib.sha256(
+                    value.encode("utf-8")
+                ).hexdigest()
+                safe[f"{label}_length"] = len(value)
+    return safe
+
+
+def _json_semantically_equal(left: Any, right: Any) -> bool:
+    """Compare planner-owned input values without lossy string coercion."""
+
+    try:
+        return json.dumps(
+            left, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str
+        ) == json.dumps(
+            right, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str
+        )
+    except (TypeError, ValueError):
+        return left == right
+
+
+def _plan_step_arguments_match(request: AgentRequest, call: ProviderToolCall) -> bool:
+    """Require every planner-owned input on the active step to be exact."""
+
+    context = request.context if isinstance(request.context, Mapping) else {}
+    contract = context.get("active_step_contract")
+    if not isinstance(contract, dict):
+        return True
+    expected = contract.get("inputs", {})
+    actual = call.arguments if isinstance(call.arguments, dict) else {}
+    if not isinstance(expected, dict):
+        return True
+    return all(
+        key in actual and _json_semantically_equal(actual[key], value)
+        for key, value in expected.items()
+    )
+
+
+def _execution_provenance(request: AgentRequest, snapshot: ExecutionSnapshot) -> dict[str, Any]:
+    """Return bounded plan/phase identity for native event correlation."""
+    context = request.context if isinstance(request.context, Mapping) else {}
+    contract = context.get("active_step_contract")
+    controller = request.metadata.get("_recovery_controller") if isinstance(request.metadata, Mapping) else None
+    return {
+        "plan_id": str(contract.get("plan_id", "")) if isinstance(contract, Mapping) else None,
+        "plan_version": str(contract.get("plan_version", "")) if isinstance(contract, Mapping) else None,
+        "step_id": str(contract.get("step_id", "")) if isinstance(contract, Mapping) else str(snapshot.taskgraph_position or ""),
+        "attempt_id": str(snapshot.attempt_id),
+        "strategy_epoch": int(getattr(controller, "strategy_epoch", 0)) if controller is not None else 0,
+        "execution_phase": str(context.get("execution_phase", "initial")),
+    }
 
 
 def _build_runtime_capability_registry(registry) -> CapabilityRegistry:
@@ -97,6 +195,7 @@ class NativeToolDispatcher:
         tool_contract: ToolContract | None = None,
         fault_injector: Any = None,
         mutation_probe: Callable[[], Awaitable[bool]] | None = None,
+        receipt_manager: SideEffectReceiptManager | None = None,
     ):
         self.db = db
         self.registry = registry
@@ -107,6 +206,9 @@ class NativeToolDispatcher:
         self.observer = ToolAwareObserver()
         self.invocations = ToolInvocationRepository(db)
         self.events = EventStore(db)
+        # Runtime-level receipt authority.  It is not owned by benchmark
+        # adapters; callers may inject the same service into other runtimes.
+        self.receipts = receipt_manager or SideEffectReceiptManager(db, event_store=self.events)
 
         # P2.3: CapabilityRegistry + ToolContract integration.
         # When no explicit CapabilityRegistry is provided, use the explicit
@@ -139,7 +241,7 @@ class NativeToolDispatcher:
             available_tools=available,
         )
 
-    def tool_schemas(self) -> list[dict[str, Any]]:
+    def tool_schemas(self, allowed_capabilities: set[str] | None = None) -> list[dict[str, Any]]:
         """Return tool schemas from CapabilityDefinitions (semantic contract).
 
         Only explicitly declared capabilities are exposed to the model.
@@ -148,7 +250,12 @@ class NativeToolDispatcher:
         model-facing schemas.
         """
         schemas = []
-        for name in sorted(self.allowed_capabilities):
+        effective_capabilities = self.allowed_capabilities
+        if allowed_capabilities is not None:
+            # The dispatcher is the static upper bound; the request is the
+            # per-attempt lower bound projected from the active PlanStep.
+            effective_capabilities = effective_capabilities.intersection(allowed_capabilities)
+        for name in sorted(effective_capabilities):
             try:
                 definition = self.capability_registry.get(name)
             except KeyError:
@@ -200,12 +307,30 @@ class NativeToolDispatcher:
             return SideEffectClass.WORKSPACE_MUTATION if name.startswith("workspace.") else SideEffectClass.EXTERNAL
         return SideEffectClass.READ_ONLY
 
+    @staticmethod
+    def _effect_class(name: str, definition: Any | None, concrete_spec: Any | None = None) -> EffectClass:
+        declared = getattr(definition, "effect_class", EffectClass.NONE)
+        if declared is not EffectClass.NONE:
+            return declared
+        # Legacy concrete tools may still expose side_effect=True.  Treat
+        # those as locally durable until a semantic capability opts into
+        # stronger external idempotency/receipt facts.  This preserves the
+        # existing mutation probe contract while remaining conservative for
+        # genuinely external adapters, which must declare their class.
+        if concrete_spec is not None and getattr(concrete_spec, "side_effect", False):
+            return EffectClass.LOCAL_REVERSIBLE if name.startswith("workspace.") else EffectClass.LOCAL_DURABLE
+        return EffectClass.NONE
+
     async def dispatch(
         self,
         call: ProviderToolCall,
         request: AgentRequest,
         snapshot: ExecutionSnapshot,
+        *,
+        execution_control: ExecutionControlToken | None = None,
     ) -> dict[str, Any]:
+        if execution_control is not None:
+            execution_control.check()
         invocation_id = self._identity(snapshot.attempt_id, call.id)
         existing = self.invocations.get(invocation_id)
         if existing is not None:
@@ -253,27 +378,87 @@ class NativeToolDispatcher:
             task_id=snapshot.task_id,
             run_id=snapshot.run_id,
             attempt_id=snapshot.attempt_id,
-            payload={"invocation_id": invocation.id, "capability": invocation.capability, "ordinal": invocation.ordinal, "args_sha256": invocation.args_fingerprint},
+            payload={
+                **_execution_provenance(request, snapshot),
+                "invocation_id": invocation.id,
+                "capability": invocation.capability,
+                "ordinal": invocation.ordinal,
+                "args_sha256": invocation.args_fingerprint,
+                # This is a bounded forensic projection.  Arbitrary model
+                # arguments remain out of the durable event and invocation
+                # models; workspace edit contents are represented by hashes.
+                "arguments_sanitized": _safe_tool_arguments(
+                    call.name, call.arguments
+                ),
+            },
         )
         self.fault_injector.hit(NativeFaultPoint.AFTER_TOOL_REQUESTED, invocation=invocation)
+        if execution_control is not None:
+            execution_control.check()
 
         # --- Policy boundary (NativeToolDispatcher owns these) ---
         if definition is None:
-            return self._finish_denied(invocation, "UNKNOWN_CAPABILITY")
-        if call.name not in self.allowed_capabilities:
-            return self._finish_denied(invocation, "CAPABILITY_NOT_ALLOWED")
+            return self._finish_denied(invocation, "UNKNOWN_CAPABILITY", _execution_provenance(request, snapshot))
+        if call.name not in self.allowed_capabilities or call.name not in request.allowed_capabilities:
+            return self._finish_denied(invocation, "CAPABILITY_NOT_ALLOWED", _execution_provenance(request, snapshot))
+        active_contract = request.context.get("active_step_contract") if isinstance(request.context, Mapping) else None
+        if isinstance(active_contract, dict) and call.name == active_contract.get("capability"):
+            if not _plan_step_arguments_match(request, call):
+                return self._finish_denied(invocation, "PLAN_STEP_ARGUMENTS_MISMATCH", _execution_provenance(request, snapshot))
         if call.name == "platform.delegate" and len(snapshot.delegation_dependencies) >= request.budget.max_delegations:
-            return self._finish_denied(invocation, "DELEGATION_BUDGET_EXHAUSTED")
+            return self._finish_denied(invocation, "DELEGATION_BUDGET_EXHAUSTED", _execution_provenance(request, snapshot))
         if concrete_spec is not None and concrete_spec.side_effect and call.name not in self.allowed_side_effect_capabilities:
-            return self._finish_denied(invocation, "SIDE_EFFECT_NOT_ALLOWED")
+            return self._finish_denied(invocation, "SIDE_EFFECT_NOT_ALLOWED", _execution_provenance(request, snapshot))
         if concrete_spec is not None and concrete_spec.requires_human_approval:
-            return self._finish_denied(invocation, "HUMAN_APPROVAL_REQUIRED")
+            return self._finish_denied(invocation, "HUMAN_APPROVAL_REQUIRED", _execution_provenance(request, snapshot))
+
+        effect_class = self._effect_class(call.name, definition, concrete_spec)
+        receipt = None
+        if effect_class is not EffectClass.NONE:
+            step_id = (
+                snapshot.taskgraph_position
+                or request.metadata.get("step_id")
+                or f"attempt:{snapshot.attempt_id}"
+            )
+            target = {
+                "workspace_ref": request.metadata.get("workspace_ref"),
+                "path": call.arguments.get("path") if isinstance(call.arguments, dict) else None,
+                "capability": call.name,
+            }
+            receipt = self.receipts.begin(
+                operation_id=invocation.id,
+                task_id=snapshot.task_id,
+                run_id=snapshot.run_id,
+                attempt_id=snapshot.attempt_id,
+                step_id=str(step_id),
+                tool_call_id=call.id[:128],
+                tool_name=concrete_spec.name if concrete_spec is not None else call.name,
+                effect_class=effect_class,
+                target=target,
+                request={"capability": call.name, "arguments": call.arguments},
+                idempotency_key=request.metadata.get("idempotency_key"),
+                workspace_before_digest=request.metadata.get("workspace_before_digest"),
+                sanitized_metadata={"task_id": snapshot.task_id, "workspace_ref": request.metadata.get("workspace_ref")},
+            )
+            self.receipts.mark_dispatch_started(receipt.receipt_id)
 
         invocation.state = InvocationState.STARTED
         invocation.started_at = utcnow()
         self.invocations.update(invocation)
-        self.events.append(EventType.NATIVE_TOOL_STARTED, task_id=snapshot.task_id, run_id=snapshot.run_id, attempt_id=snapshot.attempt_id, payload={"invocation_id": invocation.id, "capability": invocation.capability})
+        self.events.append(
+            EventType.NATIVE_TOOL_STARTED,
+            task_id=snapshot.task_id,
+            run_id=snapshot.run_id,
+            attempt_id=snapshot.attempt_id,
+            payload={
+                **_execution_provenance(request, snapshot),
+                "invocation_id": invocation.id,
+                "capability": invocation.capability,
+            },
+        )
         self.fault_injector.hit(NativeFaultPoint.AFTER_TOOL_STARTED, invocation=invocation)
+        if execution_control is not None:
+            execution_control.check()
         started = time.monotonic()
 
         # --- ToolContract boundary: ALL execution goes through contract ---
@@ -291,16 +476,67 @@ class NativeToolDispatcher:
             tool_name=tool_name,
             arguments=call.arguments,
             context=request.context,
+            timeout_seconds=(
+                execution_control.effective_timeout(
+                    getattr(definition, "timeout_seconds", None)
+                )
+                if execution_control is not None
+                else None
+            ),
+            execution_control=execution_control,
+            side_effect_receipt_manager=self.receipts if receipt is not None else None,
+            side_effect_receipt_id=receipt.receipt_id if receipt is not None else None,
+            step_id=str(snapshot.taskgraph_position or request.metadata.get("step_id") or f"attempt:{snapshot.attempt_id}"),
             metadata=request.metadata,
         )
         runtime_context = self._runtime_context(snapshot)
 
         try:
-            result = await self.tool_contract.invoke(contract_request, runtime_context)
+            result = await await_with_control(
+                self.tool_contract.invoke(contract_request, runtime_context),
+                control=execution_control,
+                local_ceiling=getattr(definition, "timeout_seconds", None),
+                timeout_failure_type="TOOL_TIMEOUT",
+                source="tool",
+            )
+        except ExecutionLayerTimeout as exc:
+            result = ToolResult(
+                status=ToolResultStatus.FAILURE,
+                error_type=exc.failure_type,
+                error_message=exc.reason,
+            )
+        except ExecutionControlError:
+            # Leave a STARTED invocation durable for reconciliation; no
+            # post-cancel observation may advance runtime truth.
+            raise
         except Exception as exc:
             result = ToolResult(status=ToolResultStatus.FAILURE, error_type="TOOL_EXECUTION_ERROR", error_message=str(exc)[:512])
 
+        if execution_control is not None:
+            execution_control.check()
+
         self.fault_injector.hit(NativeFaultPoint.AFTER_TOOL_EXECUTED, invocation=invocation, result=result)
+        if receipt is not None:
+            if result.status is ToolResultStatus.SUCCESS:
+                result_output = result.output if isinstance(result.output, dict) else None
+                metadata = result.metadata if isinstance(result.metadata, Mapping) else {}
+                if metadata.get("effect_policy") == "DENIED_BY_PHASE_EFFECT_POLICY":
+                    # A policy-denied no-op is a dispatched request with no
+                    # committed effect.  Reconcile it as absent rather than
+                    # turning ToolResultStatus.SUCCESS into COMMITTED.
+                    self.receipts.reconcile(receipt.receipt_id, effect_present=False)
+                else:
+                    self.receipts.mark_committed(
+                        receipt.receipt_id,
+                        result=result.output,
+                        workspace_before_digest=(result_output or {}).get("before_sha256"),
+                        workspace_after_digest=(result_output or {}).get("after_sha256"),
+                    )
+            else:
+                # A failed response after dispatch does not prove that no
+                # external effect happened. Preserve uncertainty instead of
+                # allowing a blind replay.
+                self.receipts.mark_unknown(receipt.receipt_id, error_class=result.error_type or "TOOL_FAILURE")
         duration_ms = int((time.monotonic() - started) * 1000)
         summary = self.observer.decorate(
             call.name,
@@ -313,20 +549,37 @@ class NativeToolDispatcher:
         model_observation = {
             "tool_call_id": call.id[:128],
             "capability": call.name,
+            "args_sha256": invocation.args_fingerprint,
             "status": result.status.value,
             "error_type": result.error_type,
             "error_message": _safe_value(result.error_message, 512),
             "safe_summary": _safe_value(summary, 8_000),
             "bounded_output": _safe_value(output, 12_000),
             "duration_ms": duration_ms,
+            "active_step_contract_present": isinstance(active_contract, Mapping),
+            "planner_owned_arguments_match": bool(
+                isinstance(active_contract, Mapping)
+                and call.name == active_contract.get("capability")
+                and _plan_step_arguments_match(request, call)
+            ),
         }
         before = summary.get("before_sha256") or output.get("before_sha256")
         after = summary.get("after_sha256") or output.get("after_sha256")
         invocation.observed_mutation = bool(
             summary.get("meaningful_mutation")
             or (before and after and before != after)
+            or (
+                call.name == "workspace.edit"
+                and result.status is ToolResultStatus.SUCCESS
+                and isinstance(output, dict)
+                and any(
+                    key in output
+                    for key in ("checksum", "bytes_written", "lines_written")
+                )
+            )
             or (call.name == "platform.delegate" and result.status is ToolResultStatus.SUCCESS)
         )
+        model_observation["observed_mutation"] = invocation.observed_mutation
         invocation.state = InvocationState.FINISHED
         invocation.result_status = result.status.value
         invocation.error_type = result.error_type
@@ -340,6 +593,7 @@ class NativeToolDispatcher:
             run_id=snapshot.run_id,
             attempt_id=snapshot.attempt_id,
             payload={
+                **_execution_provenance(request, snapshot),
                 "invocation_id": invocation.id,
                 "capability": invocation.capability,
                 "ordinal": invocation.ordinal,
@@ -348,12 +602,23 @@ class NativeToolDispatcher:
                 "duration_ms": duration_ms,
                 "observed_mutation": invocation.observed_mutation,
                 "summary": invocation.result_summary,
+                "bounded_output": _safe_value(output, 12_000),
             },
         )
+        if receipt is not None:
+            current_receipt = self.receipts.receipts.get(receipt.receipt_id)
+            if current_receipt is not None and current_receipt.status is ReceiptStatus.COMMITTED:
+                current_receipt = self.receipts.mark_observed(receipt.receipt_id, result=result.output)
+            if current_receipt is not None:
+                model_observation["side_effect_receipt"] = {
+                    "receipt_id": current_receipt.receipt_id,
+                    "effect_class": current_receipt.effect_class.value,
+                    "status": current_receipt.status.value,
+                }
         self.fault_injector.hit(NativeFaultPoint.AFTER_TOOL_OBSERVED, invocation=invocation)
         return model_observation
 
-    def _finish_denied(self, invocation: ToolInvocation, error_type: str) -> dict[str, Any]:
+    def _finish_denied(self, invocation: ToolInvocation, error_type: str, provenance: Mapping[str, Any] | None = None) -> dict[str, Any]:
         invocation.state = InvocationState.FINISHED
         invocation.result_status = ToolResultStatus.FAILURE.value
         invocation.error_type = error_type
@@ -361,17 +626,22 @@ class NativeToolDispatcher:
         invocation.finished_at = utcnow()
         invocation.duration_ms = 0
         self.invocations.update(invocation)
-        self.events.append(EventType.NATIVE_TOOL_OBSERVED, task_id=invocation.task_id, run_id=invocation.run_id, attempt_id=invocation.attempt_id, payload={"invocation_id": invocation.id, **invocation.result_summary})
+        self.events.append(EventType.NATIVE_TOOL_OBSERVED, task_id=invocation.task_id, run_id=invocation.run_id, attempt_id=invocation.attempt_id, payload={**dict(provenance or {}), "invocation_id": invocation.id, **invocation.result_summary})
         return {"tool_call_id": invocation.id, "safe_summary": invocation.result_summary, **invocation.result_summary}
 
     async def reconcile_unfinished(self, attempt_id: str) -> list[dict[str, Any]]:
         observations: list[dict[str, Any]] = []
         mutation_present: bool | None = None
         for invocation in self.invocations.unfinished_for_attempt(attempt_id):
+            receipt = self.receipts.receipts.get_by_operation(invocation.id)
             if invocation.state is InvocationState.REQUESTED:
                 decision = ReconciliationDecision.SAFE_TO_RETRY
             elif invocation.side_effect_class is SideEffectClass.READ_ONLY:
                 decision = ReconciliationDecision.SAFE_TO_RETRY
+            elif receipt is not None and receipt.status in {ReceiptStatus.COMMITTED, ReceiptStatus.OBSERVED}:
+                decision = ReconciliationDecision.DO_NOT_RETRY
+            elif receipt is not None and receipt.status is ReceiptStatus.COMMIT_STATE_UNKNOWN:
+                decision = ReconciliationDecision.UNKNOWN
             else:
                 if mutation_present is None and self.mutation_probe is not None:
                     try:
@@ -383,6 +653,12 @@ class NativeToolDispatcher:
                     if mutation_present is True or invocation.observed_mutation
                     else ReconciliationDecision.RECONCILE_FIRST
                 )
+                if receipt is not None and invocation.side_effect_class is not SideEffectClass.READ_ONLY:
+                    receipt = self.receipts.reconcile(receipt.receipt_id, effect_present=mutation_present)
+                    if receipt.status in {ReceiptStatus.COMMITTED, ReceiptStatus.OBSERVED}:
+                        decision = ReconciliationDecision.DO_NOT_RETRY
+                    elif receipt.status is ReceiptStatus.COMMIT_STATE_UNKNOWN:
+                        decision = ReconciliationDecision.UNKNOWN
             invocation.state = InvocationState.RECONCILED
             invocation.reconciliation = decision
             invocation.finished_at = utcnow()

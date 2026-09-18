@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 from collections.abc import Iterable
 from typing import Any, Protocol, runtime_checkable
 
+from lhas.execution_control import ExecutionControlToken, await_with_control
 from lhas.native.models import ModelContext, ProviderResponse, RuntimeTarget
 from lhas.native.transport import canonical_transport_identity, opaque_transport_identity
 
@@ -48,6 +50,7 @@ class OpenAIChatProviderAdapter:
         endpoint_identity: str | None = None,
         credential_route_id: str = "default",
         route_type: str = "chat_completions",
+        max_retries: int = 0,
     ):
         if not model or not api_key:
             raise ValueError("model and api_key are required")
@@ -58,16 +61,28 @@ class OpenAIChatProviderAdapter:
         self.requested_endpoint_identity = endpoint_identity
         self.credential_route_id = credential_route_id
         self.route_type = route_type
+        self.max_retries = int(max_retries)
+        if self.max_retries < 0:
+            raise ValueError("max_retries must be non-negative")
         self.api_key = api_key
         self.base_url = base_url
         self.extra_body = dict(extra_body or {})
+        self._execution_control: ExecutionControlToken | None = None
         if client is None:
             try:
                 from openai import AsyncOpenAI
             except ImportError as exc:  # pragma: no cover - installation contract
                 raise RuntimeError("agent extra is required for the real native provider") from exc
-            client = AsyncOpenAI(api_key=api_key, base_url=base_url)
+            client = AsyncOpenAI(
+                api_key=api_key,
+                base_url=base_url,
+                max_retries=self.max_retries,
+            )
         self.client = client
+
+    def bind_execution_control(self, control: ExecutionControlToken | None) -> None:
+        """Bind the current Odys root control without creating a new authority."""
+        self._execution_control = control
 
     @property
     def runtime_target(self) -> RuntimeTarget:
@@ -91,9 +106,29 @@ class OpenAIChatProviderAdapter:
             kwargs.update({"tools": tools, "tool_choice": "auto"})
         if self.extra_body:
             kwargs["extra_body"] = self.extra_body
-        raw = await asyncio.wait_for(
-            self.client.chat.completions.create(**kwargs),
-            timeout=max(0.1, float(timeout_seconds)),
+        control = self._execution_control
+        if control is not None:
+            control.check()
+            effective_timeout = control.effective_timeout(float(timeout_seconds))
+            if effective_timeout is None:
+                effective_timeout = float(timeout_seconds)
+            if effective_timeout <= 0:
+                control.check()
+        else:
+            effective_timeout = max(0.1, float(timeout_seconds))
+        # Keep the SDK transport timeout aligned with the caller's canonical
+        # per-provider deadline.  Test doubles do not implement with_options,
+        # so the existing injected-client path remains unchanged.
+        request_client = self.client
+        with_options = getattr(self.client, "with_options", None)
+        if callable(with_options):
+            request_client = with_options(timeout=effective_timeout)
+        raw = await await_with_control(
+            request_client.chat.completions.create(**kwargs),
+            control=control,
+            local_ceiling=effective_timeout,
+            timeout_failure_type="PROVIDER_TIMEOUT",
+            source="provider",
         )
         return self._normalize_response(raw)
 
@@ -123,6 +158,7 @@ class ScriptedProviderAdapter:
                  endpoint_identity: str = "scripted", credential_route_id: str = "default"):
         self._responses = list(responses)
         self.calls: list[dict[str, Any]] = []
+        self._execution_control: ExecutionControlToken | None = None
         self._runtime_target = runtime_target or RuntimeTarget(provider_id=provider_id, model_id=model_id,
             endpoint_identity=endpoint_identity, credential_route_id=credential_route_id, route_type="scripted")
 
@@ -134,7 +170,12 @@ class ScriptedProviderAdapter:
     def transport_identity(self):
         return opaque_transport_identity(self._runtime_target.endpoint_identity)
 
+    def bind_execution_control(self, control: ExecutionControlToken | None) -> None:
+        self._execution_control = control
+
     async def generate(self, *, context: ModelContext, tools: list[dict[str, Any]], timeout_seconds: float) -> Any:
+        if self._execution_control is not None:
+            self._execution_control.check()
         self.calls.append({
             "context": context.model_dump(mode="json"),
             "tool_names": [item.get("function", {}).get("name") for item in tools],
@@ -147,6 +188,16 @@ class ScriptedProviderAdapter:
             raise value
         if callable(value):
             value = value(context)
+        if inspect.isawaitable(value):
+            value = await await_with_control(
+                value,
+                control=self._execution_control,
+                local_ceiling=timeout_seconds,
+                timeout_failure_type="PROVIDER_TIMEOUT",
+                source="provider",
+            )
+        if self._execution_control is not None:
+            self._execution_control.check()
         return value
 
 
@@ -154,6 +205,9 @@ class OfflineCompletionProvider:
     """Network-free provider for an already-valid native CLI smoke run."""
 
     name = "offline-native-provider"
+
+    def bind_execution_control(self, control: ExecutionControlToken | None) -> None:
+        self._execution_control = control
 
     @property
     def runtime_target(self) -> RuntimeTarget:
@@ -164,6 +218,9 @@ class OfflineCompletionProvider:
         return opaque_transport_identity("local")
 
     async def generate(self, *, context: ModelContext, tools: list[dict[str, Any]], timeout_seconds: float) -> ProviderResponse:
+        control = getattr(self, "_execution_control", None)
+        if control is not None:
+            control.check()
         return ProviderResponse(
             content="Request independent completion validation.",
             completion_claim=True,

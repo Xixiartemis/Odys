@@ -4,12 +4,19 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import re
 import time
 from typing import Any
 
 from lhas.agent.models import AgentRequest, AgentResult, AgentStatus
 from lhas.domain.enums import EventType
+from lhas.execution_control import (
+    ExecutionControlError,
+    ExecutionControlToken,
+    ExecutionLayerTimeout,
+    await_with_control,
+)
 from lhas.native.completion import CompletionAuthority
 from lhas.native.context import NativeContextAssembler
 from lhas.native.delegation import DurableDeliveryService
@@ -30,6 +37,30 @@ from lhas.native.persistence import (
 from lhas.native.models import ProviderFailureCategory, ProviderHealthState, RuntimeTarget
 from lhas.native.runtime import ProviderFailureClassifier, ProviderHealthRepository
 from lhas.persistence.event_store import EventStore
+from lhas.repair_progress import RepairProgressTracker
+
+
+# The native kernel retains a conservative default for non-benchmark callers.
+# Official benchmark factories pass the explicit per-provider ceiling below;
+# the benchmark root deadline is owned by P45 and is not replaced by this
+# value.
+OFFICIAL_PROVIDER_TIMEOUT_SECONDS = 300.0
+
+
+def _identity_hash(value: Any) -> str:
+    """Hash execution-visible identity without persisting prompt/tool content."""
+    encoded = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _text_hash(value: str) -> str:
+    return hashlib.sha256(str(value).encode("utf-8")).hexdigest()
 
 
 class NativeAgentKernel:
@@ -51,6 +82,7 @@ class NativeAgentKernel:
         runtime_target_controller: Any = None,
         provider_health: ProviderHealthRepository | None = None,
         provider_factory: Any = None,
+        recovery_controller: Any = None,
     ):
         self.db = db
         self.provider = provider
@@ -69,6 +101,10 @@ class NativeAgentKernel:
         self.runtime_target_controller = runtime_target_controller
         self.provider_health = provider_health or ProviderHealthRepository(db)
         self.provider_factory = provider_factory
+        # Optional Odys recovery control-plane owner.  It is injected by the
+        # runtime boundary; legacy callers retain tracker-only behavior.
+        self.recovery_controller = recovery_controller
+        self._controls: dict[str, ExecutionControlToken] = {}
 
     def switch_runtime_target(self, new_target: RuntimeTarget, *, expected_current: RuntimeTarget,
                               runtime_id: str | None = None, reason: str = "explicit provider migration"):
@@ -100,9 +136,21 @@ class NativeAgentKernel:
             self._save(active)
         return switch
 
-    async def run(self, request: AgentRequest) -> AgentResult:
+    async def run(
+        self,
+        request: AgentRequest,
+        *,
+        execution_control: ExecutionControlToken | None = None,
+    ) -> AgentResult:
         task_id, run_id, attempt_id = self._ids(request)
         self._states[request.agent_id] = AgentStatus.RUNNING
+        control = execution_control or self._controls.get(request.agent_id)
+        if control is None:
+            control = ExecutionControlToken(run_id, attempt_id=attempt_id)
+        self._controls[request.agent_id] = control
+        binder = getattr(self.provider, "bind_execution_control", None)
+        if callable(binder):
+            binder(control)
         snapshot = self.snapshots.get_for_attempt(attempt_id)
         if snapshot is None:
             snapshot = self._new_snapshot(request, task_id, run_id, attempt_id)
@@ -110,6 +158,13 @@ class NativeAgentKernel:
         self._ensure_runtime_target(request, snapshot)
         self._active_snapshot = snapshot
         self.dispatcher.restore_observer(snapshot.repeated_failure_state)
+        progress_tracker = self._repair_tracker(request)
+        recovery_controller = self._recovery_controller(request)
+
+        try:
+            control.check()
+        except ExecutionControlError as exc:
+            return self._control_terminated(request, snapshot, exc)
 
         pending = await self.completion.resume_pending(attempt_id)
         if pending and pending.status is CandidateStatus.ACCEPTED:
@@ -154,6 +209,10 @@ class NativeAgentKernel:
             self._save(snapshot)
 
         while snapshot.model_turn_count < request.budget.max_turns:
+            try:
+                control.check()
+            except ExecutionControlError as exc:
+                return self._control_terminated(request, snapshot, exc)
             self._consume_deliveries(snapshot)
             if snapshot.tool_call_count >= request.budget.max_tool_calls:
                 return self._budget_exhausted(request, snapshot, "TOOL_CALL_BUDGET")
@@ -165,7 +224,30 @@ class NativeAgentKernel:
                 validation_failures=failures,
                 replan_signals=signals,
             )
+            visible_tools = self.dispatcher.tool_schemas(request.allowed_capabilities)
+            system_message = next(
+                (
+                    item
+                    for item in context.messages
+                    if isinstance(item, dict) and item.get("role") == "system"
+                ),
+                {},
+            )
+            call_identity = {
+                "system_prompt_hash": _text_hash(str(system_message.get("content", ""))),
+                "context_sections_sha256": _identity_hash(context.sections),
+                "model_visible_tool_schema_sha256": _identity_hash(visible_tools),
+                "model_visible_capabilities": sorted(request.allowed_capabilities),
+                "active_step_contract_sha256": _identity_hash(
+                    context.sections.get("active_step_contract", {})
+                    if isinstance(context.sections, dict)
+                    else {}
+                ),
+            }
             next_turn = snapshot.model_turn_count + 1
+            if progress_tracker is not None:
+                progress_tracker.begin_turn()
+                snapshot.current_failure["repair_convergence"] = progress_tracker.snapshot()
             if snapshot.effective_target is not None:
                 health = self.provider_health.get(snapshot.effective_target)
                 if health and health["state"] in {ProviderHealthState.QUOTA_BLOCKED.value, ProviderHealthState.AUTH_BLOCKED.value}:
@@ -188,16 +270,62 @@ class NativeAgentKernel:
                     "provider_id": actual_target.provider_id if isinstance(actual_target, RuntimeTarget) else None,
                     "model_id": actual_target.model_id if isinstance(actual_target, RuntimeTarget) else None,
                     "endpoint_fingerprint": actual_target.endpoint_fingerprint if isinstance(actual_target, RuntimeTarget) else None,
+                    **call_identity,
                 },
             )
-            self.events.append(EventType.NATIVE_MODEL_TURN_STARTED, task_id=task_id, run_id=run_id, attempt_id=attempt_id, payload={"turn": next_turn, "model_turn_ordinal": next_turn, "provider": getattr(self.provider, "name", type(self.provider).__name__), **target_payload, "context_chars": context.chars_used, "context_budget": context.budget_chars})
+            self.events.append(EventType.NATIVE_MODEL_TURN_STARTED, task_id=task_id, run_id=run_id, attempt_id=attempt_id, payload={"turn": next_turn, "model_turn_ordinal": next_turn, "provider": getattr(self.provider, "name", type(self.provider).__name__), **target_payload, "context_chars": context.chars_used, "context_budget": context.budget_chars, **call_identity})
+            if recovery_controller is not None:
+                try:
+                    recovery_controller.acquire_local_turn()
+                except Exception as exc:
+                    # A local lease may not consume the protected escalation
+                    # reserve. The controller records the durable signal;
+                    # this boundary only projects a bounded terminal result.
+                    from lhas.recovery_control import BudgetReservationError
+
+                    if not isinstance(exc, BudgetReservationError):
+                        raise
+                    progress = recovery_controller.budget_failure_progress()
+                    recovery_controller.emit_signal(
+                        "LOCAL_REPAIR_BUDGET_EXHAUSTED",
+                        progress,
+                        extra={"phase": "local_repair"},
+                    )
+                    if progress_tracker is not None:
+                        progress_tracker.stop("REPLAN_REQUIRED")
+                    snapshot.phase = NativePhase.REPLANNING
+                    snapshot.current_failure.update(
+                        {
+                            "type": "REPLAN_REQUIRED",
+                            "repair_stop_reason": "LOCAL_REPAIR_BUDGET_EXHAUSTED",
+                        }
+                    )
+                    self._save(snapshot)
+                    return self._failed(
+                        request,
+                        snapshot,
+                        "REPLAN_REQUIRED",
+                        detail="local repair lease exhausted; escalation reserve protected",
+                    )
             started = time.monotonic()
             try:
-                raw = await self.provider.generate(
-                    context=context,
-                    tools=self.dispatcher.tool_schemas(),
-                    timeout_seconds=self.provider_timeout_seconds,
+                raw = await await_with_control(
+                    self.provider.generate(
+                        context=context,
+                        tools=visible_tools,
+                        timeout_seconds=self.provider_timeout_seconds,
+                    ),
+                    control=control,
+                    local_ceiling=self.provider_timeout_seconds,
+                    timeout_failure_type="PROVIDER_TIMEOUT",
+                    source="provider",
                 )
+            except ExecutionControlError as exc:
+                if isinstance(exc, ExecutionLayerTimeout):
+                    category = ProviderFailureCategory.PROVIDER_TIMEOUT
+                    self._record_model_response_rejected(task_id, run_id, attempt_id, next_turn, category, str(exc), stage="PROVIDER_GENERATE")
+                    return self._provider_failure(request, snapshot, category, next_turn, str(exc))
+                return self._control_terminated(request, snapshot, exc)
             except asyncio.TimeoutError as exc:
                 category = ProviderFailureCategory.PROVIDER_TIMEOUT
                 self._record_model_response_rejected(task_id, run_id, attempt_id, next_turn, category, str(exc), stage="PROVIDER_GENERATE")
@@ -207,25 +335,65 @@ class NativeAgentKernel:
                 self._record_model_response_rejected(task_id, run_id, attempt_id, next_turn, category, str(exc), stage="PROVIDER_GENERATE")
                 return self._provider_failure(request, snapshot, category, next_turn, str(exc))
             duration_ms = int((time.monotonic() - started) * 1000)
+            try:
+                control.check()
+            except ExecutionControlError as exc:
+                return self._control_terminated(request, snapshot, exc)
             self.events.append(
                 EventType.MODEL_RESPONSE_RECEIVED,
                 task_id=task_id,
                 run_id=run_id,
                 attempt_id=attempt_id,
-                payload=self._response_shape(raw, turn=next_turn),
+                payload={
+                    **self._execution_correlation(request, snapshot),
+                    **self._response_shape(raw, turn=next_turn),
+                    "transport_status": "SUCCESS",
+                    **call_identity,
+                },
             )
             try:
                 response = self.parser.parse(raw)
-            except ModelResponseError as exc:
+            except (ModelResponseError, json.JSONDecodeError) as exc:
+                parse_evidence = self._parse_failure_evidence(raw, exc)
                 snapshot.model_turn_count = next_turn
                 snapshot.phase = NativePhase.FAILED
-                snapshot.current_failure = {"type": "PROVIDER_MALFORMED_RESPONSE", "failure_category": "MALFORMED_PROVIDER_RESPONSE", "category": str(exc)[:128]}
+                snapshot.current_failure = {
+                    "type": "MODEL_OUTPUT_PARSE_FAILED",
+                    "failure_category": "MALFORMED_PROVIDER_RESPONSE",
+                    "category": str(exc)[:128],
+                    **parse_evidence,
+                }
                 self._save(snapshot)
-                rejected = {"turn": next_turn, "error_type": "PROVIDER_MALFORMED_RESPONSE", "failure_code": "invalid_response", "category": str(exc)[:128]}
-                self.events.append(EventType.MODEL_RESPONSE_REJECTED, task_id=task_id, run_id=run_id, attempt_id=attempt_id, payload=rejected)
+                rejected = {
+                    "turn": next_turn,
+                    "error_type": "PROVIDER_MALFORMED_RESPONSE",
+                    "failure_code": "invalid_response",
+                    "failure_stage": "MODEL_OUTPUT_PARSE",
+                    "category": str(exc)[:128],
+                    **parse_evidence,
+                }
+                self.events.append(
+                    EventType.MODEL_RESPONSE_REJECTED,
+                    task_id=task_id,
+                    run_id=run_id,
+                    attempt_id=attempt_id,
+                    payload={**self._execution_correlation(request, snapshot), **rejected},
+                )
                 self.events.append(EventType.NATIVE_MODEL_RESPONSE_REJECTED, task_id=task_id, run_id=run_id, attempt_id=attempt_id, payload=rejected)
                 self._create_replan(snapshot, "PROVIDER_MALFORMED_RESPONSE", {"category": str(exc)[:128]})
-                return self._failed(request, snapshot, "PROVIDER_MALFORMED_RESPONSE", detail=str(exc))
+                failed = self._failed(
+                    request,
+                    snapshot,
+                    "PROVIDER_MALFORMED_RESPONSE",
+                    detail=str(exc),
+                )
+                failed.artifacts.update(
+                    {
+                        "model_output_parse_failure": True,
+                        "model_output_parse_evidence": parse_evidence,
+                    }
+                )
+                return failed
 
             self.events.append(
                 EventType.MODEL_RESPONSE_PARSED,
@@ -233,6 +401,7 @@ class NativeAgentKernel:
                 run_id=run_id,
                 attempt_id=attempt_id,
                 payload={
+                    **self._execution_correlation(request, snapshot),
                     "turn": next_turn,
                     "content_length": len(response.content),
                     "tool_call_count": len(response.tool_calls),
@@ -266,10 +435,71 @@ class NativeAgentKernel:
                 snapshot.phase = NativePhase.WAITING_TOOL
                 self._save(snapshot)
                 for call in response.tool_calls:
+                    try:
+                        control.check()
+                    except ExecutionControlError as exc:
+                        return self._control_terminated(request, snapshot, exc)
                     previous_verification = dict(snapshot.verification_state)
-                    observation = await self.dispatcher.dispatch(call, request, snapshot)
+                    try:
+                        observation = await await_with_control(
+                            self.dispatcher.dispatch(
+                                call,
+                                request,
+                                snapshot,
+                                execution_control=control,
+                            ),
+                            control=control,
+                            source="tool",
+                        )
+                    except ExecutionControlError as exc:
+                        return self._control_terminated(request, snapshot, exc)
                     snapshot.tool_call_count += 1
                     snapshot.recent_tool_outcomes.append(observation)
+                    if progress_tracker is not None:
+                        progress = progress_tracker.observe(observation)
+                        snapshot.current_failure["repair_convergence"] = (
+                            progress_tracker.snapshot()
+                        )
+                    controller_decision = None
+                    controller_progress = None
+                    if recovery_controller is not None:
+                        bounded = (
+                            observation.get("bounded_output")
+                            or observation.get("safe_summary")
+                            or observation
+                        )
+                        controller_decision, controller_progress = recovery_controller.observe(
+                            before_state=None,
+                            after_state=bounded,
+                            action={
+                                "capability": observation.get("capability") or call.name,
+                                "args_sha256": observation.get("args_sha256"),
+                                "active_step_contract": (
+                                    request.context.get("active_step_contract")
+                                    if isinstance(request.context, dict)
+                                    else None
+                                ),
+                                "planner_owned_arguments_match": observation.get(
+                                    "planner_owned_arguments_match", False
+                                ),
+                            },
+                            observation=observation,
+                        )
+                        snapshot.current_failure["recovery_control"] = {
+                            "decision": controller_decision.value,
+                            "progress_status": controller_progress.status.value,
+                            "state_digest": controller_progress.state_digest,
+                            "action_fingerprint": controller_progress.action_fingerprint,
+                            "matched_effect_keys": list(controller_progress.matched_effect_keys),
+                            "escalation_policy": getattr(
+                                recovery_controller,
+                                "escalation_policy",
+                                "NO_PROGRESS_AWARE",
+                            ),
+                            "detections": list(
+                                getattr(recovery_controller, "detections", [])
+                            )[-8:],
+                        }
                     snapshot.repeated_failure_state = self.dispatcher.observer_state()
                     summary = observation.get("safe_summary") if isinstance(observation, dict) else {}
                     if isinstance(summary, dict) and summary.get("meaningful_mutation"):
@@ -290,14 +520,76 @@ class NativeAgentKernel:
                             "capability": observation.get("capability"),
                         }
                     self._save(snapshot)
+                    if controller_decision is not None and controller_decision.value == "VALIDATE_CANDIDATE":
+                        # Satisfied effects are only candidates. The external
+                        # validator remains the sole completion authority.
+                        return self._validation_candidate(
+                            request,
+                            snapshot,
+                            controller_progress,
+                        )
+                    if controller_decision is not None and controller_decision.value == "ESCALATE_MACRO_REPLAN":
+                        if progress_tracker is not None:
+                            progress_tracker.stop("REPLAN_REQUIRED")
+                        snapshot.phase = NativePhase.REPLANNING
+                        snapshot.current_failure.update(
+                            {
+                                "type": "REPLAN_REQUIRED",
+                                "repair_stop_reason": controller_progress.status.value,
+                            }
+                        )
+                        self._save(snapshot)
+                        return self._failed(
+                            request,
+                            snapshot,
+                            "REPLAN_REQUIRED",
+                            detail=(
+                                "recovery control escalated after "
+                                f"{controller_progress.status.value}"
+                            ),
+                        )
+                    if progress_tracker is not None and not progress.continue_repair:
+                        snapshot.phase = NativePhase.FAILED
+                        snapshot.current_failure.update(
+                            {
+                                "type": progress.stop_reason,
+                                "repair_stop_reason": progress.stop_reason,
+                            }
+                        )
+                        self._save(snapshot)
+                        return self._failed(
+                            request,
+                            snapshot,
+                            str(progress.stop_reason),
+                            detail=(
+                                "bounded repair convergence control stopped "
+                                f"after {progress_tracker.repair_turns} repair turns"
+                            ),
+                        )
+                    try:
+                        control.check()
+                    except ExecutionControlError as exc:
+                        return self._control_terminated(request, snapshot, exc)
                 snapshot.phase = NativePhase.CONTINUE
                 self._save(snapshot)
                 continue
 
             if response.completion_claim:
+                if progress_tracker is not None:
+                    progress_tracker.candidate_for_validation()
+                    snapshot.current_failure["repair_convergence"] = (
+                        progress_tracker.snapshot()
+                    )
                 snapshot.phase = NativePhase.CANDIDATE_COMPLETE
                 self._save(snapshot)
-                candidate = await self.completion.evaluate_claim(snapshot, response.content, source="MODEL_CLAIM")
+                try:
+                    candidate = await await_with_control(
+                        self.completion.evaluate_claim(snapshot, response.content, source="MODEL_CLAIM"),
+                        control=control,
+                        source="validation",
+                    )
+                except ExecutionControlError as exc:
+                    return self._control_terminated(request, snapshot, exc)
                 snapshot.completion_candidate_id = candidate.id
                 if candidate.status is CandidateStatus.ACCEPTED:
                     snapshot.phase = NativePhase.ACCEPTED_COMPLETE
@@ -306,6 +598,12 @@ class NativeAgentKernel:
                     return self._accepted(request, snapshot, candidate.summary)
                 snapshot.phase = NativePhase.RECOVERING
                 snapshot.current_failure = {"type": "VALIDATOR_REJECTION", "candidate_id": candidate.id}
+                rejection_progress = None
+                if progress_tracker is not None:
+                    rejection_progress = progress_tracker.validation_rejected()
+                    snapshot.current_failure["repair_convergence"] = (
+                        progress_tracker.snapshot()
+                    )
                 snapshot.recent_tool_outcomes.append({
                     "capability": "completion.validate",
                     "status": "FAILURE",
@@ -314,6 +612,43 @@ class NativeAgentKernel:
                     "safe_summary": candidate.validation,
                 })
                 self._save(snapshot)
+                validator_control_decision = None
+                if recovery_controller is not None:
+                    validator_control_decision = recovery_controller.validator_rejected()
+                if (
+                    validator_control_decision is not None
+                    and validator_control_decision.value == "ESCALATE_MACRO_REPLAN"
+                ):
+                    if progress_tracker is not None:
+                        progress_tracker.stop("REPLAN_REQUIRED")
+                    snapshot.phase = NativePhase.REPLANNING
+                    snapshot.current_failure.update(
+                        {
+                            "type": "REPLAN_REQUIRED",
+                            "repair_stop_reason": "REPEATED_VALIDATOR_REJECTION",
+                        }
+                    )
+                    self._save(snapshot)
+                    return self._failed(
+                        request,
+                        snapshot,
+                        "REPLAN_REQUIRED",
+                        detail="repeated authoritative validator rejection",
+                    )
+                if (
+                    progress_tracker is not None
+                    and rejection_progress is not None
+                    and not rejection_progress.continue_repair
+                ):
+                    return self._failed(
+                        request,
+                        snapshot,
+                        str(rejection_progress.stop_reason),
+                        detail=(
+                            "bounded repair convergence control stopped after "
+                            f"{progress_tracker.repair_turns} repair turns"
+                        ),
+                    )
                 continue
 
             snapshot.phase = NativePhase.FAILED
@@ -325,10 +660,56 @@ class NativeAgentKernel:
         return self._budget_exhausted(request, snapshot, "TURN_BUDGET")
 
     async def cancel(self, agent_id: str) -> None:
+        control = self._controls.get(agent_id)
+        if control is not None:
+            control.cancel("USER_CANCEL", source="kernel.cancel")
         self._states[agent_id] = AgentStatus.CANCELLED
 
     async def status(self, agent_id: str) -> dict[str, Any]:
         return {"agent_id": agent_id, "status": self._states.get(agent_id, AgentStatus.PENDING).value, "kernel": self.name}
+
+    def _control_terminated(
+        self,
+        request: AgentRequest,
+        snapshot: ExecutionSnapshot,
+        error: ExecutionControlError,
+    ) -> AgentResult:
+        """Persist one terminal control boundary and reject late work."""
+        evidence = error.evidence()
+        snapshot.phase = NativePhase.FAILED
+        snapshot.current_failure = evidence
+        self._save(snapshot)
+        event_type = (
+            EventType.EXECUTION_DEADLINE_EXCEEDED
+            if error.failure_type == "ROOT_DEADLINE_EXCEEDED"
+            else EventType.EXECUTION_CANCELLED
+        )
+        self.events.append(
+            event_type,
+            task_id=snapshot.task_id,
+            run_id=snapshot.run_id,
+            attempt_id=snapshot.attempt_id,
+            payload=evidence,
+        )
+        self._states[request.agent_id] = AgentStatus.CANCELLED
+        artifacts = {
+            "execution_snapshot_id": snapshot.id,
+            "execution_control": evidence,
+        }
+        tracker = self._repair_tracker(request)
+        if tracker is not None:
+            tracker.stop("CANCELLED")
+            artifacts["repair_convergence"] = tracker.snapshot()
+        return AgentResult(
+            status=AgentStatus.CANCELLED,
+            completion_claim=False,
+            turn_count=snapshot.model_turn_count,
+            tool_call_count=snapshot.tool_call_count,
+            safe_trace=snapshot.recent_tool_outcomes[-100:],
+            artifacts=artifacts,
+            error_type=error.failure_type,
+            error_message=error.reason[:512],
+        )
 
     @staticmethod
     def _ids(request: AgentRequest) -> tuple[str, str, str]:
@@ -355,6 +736,23 @@ class NativeAgentKernel:
     def _save(self, snapshot: ExecutionSnapshot) -> None:
         self.snapshots.save(snapshot)
         self.events.append(EventType.NATIVE_EXECUTION_SNAPSHOT, task_id=snapshot.task_id, run_id=snapshot.run_id, attempt_id=snapshot.attempt_id, payload={"snapshot_id": snapshot.id, "version": snapshot.version, "phase": snapshot.phase.value, "model_turn_count": snapshot.model_turn_count, "tool_call_count": snapshot.tool_call_count, "workspace_mutation_version": snapshot.workspace_mutation_version, "completion_candidate_id": snapshot.completion_candidate_id})
+
+    @staticmethod
+    def _execution_correlation(
+        request: AgentRequest,
+        snapshot: ExecutionSnapshot,
+    ) -> dict[str, Any]:
+        context = request.context if isinstance(request.context, dict) else {}
+        contract = context.get("active_step_contract")
+        controller = request.metadata.get("_recovery_controller") if isinstance(request.metadata, dict) else None
+        return {
+            "plan_id": str(contract.get("plan_id", "")) if isinstance(contract, dict) else None,
+            "plan_version": str(contract.get("plan_version", "")) if isinstance(contract, dict) else None,
+            "step_id": str(contract.get("step_id", "")) if isinstance(contract, dict) else str(snapshot.taskgraph_position or ""),
+            "attempt_id": str(snapshot.attempt_id),
+            "strategy_epoch": int(getattr(controller, "strategy_epoch", 0)) if controller is not None else 0,
+            "execution_phase": str(context.get("execution_phase", "initial")),
+        }
 
     def _provider_failure(self, request: AgentRequest, snapshot: ExecutionSnapshot, error_type: str | ProviderFailureCategory, turn: int, detail: str | None = None) -> AgentResult:
         category = ProviderFailureCategory(error_type)
@@ -478,14 +876,88 @@ class NativeAgentKernel:
 
     def _accepted(self, request: AgentRequest, snapshot: ExecutionSnapshot, output: str) -> AgentResult:
         self._states[request.agent_id] = AgentStatus.COMPLETED
-        return AgentResult(status=AgentStatus.COMPLETED, final_output=output, completion_claim=True, turn_count=snapshot.model_turn_count, tool_call_count=snapshot.tool_call_count, safe_trace=snapshot.recent_tool_outcomes[-100:], artifacts={"completion_candidate_id": snapshot.completion_candidate_id, "execution_snapshot_id": snapshot.id})
+        artifacts = {
+            "completion_candidate_id": snapshot.completion_candidate_id,
+            "execution_snapshot_id": snapshot.id,
+        }
+        tracker = self._repair_tracker(request)
+        if tracker is not None:
+            tracker.stop("VERIFIED")
+            artifacts["repair_convergence"] = tracker.snapshot()
+        return AgentResult(
+            status=AgentStatus.COMPLETED,
+            final_output=output,
+            completion_claim=True,
+            turn_count=snapshot.model_turn_count,
+            tool_call_count=snapshot.tool_call_count,
+            safe_trace=snapshot.recent_tool_outcomes[-100:],
+            artifacts=artifacts,
+        )
 
     def _failed(self, request: AgentRequest, snapshot: ExecutionSnapshot, error_type: str, *, detail: str | None = None) -> AgentResult:
         self._states[request.agent_id] = AgentStatus.FAILED
         if snapshot.phase not in {NativePhase.REPLANNING, NativePhase.RECOVERING}:
             snapshot.phase = NativePhase.FAILED
             self._save(snapshot)
-        return AgentResult(status=AgentStatus.FAILED, completion_claim=False, turn_count=snapshot.model_turn_count, tool_call_count=snapshot.tool_call_count, safe_trace=snapshot.recent_tool_outcomes[-100:], artifacts={"execution_snapshot_id": snapshot.id, "workspace_mutation_version": snapshot.workspace_mutation_version}, error_type=error_type, error_message=(detail or "")[:512] or None)
+        artifacts = {
+            "execution_snapshot_id": snapshot.id,
+            "workspace_mutation_version": snapshot.workspace_mutation_version,
+        }
+        tracker = self._repair_tracker(request)
+        if tracker is not None:
+            if error_type == "BUDGET_EXHAUSTED":
+                tracker.stop("BUDGET_EXHAUSTED")
+            elif tracker.repair_stop_reason is None:
+                tracker.stop(
+                    "MODEL_FAILURE"
+                    if error_type.startswith("PROVIDER")
+                    or "MODEL" in error_type
+                    else "TOOL_FAILURE"
+                )
+            artifacts["repair_convergence"] = tracker.snapshot()
+        return AgentResult(status=AgentStatus.FAILED, completion_claim=False, turn_count=snapshot.model_turn_count, tool_call_count=snapshot.tool_call_count, safe_trace=snapshot.recent_tool_outcomes[-100:], artifacts=artifacts, error_type=error_type, error_message=(detail or "")[:512] or None)
+
+    def _validation_candidate(
+        self,
+        request: AgentRequest,
+        snapshot: ExecutionSnapshot,
+        progress: Any,
+    ) -> AgentResult:
+        """Stop on a generic effect candidate for authoritative validation."""
+        self._states[request.agent_id] = AgentStatus.COMPLETED
+        snapshot.phase = NativePhase.CANDIDATE_COMPLETE
+        self._save(snapshot)
+        artifacts = {
+            "execution_snapshot_id": snapshot.id,
+            "validation_candidate": True,
+            "effect_progress": {
+                "status": progress.status.value,
+                "state_digest": progress.state_digest,
+                "matched_effect_keys": list(progress.matched_effect_keys),
+            },
+        }
+        tracker = self._repair_tracker(request)
+        if tracker is not None:
+            tracker.candidate_for_validation()
+            artifacts["repair_convergence"] = tracker.snapshot()
+        return AgentResult(
+            status=AgentStatus.COMPLETED,
+            final_output="",
+            completion_claim=True,
+            turn_count=snapshot.model_turn_count,
+            tool_call_count=snapshot.tool_call_count,
+            safe_trace=snapshot.recent_tool_outcomes[-100:],
+            artifacts=artifacts,
+        )
+
+    @staticmethod
+    def _repair_tracker(request: AgentRequest) -> RepairProgressTracker | None:
+        tracker = (request.metadata or {}).get("_repair_progress_tracker")
+        return tracker if isinstance(tracker, RepairProgressTracker) else None
+
+    def _recovery_controller(self, request: AgentRequest) -> Any:
+        controller = (request.metadata or {}).get("_recovery_controller")
+        return controller if controller is not None else self.recovery_controller
 
     @staticmethod
     def _response_shape(value: Any, *, turn: int) -> dict[str, Any]:
@@ -503,6 +975,39 @@ class NativeAgentKernel:
                 except Exception:
                     keys = []
         return {"turn": turn, "response_python_type": type(value).__name__, "dict_keys": keys}
+
+    @staticmethod
+    def _parse_failure_evidence(value: Any, error: BaseException) -> dict[str, Any]:
+        """Project bounded parser evidence without persisting model text."""
+        raw_type = getattr(error, "raw_value_type", None) or type(value).__name__
+        raw_length = getattr(error, "raw_value_length", None)
+        raw_hash = getattr(error, "raw_value_sha256", None)
+        if raw_length is None or raw_hash is None:
+            try:
+                encoded = json.dumps(
+                    value,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    default=str,
+                ).encode("utf-8")
+            except (TypeError, ValueError):
+                encoded = str(value).encode("utf-8", "replace")
+            raw_length = len(encoded)
+            raw_hash = hashlib.sha256(encoded).hexdigest()
+        finish_reason = None
+        if isinstance(value, dict):
+            choices = value.get("choices")
+            if isinstance(choices, list) and choices and isinstance(choices[0], dict):
+                finish_reason = choices[0].get("finish_reason")
+        return {
+            "parser": "ModelResponseParser",
+            "parser_version": "native-v1",
+            "raw_value_type": raw_type,
+            "raw_value_length": int(raw_length),
+            "raw_value_sha256": str(raw_hash),
+            "finish_reason": finish_reason,
+        }
 
     def _record_model_response_rejected(
         self,

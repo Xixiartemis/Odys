@@ -12,6 +12,8 @@ from typing import Any, Iterable, Mapping
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from lhas.side_effects import EffectClass
+
 
 class CapabilityAvailability(str, Enum):
     AVAILABLE = "AVAILABLE"
@@ -90,6 +92,13 @@ class CapabilityDefinition(BaseModel):
     availability: CapabilityAvailability = CapabilityAvailability.AVAILABLE
     source: str = Field(min_length=1)
     evidence_type: str = Field(min_length=1)
+    # Runtime effect facts. Existing declarations remain read-only by default;
+    # capabilities with a side effect opt in explicitly.
+    effect_class: EffectClass = EffectClass.NONE
+    idempotency_support: bool = False
+    receipt_support: bool = False
+    reconciliation_support: bool = False
+    replay_safe: bool = False
 
     @field_validator("platforms")
     @classmethod
@@ -255,6 +264,11 @@ def _capability(
     timeout_seconds: float = 30.0,
     retryable: bool = True,
     preferred_tool: str,
+    effect_class: EffectClass = EffectClass.NONE,
+    idempotency_support: bool = False,
+    receipt_support: bool = False,
+    reconciliation_support: bool = False,
+    replay_safe: bool = False,
 ) -> CapabilityDefinition:
     return CapabilityDefinition(
         id=capability_id,
@@ -274,6 +288,11 @@ def _capability(
         fallback_tools=(),
         source="odys-runtime",
         evidence_type="DETERMINISTIC_TOOL_RESULT",
+        effect_class=effect_class,
+        idempotency_support=idempotency_support,
+        receipt_support=receipt_support,
+        reconciliation_support=reconciliation_support,
+        replay_safe=replay_safe,
     )
 
 
@@ -306,6 +325,7 @@ def default_capabilities() -> tuple[CapabilityDefinition, ...]:
             _object_schema({"path": _PATH, "old_text": {"type": "string"}, "new_text": {"type": "string"}}, ["path", "old_text", "new_text"]),
             _WORKSPACE_EDIT_OUTPUT,
             permissions=("workspace.write",), risk_level="MEDIUM", retryable=False, preferred_tool="workspace.edit",
+            effect_class=EffectClass.LOCAL_REVERSIBLE, receipt_support=True, reconciliation_support=True,
         ),
         _capability(
             "workspace.edit_lines", "Version-checked inclusive line replacement in staged workspace", "workspace",
@@ -318,6 +338,7 @@ def default_capabilities() -> tuple[CapabilityDefinition, ...]:
             ),
             {"type": "object"},
             permissions=("workspace.write",), risk_level="MEDIUM", retryable=False, preferred_tool="workspace.edit_lines",
+            effect_class=EffectClass.LOCAL_REVERSIBLE, receipt_support=True, reconciliation_support=True,
         ),
         _capability(
             "workspace.diff", "Show staged workspace changes", "workspace",
@@ -329,6 +350,7 @@ def default_capabilities() -> tuple[CapabilityDefinition, ...]:
             _object_schema({"path": _PATH}, ["path"]),
             {"type": "object"},
             permissions=("workspace.write",), risk_level="MEDIUM", retryable=False, preferred_tool="workspace.restore",
+            effect_class=EffectClass.LOCAL_REVERSIBLE, receipt_support=True, reconciliation_support=True,
         ),
         _capability(
             "cli.exec", "Execute an explicitly allowed CLI command", "execution",

@@ -1,0 +1,14 @@
+{
+  "benchmark_version": "phase4-v1",
+  "benchmark_namespace": "job-ready-recovery-v2",
+  "faults": [
+    {
+      "fault_id": "JOB_READY_ATTEMPT_TERMINAL_FAILURE",
+      "fault_type": "attempt_terminal",
+      "trigger": "before acceptance",
+      "trigger_count": 1,
+      "deterministic_seed": 4902,
+      "description": "Terminate the current attempt at the native pre-dispatch boundary before the acceptance-relevant tool commit, leaving the externally observed state rejected."
+    }
+  ]
+}

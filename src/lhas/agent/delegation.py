@@ -7,6 +7,7 @@ from typing import Callable
 
 from lhas import HARNESS_VERSION
 from lhas.agent.kernel import AgentKernel
+from lhas.execution_control import ExecutionControlError, ExecutionControlToken, await_with_control
 from lhas.agent.models import AgentRequest, AgentStatus
 from lhas.agent.profile import AgentProfileRegistry
 from lhas.domain.enums import AttemptStatus, EventType, ExecutionStatus, RunStatus
@@ -29,8 +30,8 @@ from lhas.native.delegation import (
 class _ChildAgentExecutor:
     name = "DurableChildAgentExecutor"
 
-    def __init__(self, kernel: AgentKernel, request: DelegationRequest, allowed_capabilities: set[str]):
-        self.kernel=kernel; self.request=request; self.allowed_capabilities=allowed_capabilities
+    def __init__(self, kernel: AgentKernel, request: DelegationRequest, allowed_capabilities: set[str], execution_control: ExecutionControlToken | None = None):
+        self.kernel=kernel; self.request=request; self.allowed_capabilities=allowed_capabilities; self.execution_control=execution_control
 
     async def execute(self, execution: ExecutionRequest) -> ExecutionResult:
         agent_request=AgentRequest(
@@ -48,8 +49,9 @@ class _ChildAgentExecutor:
             parent_agent_id=self.request.parent_agent_id,
             parent_run_id=self.request.parent_run_id,
             metadata={"task_id":execution.task_id,"run_id":execution.run_id,"attempt_id":execution.attempt_id,"attempt_number":execution.attempt_number},
+            execution_control=execution.execution_control or self.execution_control,
         )
-        result=await self.kernel.run(agent_request)
+        result=await self.kernel.run(agent_request, execution_control=agent_request.execution_control)
         status=ExecutionStatus.SUCCESS if result.status is AgentStatus.COMPLETED else ExecutionStatus.FAILURE
         return ExecutionResult(status=status,output=result.final_output,error_type=result.error_type,usage=result.usage,artifacts=result.artifacts,raw={"completion_claim":result.completion_claim,"turn_count":result.turn_count,"tool_call_count":result.tool_call_count,"safe_trace":result.safe_trace,"child_run_refs":result.child_run_refs})
 
@@ -64,7 +66,9 @@ class DelegationService:
         self.repo=DelegationRepository(db); self.events=EventStore(db)
         self.lifecycle=DelegationLifecycleRepository(db); self.delivery=DurableDeliveryService(db)
 
-    async def delegate(self, request: DelegationRequest) -> DelegationResult:
+    async def delegate(self, request: DelegationRequest, *, execution_control: ExecutionControlToken | None = None) -> DelegationResult:
+        if execution_control is not None:
+            execution_control.check()
         parent_task=TaskRepository(self.db).get(request.parent_task_id)
         if parent_task is None: raise KeyError(f"parent task not found: {request.parent_task_id}")
         parent_attempts=AttemptRepository(self.db).list_for_run(request.parent_run_id)
@@ -94,16 +98,28 @@ class DelegationService:
         self.delivery.validate_lineage(delegation.id)
         self.events.append(EventType.DELEGATION_CREATED,task_id=request.parent_task_id,run_id=request.parent_run_id,payload={"delegation_id":delegation.id,"parent_agent_id":request.parent_agent_id,"child_agent_id":request.child_agent_id,"child_task_id":child_task.id,"spawn_depth":request.spawn_depth,"role":request.role.value})
         kernel=self.kernel_factory(request)
-        executor=lambda: _ChildAgentExecutor(kernel,request,allowed)
+        child_control_holder: dict[str, ExecutionControlToken | None] = {"value": None}
+        executor=lambda: _ChildAgentExecutor(kernel,request,allowed,child_control_holder["value"])
         orchestrator=RecoveringOrchestrator(self.db,executor_factory=executor,executor_type="AgentKernel",provider=child_profile.provider,model=child_profile.model,harness_version=HARNESS_VERSION,context_policy_version="CP-3",dataset_version="AGENT-PLATFORM-OFFLINE")
         run=await orchestrator.prepare_task_run(child_task.id)
-        AttemptRepository(self.db).create(Attempt(run_id=run.id,attempt_number=1))
+        child_attempt = AttemptRepository(self.db).create(Attempt(run_id=run.id,attempt_number=1))
+        if execution_control is not None:
+            child_control_holder["value"] = execution_control.derive(
+                run_id=run.id,
+                attempt_id=child_attempt.id,
+            )
         delegation.child_run_id=run.id
         delegation.status=DelegationStatus.RUNNING; self.repo.update(delegation)
         self.delivery.record_started(delegation.id)
         self.events.append(EventType.DELEGATION_STARTED,task_id=child_task.id,run_id=run.id,payload={"delegation_id":delegation.id,"parent_run_id":request.parent_run_id,"parent_attempt_id":parent_attempt_id})
         self.events.append(EventType.CHILD_RUN_LINKED,task_id=child_task.id,run_id=run.id,payload={"delegation_id":delegation.id,"parent_task_id":request.parent_task_id,"parent_run_id":request.parent_run_id})
-        run=await orchestrator.continue_prepared_run(run.id)
+        run=await await_with_control(
+            orchestrator.continue_prepared_run(run.id),
+            control=execution_control,
+            source="child",
+        )
+        if execution_control is not None:
+            execution_control.check()
         attempts=AttemptRepository(self.db).list_for_run(run.id)
         validation=ValidationResultRepository(self.db).get_for_attempt(attempts[-1].id) if attempts else None
         payload=json.loads(run.result or "{}")

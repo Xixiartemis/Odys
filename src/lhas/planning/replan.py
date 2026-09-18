@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 from dataclasses import dataclass
+import hashlib
 import json
 from typing import Any
 
@@ -23,6 +24,9 @@ class ReplanResult:
     signal_count: int
     invalidated_step_ids: tuple[str, ...] = ()
     error_type: str | None = None
+    old_strategy_fingerprint: str | None = None
+    new_strategy_fingerprint: str | None = None
+    affected_subgraph_ids: tuple[str, ...] = ()
 
 
 class MacroReplanService:
@@ -39,6 +43,35 @@ class MacroReplanService:
         self.plans = PlanRepository(db)
         self.events = EventStore(db)
 
+    @staticmethod
+    def _strategy_fingerprint(strategy: list[tuple[str, str]]) -> str:
+        encoded = json.dumps(strategy, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _affected_subgraph(plan: Plan, signals: list[Any]) -> set[str]:
+        """Return failed nodes plus their transitive dependents.
+
+        Verified nodes are deliberately never included as invalidation targets;
+        this projection is used for audit evidence and scope checks, while the
+        existing preservation logic remains the authority for their status.
+        """
+        affected = {
+            str(signal.failed_node_id)
+            for signal in signals
+            if getattr(signal, "failed_node_id", None)
+        }
+        changed = True
+        while changed:
+            changed = False
+            for step in plan.steps:
+                if step.id in affected:
+                    continue
+                if any(dependency in affected for dependency in step.depends_on):
+                    affected.add(step.id)
+                    changed = True
+        return affected
+
     async def consume(self, *, goal: Goal, plan: Plan, signals: list[Any], context: dict[str, Any] | None = None) -> ReplanResult:
         if not signals:
             return ReplanResult(False, plan, 0)
@@ -51,6 +84,7 @@ class MacroReplanService:
         if plan.status in {PlanStatus.COMPLETED}:
             self.events.append(EventType.REPLAN_REJECTED, payload={"plan_id": plan.id, "reason": "plan already completed"})
             return ReplanResult(False, plan, len(signals))
+        affected_subgraph_ids = self._affected_subgraph(plan, signals)
         planner_context = dict(context or {})
         planner_context.update({
             "replan_signals": [item.model_dump(mode="json") if hasattr(item, "model_dump") else dict(item) for item in signals[-20:]],
@@ -78,21 +112,42 @@ class MacroReplanService:
         for completed in completed_strategy:
             if completed in proposed_strategy:
                 proposed_strategy.remove(completed)
+        old_strategy_fingerprint = self._strategy_fingerprint(current_strategy)
+        new_strategy_fingerprint = self._strategy_fingerprint(proposed_strategy)
         if current_strategy == proposed_strategy:
             self.events.append(EventType.REPLAN_REJECTED, payload={
                 "plan_id": plan.id,
                 "reason": "planner returned unchanged strategy",
+                "error_type": "REPLAN_NO_CHANGE",
+                "old_strategy_fingerprint": old_strategy_fingerprint,
+                "new_strategy_fingerprint": new_strategy_fingerprint,
+                "affected_subgraph_ids": sorted(affected_subgraph_ids),
             })
-            return ReplanResult(False, plan, len(signals))
+            return ReplanResult(
+                False,
+                plan,
+                len(signals),
+                error_type="REPLAN_NO_CHANGE",
+                old_strategy_fingerprint=old_strategy_fingerprint,
+                new_strategy_fingerprint=new_strategy_fingerprint,
+                affected_subgraph_ids=tuple(sorted(affected_subgraph_ids)),
+            )
         old_by_fingerprint = {}
         old_by_id = {step.id: step for step in plan.steps}
         for step in plan.steps:
             if step.status in _TERMINAL_VERIFIED_STATUSES:
                 old_by_fingerprint.setdefault(compute_step_semantic_fingerprint(step, old_by_id), step)
         invalidated = []
-        # BLOCKER E: route STALE transitions through transition_step()
+        proposal_ids = {item.id for item in proposal.steps}
+        # BLOCKER E: route STALE transitions through transition_step().  A
+        # macro replan is scoped to the failed node and its descendants;
+        # unrelated pending work remains executable and is not silently
+        # converted into stale work.
         for old in plan.steps:
-            if old.status not in _TERMINAL_VERIFIED_STATUSES | {PlanStepStatus.STALE}:
+            if (
+                old.id in affected_subgraph_ids
+                and old.status not in _TERMINAL_VERIFIED_STATUSES | {PlanStepStatus.STALE}
+            ):
                 transition_step(old, PlanStepStatus.STALE, "replan_invalidation", self.events, plan_id=plan.id)
                 invalidated.append(old.id)
         preserved_ids = set()
@@ -112,16 +167,38 @@ class MacroReplanService:
                 preserved_ids.add(completed.id)
         # BLOCKER E: route STALE transitions for unpreserved completed steps
         for old in plan.steps:
-            if old.status in _TERMINAL_VERIFIED_STATUSES and old.id not in preserved_ids:
+            if (
+                old.id in affected_subgraph_ids
+                and old.status in _TERMINAL_VERIFIED_STATUSES
+                and old.id not in preserved_ids
+            ):
                 transition_step(old, PlanStepStatus.STALE, "replan_unpreserved", self.events, plan_id=plan.id)
                 invalidated.append(old.id)
+        # Rows omitted by a revised proposal remain in the durable plan table;
+        # retire unrelated pending rows explicitly so a reload cannot dispatch
+        # superseded work.  This is not repair invalidation and is deliberately
+        # excluded from invalidated_step_ids: only the failed subgraph is
+        # eligible for recovery execution.
+        for old in plan.steps:
+            if (
+                old.id not in proposal_ids
+                and old.id not in affected_subgraph_ids
+                and old.status not in _TERMINAL_VERIFIED_STATUSES | {PlanStepStatus.STALE}
+            ):
+                transition_step(old, PlanStepStatus.STALE, "replan_superseded_unaffected", self.events, plan_id=plan.id)
         for step in proposal.steps:
             step.depends_on = [id_remap.get(item, item) for item in step.depends_on]
         # Retain completed and stale nodes in the canonical graph for audit;
         # only the revised pending graph is executable.
         # Preserved steps (fingerprint-matched) come from the proposal with
         # VERIFIED status — exclude the old COMPLETED copy from retained.
-        retained = [item for item in plan.steps if (item.status in _TERMINAL_VERIFIED_STATUSES | {PlanStepStatus.STALE}) and item.id not in preserved_ids]
+        retained = [
+            item
+            for item in plan.steps
+            if item.id not in preserved_ids
+            and item.id not in proposal_ids
+            and item.status in _TERMINAL_VERIFIED_STATUSES | {PlanStepStatus.STALE}
+        ]
         plan.steps = retained + list(proposal.steps)
         by_id = {step.id: step for step in plan.steps}
         for step in plan.steps:
@@ -154,5 +231,17 @@ class MacroReplanService:
             setattr(caller_plan, field, getattr(plan, field))
         self.events.append(EventType.REPLAN_ACCEPTED, payload={"plan_id": plan.id, "new_version": plan.version,
             "signal_count": len(signals), "invalidated_step_ids": invalidated,
-            "preserved_completed_node_ids": sorted(preserved_ids)})
-        return ReplanResult(True, plan, len(signals), tuple(invalidated))
+            "preserved_completed_node_ids": sorted(preserved_ids),
+            "affected_subgraph_ids": sorted(affected_subgraph_ids),
+            "old_strategy_fingerprint": old_strategy_fingerprint,
+            "new_strategy_fingerprint": new_strategy_fingerprint,
+        })
+        return ReplanResult(
+            True,
+            plan,
+            len(signals),
+            tuple(invalidated),
+            old_strategy_fingerprint=old_strategy_fingerprint,
+            new_strategy_fingerprint=new_strategy_fingerprint,
+            affected_subgraph_ids=tuple(sorted(affected_subgraph_ids)),
+        )

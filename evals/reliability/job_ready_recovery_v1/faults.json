@@ -1,0 +1,14 @@
+{
+  "benchmark_version": "phase4-v1",
+  "benchmark_namespace": "job-ready-recovery-v1",
+  "faults": [
+    {
+      "fault_id": "JOB_READY_PRE_ACCEPTANCE_FAILURE",
+      "fault_type": "tool_failure",
+      "trigger": "before acceptance",
+      "trigger_count": 1,
+      "deterministic_seed": 4901,
+      "description": "Leave the acceptance-relevant state document in a rejected state before the agent can satisfy the objective."
+    }
+  ]
+}

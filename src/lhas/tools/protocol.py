@@ -46,6 +46,15 @@ class ToolRequest(BaseModel):
     context: dict[str, Any] = Field(default_factory=dict)
     workspace_ref: str | None = None
     timeout_seconds: float | None = Field(default=None, gt=0)
+    # ExecutionControlToken is an in-process authority, not serialized
+    # benchmark/provider data. Tool implementations may use it to derive a
+    # bounded timeout and observe cancellation without owning root state.
+    execution_control: Any = Field(default=None, exclude=True)
+    # Runtime-only receipt context.  It is intentionally excluded from
+    # serialization and never crosses the provider boundary.
+    side_effect_receipt_manager: Any = Field(default=None, exclude=True)
+    side_effect_receipt_id: str | None = Field(default=None, exclude=True)
+    step_id: str | None = Field(default=None, max_length=128)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
     @model_validator(mode="after")
