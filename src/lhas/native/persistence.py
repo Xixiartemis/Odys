@@ -298,11 +298,42 @@ class ReplanSignalRepository:
             ))
         return signal
 
+    def update(self, signal: ReplanSignal) -> ReplanSignal:
+        """Update only the durable projection fields of an existing signal."""
+        with self.db.session() as session:
+            row = session.get(ReplanSignalRow, signal.id)
+            if row is None:
+                raise KeyError(f"replan signal not found: {signal.id}")
+            row.reason = signal.reason
+            row.scope = signal.scope
+            row.failed_node_id = signal.failed_node_id
+            row.evidence_json = json_dumps(signal.evidence)
+        return signal
+
     def list_for_attempt(self, attempt_id: str) -> list[ReplanSignal]:
         with self.db.session() as session:
             rows = session.execute(
                 select(ReplanSignalRow)
                 .where(ReplanSignalRow.attempt_id == attempt_id)
+                .order_by(ReplanSignalRow.created_at, ReplanSignalRow.id)
+            ).scalars().all()
+            return [ReplanSignal(
+                id=row.id,
+                task_id=row.task_id,
+                run_id=row.run_id,
+                attempt_id=row.attempt_id,
+                reason=row.reason,
+                scope=row.scope,
+                failed_node_id=row.failed_node_id,
+                evidence=json_loads(row.evidence_json) or {},
+                created_at=row.created_at,
+            ) for row in rows]
+
+    def list_for_run(self, run_id: str) -> list[ReplanSignal]:
+        with self.db.session() as session:
+            rows = session.execute(
+                select(ReplanSignalRow)
+                .where(ReplanSignalRow.run_id == run_id)
                 .order_by(ReplanSignalRow.created_at, ReplanSignalRow.id)
             ).scalars().all()
             return [ReplanSignal(

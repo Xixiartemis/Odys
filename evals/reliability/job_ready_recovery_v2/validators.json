@@ -1,0 +1,10 @@
+{
+  "external-observable-v1": {
+    "validator_id": "external-observable-v1",
+    "version": "1",
+    "shared_across_configurations": true,
+    "configuration_agnostic": true,
+    "checks": ["declared external observations"],
+    "rejects": ["agent_self_report", "configuration_specific_status", "completed_string_as_proof"]
+  }
+}

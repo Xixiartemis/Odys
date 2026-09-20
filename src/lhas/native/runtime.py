@@ -70,6 +70,7 @@ class ProviderFailureClassifier:
             if value:
                 text += " " + str(value)
         upper = text[:4000].upper()
+        error_name = type(error).__name__.upper()
         if "PROVIDER_RESPONSE_NOT_NORMALIZABLE" in upper:
             return ProviderFailureCategory.MALFORMED_PROVIDER_RESPONSE
         quota_evidence = (
@@ -91,9 +92,30 @@ class ProviderFailureClassifier:
             return ProviderFailureCategory.AUTH_INVALID
         if status == 429:
             return ProviderFailureCategory.TRANSIENT_RATE_LIMIT if transient_429_evidence else ProviderFailureCategory.UNKNOWN_PROVIDER_FAILURE
-        if isinstance(error, TimeoutError) or "TIMEOUT" in upper:
+        # OpenAI-compatible SDKs expose transport timeouts as
+        # ``APITimeoutError`` rather than Python's built-in TimeoutError.
+        # Keep that boundary typed as a provider timeout so a late SDK
+        # exception cannot become an unknown infrastructure failure.
+        if (
+            isinstance(error, TimeoutError)
+            or "TIMEOUT" in upper
+            or "TIMEOUT" in error_name
+            or "TIMED OUT" in upper
+        ):
             return ProviderFailureCategory.PROVIDER_TIMEOUT
-        if status in {408, 425, 500, 502, 503, 504} or any(token in upper for token in ("UNAVAILABLE", "CONNECTION RESET", "SERVICE DOWN")):
+        if status in {408, 425, 500, 502, 503, 504} or any(
+            token in upper
+            for token in (
+                "UNAVAILABLE",
+                "CONNECTION RESET",
+                "CONNECTION ERROR",
+                "SERVICE DOWN",
+                "APICONNECTIONERROR",
+                "CONNECTERROR",
+            )
+        ) or any(
+            token in error_name for token in ("APICONNECTIONERROR", "CONNECTERROR")
+        ):
             return ProviderFailureCategory.PROVIDER_UNAVAILABLE
         return ProviderFailureCategory.UNKNOWN_PROVIDER_FAILURE
 

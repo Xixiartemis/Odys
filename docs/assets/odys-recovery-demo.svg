@@ -1,0 +1,55 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1000" height="520" viewBox="0 0 1000 520" role="img" aria-labelledby="title desc">
+  <title id="title">Odys recovery control plane demo trace</title>
+  <desc id="desc">A sanitized frozen-trace visualization from fault detection through external validation.</desc>
+  <style>
+    .bg { fill: #ffffff; }
+    .card { fill: #f6f8fa; stroke: #d0d7de; }
+    .line { stroke: #8b949e; stroke-width: 3; }
+    .ink { fill: #24292f; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    .muted { fill: #57606a; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    .title { font-size: 26px; font-weight: 700; }
+    .label { font-size: 17px; font-weight: 700; }
+    .detail { font-size: 14px; }
+    .accent { fill: #0969da; }
+    .success { fill: #1a7f37; }
+    @media (prefers-color-scheme: dark) {
+      .bg { fill: #0d1117; }
+      .card { fill: #161b22; stroke: #30363d; }
+      .line { stroke: #8b949e; }
+      .ink { fill: #e6edf3; }
+      .muted { fill: #8b949e; }
+      .accent { fill: #58a6ff; }
+      .success { fill: #3fb950; }
+    }
+  </style>
+  <rect class="bg" width="1000" height="520" rx="18"/>
+  <text class="ink title" x="42" y="54">Recovery Control Plane · frozen trace replay</text>
+  <text class="muted detail" x="42" y="81">Provider-free visualization · replace with frozen-trace GIF later</text>
+
+  <line class="line" x1="126" y1="138" x2="126" y2="438"/>
+  <circle class="accent" cx="126" cy="138" r="9"/>
+  <circle class="accent" cx="126" cy="198" r="9"/>
+  <circle class="accent" cx="126" cy="258" r="9"/>
+  <circle class="accent" cx="126" cy="318" r="9"/>
+  <circle class="accent" cx="126" cy="378" r="9"/>
+  <circle class="success" cx="126" cy="438" r="9"/>
+
+  <rect class="card" x="166" y="108" width="760" height="60" rx="10"/>
+  <text class="ink label" x="192" y="135">FAULT</text>
+  <text class="muted detail" x="310" y="136">tool effect denied · no effective progress</text>
+  <rect class="card" x="166" y="168" width="760" height="60" rx="10"/>
+  <text class="ink label" x="192" y="195">PROGRESS</text>
+  <text class="muted detail" x="310" y="196">STATE_OSCILLATION · stalled execution detected</text>
+  <rect class="card" x="166" y="228" width="760" height="60" rx="10"/>
+  <text class="ink label" x="192" y="255">CONTROL</text>
+  <text class="muted detail" x="310" y="256">MACRO_REPLAN · bounded root recovery authority</text>
+  <rect class="card" x="166" y="288" width="760" height="60" rx="10"/>
+  <text class="ink label" x="192" y="315">BUDGET</text>
+  <text class="muted detail" x="310" y="316">15 / 20 calls remaining · alternate strategy accepted</text>
+  <rect class="card" x="166" y="348" width="760" height="60" rx="10"/>
+  <text class="ink label" x="192" y="375">MUTATION</text>
+  <text class="muted detail" x="310" y="376">request-scoped workspace.edit_lines · SUCCESS</text>
+  <rect class="card" x="166" y="408" width="760" height="60" rx="10"/>
+  <text class="ink label" x="192" y="435">VALIDATION</text>
+  <text class="success label" x="350" y="436">external validator ACCEPTED · VERIFIED</text>
+</svg>

@@ -1,3 +1,4 @@
+from collections.abc import Mapping
 from typing import Any
 from lhas.domain.enums import EventType, ExecutionStatus
 from lhas import HARNESS_VERSION
@@ -9,6 +10,7 @@ from lhas.persistence.repositories import TaskRepository, RunRepository, Attempt
 from lhas.persistence.planning_repositories import GoalRepository, PlanRepository
 from lhas.native.persistence import ReplanSignalRepository
 from lhas.native.models import ReplanSignal
+from lhas.orchestrator import Orchestrator
 from lhas.orchestrator_v2 import RecoveringOrchestrator
 from lhas.persistence.phaseb_repos import FailureReportRepository
 from lhas.planning.models import (
@@ -18,13 +20,64 @@ from lhas.planning.models import (
 )
 from lhas.planning.scheduler import TaskGraphScheduler, build_step_dependency_context
 from lhas.planning.planner import Planner
+from lhas.planning.execution_contract import active_step_execution_contract, contract_telemetry
 from lhas.planning.replan import MacroReplanService
-from lhas.planning.replan_policy import ReplanTriggerPolicy
+from lhas.planning.replan_policy import ReplanTrigger, ReplanTriggerPolicy
+from lhas.recovery_control import TYPED_ESCALATION_REASONS
 from lhas.tools.registry import ToolRegistry
 from lhas.tools.protocol import ToolRequest, ToolResultStatus
 
 from lhas.tools.invocation import invoke_via_contract
 from lhas.tools.contract import ToolContract
+
+
+def _native_tool_contract_evidence(result_payload: dict[str, Any]) -> dict[str, Any]:
+    """Project only successful native ToolContract outputs as trusted evidence.
+
+    A native agent's final text remains an ``AGENT_CLAIM``.  The native kernel
+    also records bounded observations returned by the ToolContract, however;
+    those observations are independently produced by the concrete tool and
+    are safe for the existing WorkflowVerifier evidence gate.  Failed tool
+    observations and all model text are deliberately excluded.
+    """
+    native = result_payload.get("raw")
+    safe_trace = native.get("safe_trace") if isinstance(native, dict) else None
+    if not isinstance(safe_trace, list):
+        return {}
+    evidence: dict[str, Any] = {}
+    for observation in safe_trace:
+        if not isinstance(observation, dict) or observation.get("status") != "SUCCESS":
+            continue
+        bounded_output = observation.get("bounded_output")
+        if isinstance(bounded_output, dict):
+            evidence.update(bounded_output)
+    return evidence
+
+
+def _step_evidence_record(
+    *,
+    step: Any,
+    result_payload: dict[str, Any],
+    output: Any,
+    usage: Any,
+    default_provenance: str,
+) -> dict[str, Any]:
+    """Build execution evidence without promoting agent text to trust."""
+    artifacts = dict(result_payload.get("artifacts") or {})
+    native_tool_evidence = _native_tool_contract_evidence(result_payload)
+    artifacts.update(native_tool_evidence)
+    return {
+        "capability": step.capability,
+        "output": output,
+        "artifacts": artifacts,
+        "usage": usage or {},
+        "provenance": (
+            "TOOL_CONTRACT_EVIDENCE"
+            if native_tool_evidence
+            else default_provenance
+        ),
+    }
+
 
 class _ToolExecutor:
     name = "ToolRegistryExecutor"
@@ -37,7 +90,7 @@ class _ToolExecutor:
         try: tool = self.registry.resolve(self.step.capability)
         except KeyError as exc: return ExecutionResult(status=ExecutionStatus.FAILURE, error_type="UNKNOWN_CAPABILITY", error_message=str(exc))
         tr = ToolRequest(tool_call_id=new_id(), task_id=request.task_id, run_id=request.run_id, attempt_id=request.attempt_id,
-                         capability=self.step.capability, tool_name=self.step.capability, arguments=self.step.inputs, context={**self.context, **request.context}, metadata=request.metadata)
+                         capability=self.step.capability, tool_name=self.step.capability, arguments=self.step.inputs, context={**self.context, **request.context}, execution_control=request.execution_control, metadata=request.metadata)
         safe_request={"tool_call_id":tr.tool_call_id,"capability":tr.capability}
         event.append(EventType.TOOL_CALL_STARTED, task_id=request.task_id, run_id=request.run_id, attempt_id=request.attempt_id, payload={"request":safe_request})
         try:
@@ -82,7 +135,62 @@ class _TaskGraphAgentExecutor:
                 return ExecutionResult(status=ExecutionStatus.FAILURE, error_type="STALE_PLAN", error_message="plan version is no longer authoritative")
         completed=[item.id for item in self.plan.steps if item.status in {PlanStepStatus.COMPLETED, PlanStepStatus.VERIFIED}]
         pending=[item.id for item in self.plan.steps if item.id != self.step.id and item.status in {PlanStepStatus.PENDING,PlanStepStatus.READY,PlanStepStatus.RUNNING}]
-        context={**request.context,"taskgraph":{"plan_id":self.plan.id,"active_node":self.step.id,"completed_nodes":completed,"pending_nodes":pending,"depends_on":list(self.step.depends_on)}}
+        active_contract = active_step_execution_contract(self.step, self.plan)
+        context={
+            **request.context,
+            "taskgraph": {
+                "plan_id": self.plan.id,
+                "active_node": self.step.id,
+                "completed_nodes": completed,
+                "pending_nodes": pending,
+                "depends_on": list(self.step.depends_on),
+                "active_step_contract": active_contract,
+            },
+            "active_step_contract": active_contract,
+            # A canonical PlanStep is the execution authority.  Do not let
+            # task-wide fallback capabilities widen the active step.
+            "allowed_capabilities": [self.step.capability],
+            "acceptance_criteria": list(self.step.success_criteria),
+            "execution_contract_telemetry": contract_telemetry(active_contract),
+        }
+        runtime_context = self.step.execution_context.get("runtime", {})
+        if isinstance(runtime_context, Mapping):
+            repair_context = runtime_context.get("repair_context")
+            if isinstance(repair_context, Mapping):
+                context["repair_context"] = dict(repair_context)
+            progress_config = runtime_context.get("_repair_progress_config")
+            if isinstance(progress_config, Mapping):
+                context["_repair_progress_config"] = dict(progress_config)
+            for runtime_key in (
+                "_replan_budget_guard",
+                "_repair_budget_guard",
+                "execution_phase",
+                "external_validator_authority",
+            ):
+                if runtime_key in runtime_context:
+                    context[runtime_key] = runtime_context[runtime_key]
+            # A recovery coordinator may already have constructed the
+            # authoritative controller with the arm-specific escalation
+            # policy. Reuse that in-process object instead of silently
+            # creating a second default NO_PROGRESS_AWARE controller.
+            supplied_controller = runtime_context.get("_recovery_controller")
+            if supplied_controller is not None and runtime_context.get(
+                "recovery_control_plane_v2"
+            ):
+                context["_recovery_controller"] = supplied_controller
+                context["recovery_control_plane_v2"] = True
+            elif runtime_context.get("recovery_control_plane_v2") and self.db is not None:
+                from lhas.recovery_control import RecoveryController
+
+                context["_recovery_controller"] = RecoveryController(
+                    db=self.db,
+                    task_id=str(request.task_id),
+                    run_id=str(request.run_id),
+                    attempt_id=str(request.attempt_id),
+                    step_id=self.bound_step_id,
+                    expected_effects=dict(self.step.expected_effects),
+                )
+                context["recovery_control_plane_v2"] = True
         return await self.executor.execute(request.model_copy(update={"context":context}))
     async def resume(self, request): return await self.execute(request)
     async def cancel(self, run_id): return await self.executor.cancel(run_id)
@@ -95,11 +203,13 @@ class PlanExecutionService:
     LINEAR remains a legacy execution path and is intentionally outside the
     P3.3 selective-repair contract.
     """
-    def __init__(self, db: Database, planner: Planner, registry: ToolRegistry, agent_executor_factory=None, tool_contract=None, capability_registry=None, workflow_verifier=None):
+    def __init__(self, db: Database, planner: Planner, registry: ToolRegistry, agent_executor_factory=None, tool_contract=None, capability_registry=None, workflow_verifier=None, execution_control=None, effect_policy=None):
         self.db, self.planner, self.registry, self.agent_executor_factory = db, planner, registry, agent_executor_factory
         # P3.1 verification seam: explicit verifier only, default=None (fail-closed)
         # No auto-verify, no implicit accept-all, no compatibility flag
         self.workflow_verifier = workflow_verifier
+        self.execution_control = execution_control
+        self.effect_policy = effect_policy
         # If no explicit tool_contract provided, build one from default_capabilities()
         # (NOT from ToolRegistry — that would be reverse synthesis)
         if tool_contract is None and capability_registry is None:
@@ -274,10 +384,33 @@ class PlanExecutionService:
         )
         return provenance, scope, affected_ids
 
-    def _prepare_inline_local_repair(self, step, provenance, scope, events, plan_id, producing_attempt_id=None) -> bool:
-        """Persist pending LOCAL repair context before the next dispatch."""
+    def _prepare_inline_local_repair(
+        self,
+        step,
+        provenance,
+        scope,
+        events,
+        plan_id,
+        producing_attempt_id=None,
+        repair_budget_guard=None,
+    ) -> bool:
+        """Persist pending LOCAL repair context before the next dispatch.
+
+        A supplied root lease guard is the only authority allowed to mint a
+        new repair.  The step-local counter remains lineage evidence and is
+        only a compatibility fallback for callers without a root budget.
+        """
         repair_count = int(step.evidence.get("repair_attempt_count", 0))
         max_repair = int(step.budget.get("max_repair_attempts", 3))
+        if callable(repair_budget_guard) and not repair_budget_guard():
+            self._emit(EventType.REPAIR_COMPLETED, {
+                "plan_id": plan_id,
+                "repair_step_ids": [step.id],
+                "outcome": "BUDGET_EXHAUSTED",
+                "error_type": "REPAIR_BUDGET_EXHAUSTED",
+                "repair_attempt_count": repair_count,
+            })
+            return False
         if repair_count >= max_repair:
             return False
         original_attempt_id = step.evidence.get("original_failure_attempt_id")
@@ -338,7 +471,26 @@ class PlanExecutionService:
         if not attempts:
             return
         signal_repo = ReplanSignalRepository(self.db)
-        if any(signal_repo.list_for_attempt(attempt.id) for attempt in attempts):
+        existing = [
+            signal
+            for attempt in attempts
+            for signal in signal_repo.list_for_attempt(attempt.id)
+        ]
+        if any(signal.failed_node_id == step.id for signal in existing):
+            return
+        # CompletionAuthority cannot know the enclosing plan step, so its
+        # durable validator-rejection signal may intentionally have no node.
+        # Enrich that same signal at the planning boundary instead of creating
+        # a duplicate; this gives scoped replan policy a real failed node.
+        if existing:
+            signal = existing[-1]
+            signal.failed_node_id = step.id
+            signal.evidence = {
+                **dict(signal.evidence or {}),
+                "failed_node_id_bound_by": "PlanExecutionService",
+                "failed_node_id": step.id,
+            }
+            signal_repo.update(signal)
             return
         trigger = ReplanTriggerPolicy(self.db).evaluate(step=step, run_id=run_id)
         if trigger is None:
@@ -358,20 +510,83 @@ class PlanExecutionService:
         signal_repo.create(signal)
         self._emit(EventType.REPLAN_SIGNAL_CREATED, {"signal_id": signal.id, "reason": signal.reason, "failed_node_id": step.id})
     async def _maybe_replan(self, goal, plan, run_id: str, context: dict[str, Any]) -> bool:
+        # Official benchmark recovery has one bounded repair boundary. A
+        # replan here would create another durable attempt tree.
+        if context.get("official_benchmark_recovery"):
+            return False
         attempts = AttemptRepository(self.db).list_for_run(run_id)
         signals = []
         repo = ReplanSignalRepository(self.db)
         for attempt in attempts:
             signals.extend(repo.list_for_attempt(attempt.id))
+        benchmark_run_id = plan.metadata.get("benchmark_run_id")
+        if benchmark_run_id:
+            known_signal_ids = {signal.id for signal in signals}
+            signals.extend(
+                signal
+                for signal in repo.list_for_run(str(benchmark_run_id))
+                if signal.id not in known_signal_ids
+            )
+        # A completion authority emits validator-rejection truth before the
+        # plan service knows which PlanStep owns the attempt.  Bind that
+        # missing node now, at the planning boundary, so scoped macro replan
+        # has a durable target without changing validator semantics.
+        run = RunRepository(self.db).get(run_id)
+        bound_step = (
+            next(
+                (
+                    item
+                    for item in plan.steps
+                    if run is not None and item.task_id == run.task_id
+                ),
+                None,
+            )
+            if run is not None
+            else None
+        )
+        if bound_step is not None:
+            for signal in signals:
+                if signal.failed_node_id is None:
+                    signal.failed_node_id = bound_step.id
+                    signal.evidence = {
+                        **dict(signal.evidence or {}),
+                        "failed_node_id_bound_by": "PlanExecutionService",
+                        "failed_node_id": bound_step.id,
+                    }
+                    repo.update(signal)
         consumed = set(plan.metadata.get("consumed_replan_signal_ids", []))
         signals = [signal for signal in signals if signal.id not in consumed]
         if not signals:
             return False
+        replan_budget_guard = context.get("_replan_budget_guard")
+        if callable(replan_budget_guard) and not replan_budget_guard():
+            self._emit(
+                EventType.REPLAN_REJECTED,
+                {
+                    "plan_id": plan.id,
+                    "reason": "MACRO_REPLAN_RESERVE_EXHAUSTED",
+                    "error_type": "REPLAN_BUDGET_EXHAUSTED",
+                },
+            )
+            return False
         result = await MacroReplanService(self.db, self.planner).consume(
             goal=goal, plan=plan, signals=signals, context={**context, "capabilities": self._planner_capabilities()}
         )
+        if result.accepted:
+            # Execution-local experiment policy hook.  It is deliberately
+            # generic so the planner remains independent of Phase 4; the
+            # hook flips effect authority before the caller dispatches the
+            # newly replanned strategy.
+            effect_policy = self.effect_policy or context.get("_phase_effect_policy")
+            mark_replan = getattr(effect_policy, "mark_replan_accepted", None)
+            if callable(mark_replan):
+                mark_replan()
+            # Propagate the durable strategy boundary to the next native
+            # attempt so event correlation cannot rely on event order.
+            context["execution_phase"] = "post_replan"
         return result.accepted
     async def execute_goal(self, goal: Goal, *, context: dict[str, Any] | None = None, experiment_id: str | None = None, approved_step_ids: set[str] | None = None, resume_plan_id: str | None = None, repair_step_ids: set[str] | None = None) -> Plan:
+        context = dict(context or {})
         self._emit(EventType.GOAL_CREATED, {"goal": goal.model_dump(mode="json")})
         GoalRepository(self.db).create(goal)
         plans = PlanRepository(self.db)
@@ -433,12 +648,31 @@ class PlanExecutionService:
                     self._emit(EventType.HUMAN_APPROVAL_REQUIRED, {"plan_id": plan.id, "step_id": step.id, "capability": step.capability})
                     plans.update(plan); return plan
                 step.execution_context = dict(execution_context)
-                task = Task(project_id=goal.project_id, title=step.title, objective=step.objective, constraints=goal.constraints, acceptance_criteria=step.success_criteria, max_attempts=2)
+                task = Task(
+                    project_id=goal.project_id,
+                    title=step.title,
+                    objective=step.objective,
+                    constraints=goal.constraints,
+                    acceptance_criteria=step.success_criteria,
+                    max_attempts=(
+                        1
+                        if (
+                            context.get("official_benchmark_recovery")
+                            or context.get("external_validator_authority")
+                        )
+                        else 2
+                    ),
+                )
                 task_repo.create(task); step.task_id = task.id
                 transition_step(step, PlanStepStatus.RUNNING, "dispatch", events, plan_id=plan.id)
                 self._emit(EventType.PLAN_STEP_STARTED, {"plan_id": plan.id, "step_id": step.id, "task_id": task.id})
                 plans.update(plan)
-                orch = RecoveringOrchestrator(self.db, executor_factory=lambda s=step,p=plan: self._step_executor(p,s,execution_context), executor_type="TaskGraphAgentExecutor" if self.agent_executor_factory else "ToolRegistryExecutor", provider="native-kernel" if self.agent_executor_factory else "tool-registry", model="provider-adapter" if self.agent_executor_factory else "deterministic", harness_version=HARNESS_VERSION, dataset_version="PLANNING-V0.1", experiment_id=experiment_id)
+                orchestrator_type = (
+                    Orchestrator
+                    if context.get("external_validator_authority")
+                    else RecoveringOrchestrator
+                )
+                orch = orchestrator_type(self.db, executor_factory=lambda s=step,p=plan: self._step_executor(p,s,execution_context), executor_type="TaskGraphAgentExecutor" if self.agent_executor_factory else "ToolRegistryExecutor", provider="native-kernel" if self.agent_executor_factory else "tool-registry", model="provider-adapter" if self.agent_executor_factory else "deterministic", harness_version=HARNESS_VERSION, dataset_version="PLANNING-V0.1", experiment_id=experiment_id, execution_control=self.execution_control)
                 run = await orch.execute_task(task.id)
                 if run.status.value != "COMPLETED":
                     transition_step(step, PlanStepStatus.FAILED, "run_failed", events, plan_id=plan.id)
@@ -460,7 +694,13 @@ class PlanExecutionService:
                     except json.JSONDecodeError: pass
                 attempts = AttemptRepository(self.db).list_for_run(run.id)
                 raw = json.loads(attempts[-1].executor_result or "{}") if attempts and attempts[-1].executor_result else {}
-                record = {"capability": step.capability, "output": step.output, "artifacts": raw.get("artifacts", {}), "usage": raw.get("usage", {}), "provenance": self._evidence_provenance}
+                record = _step_evidence_record(
+                    step=step,
+                    result_payload=raw,
+                    output=step.output,
+                    usage=raw.get("usage", {}),
+                    default_provenance=self._evidence_provenance,
+                )
                 execution_context["steps"][step.id] = record
                 execution_context[step.capability] = record
                 step.execution_context = dict(execution_context)
@@ -524,6 +764,22 @@ class PlanExecutionService:
         if failed_step is None:
             raise KeyError(f"step not found: {failed_step_id}")
 
+        # The official benchmark has one explicit recovery boundary.  A
+        # second entry would create another durable repair Run/Attempt and
+        # make a bounded repair look like an unbounded retry loop.
+        if (
+            context
+            and context.get("official_benchmark_recovery")
+            and plan.metadata.get("official_repair_execution_started")
+        ):
+            self._emit(EventType.REPAIR_COMPLETED, {
+                "plan_id": plan.id,
+                "repair_step_ids": [failed_step_id],
+                "outcome": "REENTRY_BLOCKED",
+                "bounded_recovery": True,
+            })
+            return plan
+
         # Compute repair scope using the canonical authority
         provenance = failed_step.evidence.get("failure_provenance", {})
         scope, affected_ids = compute_repair_scope(
@@ -531,10 +787,71 @@ class PlanExecutionService:
             failure_class=provenance.get("failure_class"),
             error_type=provenance.get("failure_type"),
         )
+        # A NO_PROGRESS_AWARE initial attempt may already have emitted a
+        # durable typed control signal before external validation runs.  Let
+        # the canonical replan policy consume that signal immediately instead
+        # of starting one more local repair attempt.  LEGACY_BOUNDED does not
+        # emit these signals and therefore retains its existing scope.
+        if (
+            context
+            and context.get("recovery_control_plane_v2")
+            and str(context.get("escalation_trigger_policy", "")).upper()
+            == "NO_PROGRESS_AWARE"
+        ):
+            signal_run_id = str(
+                provenance.get("run_id")
+                or context.get("benchmark_run_id")
+                or ""
+            )
+            trigger = (
+                ReplanTriggerPolicy(self.db).evaluate(
+                    step=failed_step,
+                    run_id=signal_run_id,
+                )
+                if signal_run_id
+                else None
+            )
+            if trigger is None and signal_run_id:
+                # The native controller's run-scoped signal is authoritative
+                # even when the Attempt projection is not yet linked to the
+                # planning step.  Re-read that same durable run projection
+                # here rather than silently falling back to LOCAL repair.
+                run_signals = [
+                    item
+                    for item in ReplanSignalRepository(self.db).list_for_run(
+                        signal_run_id
+                    )
+                    if item.reason in TYPED_ESCALATION_REASONS
+                ]
+                if run_signals:
+                    signal = run_signals[-1]
+                    trigger = ReplanTrigger(
+                        reason=signal.reason,
+                        evidence={
+                            "source": "DURABLE_RUN_REPLAN_SIGNAL",
+                            "signal_id": signal.id,
+                            "capability": failed_step.capability,
+                            **dict(signal.evidence or {}),
+                        },
+                    )
+            if trigger is not None and trigger.reason in TYPED_ESCALATION_REASONS:
+                scope = RepairScope.MACRO_REPLAN
+                failed_step.evidence["recovery_control_escalation"] = {
+                    "reason": trigger.reason,
+                    "evidence": dict(trigger.evidence),
+                }
 
         # MACRO_REPLAN: invoke canonical macro replan path, NOT local repair
         if scope == RepairScope.MACRO_REPLAN:
             self._record_step_replan_signal(failed_step, provenance.get("run_id", ""))
+            # The official benchmark recovery bridge owns exactly one
+            # bounded repair boundary.  A macro classification is evidence
+            # that this boundary cannot repair locally; entering the normal
+            # planner here would create a second attempt/replan tree and
+            # reset the provider budget.  Preserve the signal and return.
+            if context and context.get("official_benchmark_recovery"):
+                plans.update(plan)
+                return plan
             if await self._maybe_replan(goal, plan, provenance.get("run_id", ""), context):
                 plan = plans.get(plan_id) or plan
             return plan
@@ -546,6 +863,16 @@ class PlanExecutionService:
         # Check repair budget
         repair_count = failed_step.evidence.get("repair_attempt_count", 0)
         max_repair_attempts = failed_step.budget.get("max_repair_attempts", 3)
+        repair_budget_guard = context.get("_repair_budget_guard") if context else None
+        if callable(repair_budget_guard) and not repair_budget_guard():
+            self._emit(EventType.REPAIR_COMPLETED, {
+                "plan_id": plan.id,
+                "repair_step_ids": sorted(repair_scope),
+                "outcome": "BUDGET_EXHAUSTED",
+                "error_type": "REPAIR_BUDGET_EXHAUSTED",
+                "repair_attempt_count": repair_count,
+            })
+            return plan
         if repair_count >= max_repair_attempts:
             self._emit(EventType.REPAIR_COMPLETED, {
                 "plan_id": plan.id,
@@ -607,8 +934,35 @@ class PlanExecutionService:
         plans=PlanRepository(self.db); tasks=TaskRepository(self.db); scheduler=TaskGraphScheduler()
         events=EventStore(self.db)
         execution_context={"runtime":{**context,"goal_id":goal.id},"steps":{}}
+
+        def _mark_post_replan_execution() -> None:
+            # The root context is mutable, but step contexts are projected from
+            # this execution_context snapshot at dispatch time. Keep both
+            # authorities aligned so post-replan native events carry the
+            # durable strategy boundary.
+            context["execution_phase"] = "post_replan"
+            execution_context["runtime"]["execution_phase"] = "post_replan"
+            if context.get("_external_validator_on_replan"):
+                context["external_validator_authority"] = True
+                execution_context["runtime"]["external_validator_authority"] = True
         # Phase 3.3 — Repair mode: invalidate repair targets to PENDING
         if repair_step_ids:
+            if (
+                context.get("official_benchmark_recovery")
+                and plan.metadata.get("official_repair_execution_started")
+            ):
+                self._emit(EventType.REPAIR_COMPLETED, {
+                    "plan_id": plan.id,
+                    "repair_step_ids": sorted(repair_step_ids),
+                    "outcome": "REENTRY_BLOCKED",
+                    "bounded_recovery": True,
+                })
+                plan.status = PlanStatus.FAILED
+                plans.update(plan)
+                return plan
+            if context.get("official_benchmark_recovery"):
+                plan.metadata["official_repair_execution_started"] = True
+                plans.update(plan)
             self._emit(EventType.REPAIR_STARTED, {"plan_id": plan.id, "repair_step_ids": sorted(repair_step_ids)})
             _TERMINAL_REPAIRABLE = {PlanStepStatus.FAILED, PlanStepStatus.CLASSIFIED_FAILURE, PlanStepStatus.BLOCKED, PlanStepStatus.STALE, PlanStepStatus.PRECONDITION_FAILED}
             # Reset repair targets to PENDING
@@ -631,13 +985,23 @@ class PlanExecutionService:
             if s.status == PlanStepStatus.CLAIMED_COMPLETE:
                 execution_context["steps"][s.id]=s.execution_context.get("steps",{}).get(s.id,{"capability":s.capability,"output":s.output,"artifacts":{}, "usage":{}})
                 if self.workflow_verifier is not None:
-                    vresult = self.workflow_verifier.verify(s, plan, events)
-                    if vresult.accepted:
-                        transition_step(s, PlanStepStatus.VERIFIED, "deferred_verification_accepted", events, plan_id=plan.id)
+                    if context.get("external_validator_authority"):
+                        transition_step(s, PlanStepStatus.WAITING_FOR_VERIFICATION, "awaiting_external_validator", events, plan_id=plan.id)
                     else:
-                        provenance, scope, affected_ids = self._handle_verification_rejection(s, plan, vresult, events)
-                        if provenance is not None and scope == RepairScope.LOCAL:
-                            self._prepare_inline_local_repair(s, provenance, scope, events, plan.id)
+                        vresult = self.workflow_verifier.verify(s, plan, events)
+                        if vresult.accepted:
+                            transition_step(s, PlanStepStatus.VERIFIED, "deferred_verification_accepted", events, plan_id=plan.id)
+                        else:
+                            provenance, scope, affected_ids = self._handle_verification_rejection(s, plan, vresult, events)
+                            if provenance is not None and scope == RepairScope.LOCAL:
+                                self._prepare_inline_local_repair(
+                                    s,
+                                    provenance,
+                                    scope,
+                                    events,
+                                    plan.id,
+                                    repair_budget_guard=context.get("_repair_budget_guard"),
+                                )
                 else:
                     transition_step(s, PlanStepStatus.WAITING_FOR_VERIFICATION, "deferred_no_verifier", events, plan_id=plan.id)
         plans.update(plan)
@@ -676,10 +1040,21 @@ class PlanExecutionService:
 
                 transition_step(step, PlanStepStatus.RUNNING, "dispatch", events, plan_id=plan.id)
                 step.execution_context=build_step_dependency_context(plan,step,execution_context)
-                task=Task(project_id=goal.project_id,title=step.title,objective=step.objective,constraints=goal.constraints,acceptance_criteria=step.success_criteria,max_attempts=2); tasks.create(task); step.task_id=task.id
+                task=Task(project_id=goal.project_id,title=step.title,objective=step.objective,constraints=goal.constraints,acceptance_criteria=step.success_criteria,max_attempts=1 if (context.get("official_benchmark_recovery") or context.get("external_validator_authority")) else 2,timeout_seconds=float(context.get("timeout_seconds", 60.0))); tasks.create(task); step.task_id=task.id
                 self._emit(EventType.PLAN_STEP_STARTED,{"plan_id":plan.id,"step_id":step.id,"task_id":task.id})
                 plans.update(plan)
-                orch=RecoveringOrchestrator(self.db,executor_factory=lambda s=step,p=plan: self._step_executor(p,s,step.execution_context),executor_type="TaskGraphAgentExecutor" if self.agent_executor_factory else "ToolRegistryExecutor",provider="native-kernel" if self.agent_executor_factory else "tool-registry",model="provider-adapter" if self.agent_executor_factory else "deterministic",harness_version=HARNESS_VERSION,dataset_version="PLANNING-V0.1",experiment_id=experiment_id)
+                # When the benchmark's external validator owns acceptance, do not place the
+                # inner Phase-B RuleValidator in front of it. That validator cannot see the
+                # fixture's authoritative state; rejecting its candidate would make
+                # RecoveringOrchestrator create a second attempt after a committed mutation.
+                # The base orchestrator stops at the executor result, leaving the PlanStep in
+                # WAITING_FOR_VERIFICATION for the external gate.
+                orchestrator_type = (
+                    Orchestrator
+                    if context.get("external_validator_authority")
+                    else RecoveringOrchestrator
+                )
+                orch=orchestrator_type(self.db,executor_factory=lambda s=step,p=plan: self._step_executor(p,s,step.execution_context),executor_type="TaskGraphAgentExecutor" if self.agent_executor_factory else "ToolRegistryExecutor",provider="native-kernel" if self.agent_executor_factory else "tool-registry",model="provider-adapter" if self.agent_executor_factory else "deterministic",harness_version=HARNESS_VERSION,dataset_version="PLANNING-V0.1",experiment_id=experiment_id,execution_control=self.execution_control)
                 run=await orch.execute_task(task.id)
                 if not self._finalize_inline_repair_lineage(step, plan, run):
                     plan.status = PlanStatus.FAILED
@@ -696,6 +1071,19 @@ class PlanExecutionService:
                         failure_class=provenance.get("failure_class"),
                         error_type=provenance.get("failure_type"),
                     )
+                    # The official benchmark owns one explicit recovery
+                    # boundary. Do not let a failed repair recursively enter
+                    # the service's inline-repair/replan loop.
+                    if context.get("official_benchmark_recovery"):
+                        plan.status = PlanStatus.FAILED
+                        plans.update(plan)
+                        self._emit(EventType.REPAIR_COMPLETED, {
+                            "plan_id": plan.id,
+                            "repair_step_ids": [step.id],
+                            "outcome": "FAILED",
+                            "bounded_recovery": True,
+                        })
+                        return plan
                     if scope == RepairScope.AFFECTED_SUBGRAPH:
                         # Exclude the failed step itself — it's already FAILED
                         dependent_ids = affected_ids - {step.id}
@@ -706,6 +1094,7 @@ class PlanExecutionService:
                     elif scope == RepairScope.MACRO_REPLAN:
                         self._record_step_replan_signal(step, run.id)
                         if await self._maybe_replan(goal, plan, run.id, context):
+                            _mark_post_replan_execution()
                             restart_authoritative_schedule = True; break
                         plans.update(plan); continue
                     else:
@@ -714,6 +1103,7 @@ class PlanExecutionService:
                         if self._prepare_inline_local_repair(
                             step, provenance_model, scope, events, plan.id,
                             producing_attempt_id=self._resolve_attempt_id_for_run(run.id),
+                            repair_budget_guard=context.get("_repair_budget_guard"),
                         ):
                             plans.update(plan)
                             continue
@@ -721,9 +1111,11 @@ class PlanExecutionService:
                             # Budget exhausted — escalate to replan
                             self._record_step_replan_signal(step, run.id)
                             if await self._maybe_replan(goal, plan, run.id, context):
+                                _mark_post_replan_execution()
                                 restart_authoritative_schedule = True; break
                             plans.update(plan); continue
-                if await self._maybe_replan(goal, plan, run.id, context):
+                if not context.get("official_benchmark_recovery") and await self._maybe_replan(goal, plan, run.id, context):
+                    _mark_post_replan_execution()
                     restart_authoritative_schedule = True
                     break
                 import json
@@ -732,7 +1124,13 @@ class PlanExecutionService:
                     try: step.output=json.loads(step.output)
                     except json.JSONDecodeError: pass
                 attempts=AttemptRepository(self.db).list_for_run(run.id); raw=json.loads(attempts[-1].executor_result or "{}") if attempts and attempts[-1].executor_result else {}
-                rec={"capability":step.capability,"output":step.output,"artifacts":raw.get("artifacts",{}),"usage":raw.get("usage",{}),"provenance":self._evidence_provenance}; execution_context["steps"][step.id]=rec
+                rec = _step_evidence_record(
+                    step=step,
+                    result_payload=raw,
+                    output=step.output,
+                    usage=raw.get("usage", {}),
+                    default_provenance=self._evidence_provenance,
+                ); execution_context["steps"][step.id] = rec
                 persisted_context=build_step_dependency_context(plan,step,execution_context); persisted_context["steps"][step.id]=rec; step.execution_context=persisted_context
 
                 # P3.1: run success → CLAIMED_COMPLETE
@@ -741,15 +1139,35 @@ class PlanExecutionService:
 
                 # Verification seam: explicit verifier only, default fail-closed
                 if self.workflow_verifier is not None:
-                    vresult = self.workflow_verifier.verify(step, plan, events)
-                    if vresult.accepted:
-                        transition_step(step, PlanStepStatus.VERIFIED, "verification_accepted", events, plan_id=plan.id)
+                    if context.get("external_validator_authority"):
+                        transition_step(step, PlanStepStatus.WAITING_FOR_VERIFICATION, "awaiting_external_validator", events, plan_id=plan.id)
                     else:
-                        provenance, scope, affected_ids = self._handle_verification_rejection(step, plan, vresult, events)
-                        if provenance is not None and scope == RepairScope.LOCAL:
-                            if self._prepare_inline_local_repair(step, provenance, scope, events, plan.id):
+                        vresult = self.workflow_verifier.verify(step, plan, events)
+                        if vresult.accepted:
+                            transition_step(step, PlanStepStatus.VERIFIED, "verification_accepted", events, plan_id=plan.id)
+                        else:
+                            provenance, scope, affected_ids = self._handle_verification_rejection(step, plan, vresult, events)
+                            if context.get("official_benchmark_recovery"):
+                                plan.status = PlanStatus.FAILED
                                 plans.update(plan)
-                                continue
+                                self._emit(EventType.REPAIR_COMPLETED, {
+                                    "plan_id": plan.id,
+                                    "repair_step_ids": [step.id],
+                                    "outcome": "FAILED",
+                                    "bounded_recovery": True,
+                                })
+                                return plan
+                            if provenance is not None and scope == RepairScope.LOCAL:
+                                if self._prepare_inline_local_repair(
+                                    step,
+                                    provenance,
+                                    scope,
+                                    events,
+                                    plan.id,
+                                    repair_budget_guard=context.get("_repair_budget_guard"),
+                                ):
+                                    plans.update(plan)
+                                    continue
                 else:
                     transition_step(step, PlanStepStatus.WAITING_FOR_VERIFICATION, "no_verifier_configured", events, plan_id=plan.id)
 

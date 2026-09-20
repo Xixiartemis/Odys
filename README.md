@@ -1,495 +1,251 @@
-<div>
 <p align="center">
-  <img src="./docs/assets/odys-logo.png" width="170" alt="Odys logo">
+  <img src="./docs/assets/odys-logo.png" width="150" alt="Odys logo">
 </p>
-</div>
 
-<div>
 <h1 align="center">Odys</h1>
-</div>
 
-<div>
 <p align="center">
-  <strong>面向长时任务 AI Agent 的可靠执行运行时</strong>
+  <strong>面向长任务 AI Agent 的恢复控制平面</strong>
 </p>
-</div>
 
-<div>
 <p align="center">
-  <em>Reliable execution for long-running AI agents.</em>
+  在执行失败或持续无进展时识别停滞、保留 Recovery Budget、安全重规划，并由真实环境验证任务是否真正完成。
 </p>
-</div>
 
-<div>
 <p align="center">
-  不只让 Agent “做事”，更让它能够证明任务真的完成了。
+  <em>Recovery Control Plane for Long-running AI Agents</em>
 </p>
-</div>
 
-<div>
 <p align="center">
   <a href="https://github.com/Xixiartemis/Odys/actions">
     <img src="https://img.shields.io/github/actions/workflow/status/Xixiartemis/Odys/test.yml?branch=main&style=flat-square" alt="CI">
   </a>
-  <a href="./LICENSE">
-    <img src="https://img.shields.io/github/license/Xixiartemis/Odys?style=flat-square" alt="License">
-  </a>
   <img src="https://img.shields.io/badge/python-%3E%3D3.11-blue?style=flat-square" alt="Python">
-  <img src="https://img.shields.io/badge/status-experimental-orange?style=flat-square" alt="Status">
+  <img src="https://img.shields.io/badge/status-experimental-orange?style=flat-square" alt="Experimental">
+  <img src="https://img.shields.io/badge/evidence-research-6f42c1?style=flat-square" alt="Research evidence">
 </p>
-</div>
 
-<div>
 <p align="center">
-  <a href="#-快速开始">快速开始</a> ·
+  <a href="#-实测恢复结果">实验结果</a> ·
   <a href="#-为什么是-odys">为什么是 Odys</a> ·
-  <a href="#-它是怎么工作的">工作原理</a> ·
-  <a href="#-架构">架构</a> ·
+  <a href="#-恢复控制平面-recovery-control-plane">恢复控制</a> ·
+  <a href="#-证据与可复现性">证据</a> ·
+  <a href="#-总体架构">总体架构</a> ·
+  <a href="#-快速开始">快速开始</a> ·
+  <a href="#-研究方向">研究方向</a> ·
   <a href="#-路线图">路线图</a>
 </p>
-</div>
 
 ---
 
-## Odys 是什么？
+<!-- This SVG is a provider-free fallback. Replace with a frozen-trace GIF later. -->
+<p align="center">
+  <img src="./docs/assets/odys-recovery-demo.svg" width="900" alt="Odys recovery control plane demo">
+</p>
 
-很多 Agent Runtime 擅长回答一个问题：
+> **Tool Success ≠ Task Progress ≠ Verified Completion**
 
-> **模型下一步应该做什么？**
+Odys 不把工具返回 `success`、模型声称 `done` 或一次 mutation 成功，直接当作任务完成。它负责在长时 Agent 的执行过程中识别停滞、保留恢复能力、接受受约束的重规划，并把最终完成权交给外部 Validator。
 
-Odys 更关注另一个问题：
+## 📊 实测恢复结果
 
-> **一个长时间运行的 Agent，怎么证明自己真的完成了任务？如果失败了，又如何可靠恢复？**
+Phase 4 / Attempt6 是一个真实 Provider 受控故障对照实验（scoped real-provider controlled-fault experiment）。在相同模型、Provider、任务、故障、Validator 和 20-call budget 下，对 Legacy Bounded 与 Odys V2 进行受控对照。
 
-Odys 是一个面向 **长时任务（long-horizon tasks）**  的实验性 Agent Runtime，重点研究：
+<p align="center">
+  <img src="./docs/assets/phase4-results.svg" width="1000" alt="Phase 4 measured recovery results">
+</p>
 
-* **可验证完成（Verified Completion）**
-* **持久化执行状态（Durable Execution State）**
-* **失败归因与恢复（Failure Provenance &amp; Recovery）**
-* **Checkpoint / Resume**
-* **Runtime Truth**
-* **按任务难度动态提升可靠性（Adaptive Reliability）**
+| 指标 | Legacy Bounded | Odys V2 |
+|---|---:|---:|
+| Validator-backed Recovery | 1 / 3 | **3 / 3** |
+| 首次 Replan | 19–20 calls | **2–5 calls** |
+| 首次 Replan 时剩余调用预算 | 0–1 / 20 | **15–18 / 20** |
 
-核心原则：
+Odys V2 在首次 Replan 时仍保留 15–18 / 20 的 root provider budget，即 75%–90%。简要结果是 Legacy 1/3、V2 3/3 的 validator-backed recovery。
 
-> **Agent 说 “done”，不等于任务真的完成。**
+> 这是 Phase 4 的受控故障机制实验结果，不代表跨任务、跨模型的通用性能结论。
 
-Odys 将执行和完成判定拆开：
+Attempt6 的 provider-call observations 为 Legacy 20 / 20 / 20、V2 6 / 6 / 3。由于 Legacy 与 V2 的 validator outcome 并不等价，不能把 aggregate provider-call/token difference 写成 same-quality cost saving。
+
+### V2 收敛结果
+
+在收紧 validation-candidate boundary 后，3/3 V2 runs 中 successful post-replan mutation 之后的冗余执行从 **8 → 0**。
+
+这里的 **8 → 0**（简写为 8→0）是 Attempt5 → Attempt6 的 **V2 convergence behavior**，不是 Legacy=8、Odys=0 的 baseline comparison：Attempt5 的 V2 runs 在成功 post-replan mutation 后仍出现 8 次冗余执行；Attempt6 的 3/3 V2 runs 均为 exactly one successful post-replan mutation、zero redundant post-success executions。
+
+### 因果链路
 
 ```text
-Agent 执行
-   ↓
-Completion Claim
-   ↓
-独立验证
-   ↓
-Verified Outcome
+controlled fault
+      ↓
+stalled / oscillating execution
+      ↓
+early recovery signal
+      ↓
+macro replan
+      ↓
+accepted strategy reaches actual model
+      ↓
+request-scoped tool authority
+      ↓
+real workspace mutation
+      ↓
+external validator
+      ↓
+validator-backed completion
 ```
 
-对于简单任务，运行时应该尽量轻量。
+## 🧭 恢复控制平面（Recovery Control Plane）
 
-对于复杂、长时、容易失败的任务，再逐步启用更强的验证、恢复、Checkpoint、Workflow 和 Replan 机制。
+```mermaid
+flowchart TD
+    A[Model / Agent] --> B[Tool Call]
+    B --> C[Observable State]
+    C --> D[Recovery Control Plane]
 
-> **North Star：用尽可能少的可靠性机制，换取一个真正被验证过的结果。**
+    D -->|progress| A
+    D -->|local failure| E[Local Repair]
+    D -->|strategy failure| F[Macro Replan]
+    D -->|validated candidate| G[External Validator]
+    D -->|budget / terminal condition| H[Terminate]
 
----
+    E --> A
+    F --> I[Plan → Model Execution Contract]
+    I --> A
 
-## ✨ 为什么是 Odys？
-
-长时 Agent 的问题，往往已经不只是 Prompt 问题。
-
-它们可能会：
-
-* 在任务仍然有错误时提前宣称完成；
-* 进程中断后丢掉大量已经完成的工作；
-* 重试时重复执行副作用；
-* 环境变化后继续执行已经过期的计划；
-* 失败后丢失真正的根因；
-* Provider / Model 已经切换，但 Runtime 状态仍记录旧目标；
-* 进程看似还活着，却长时间没有有效进展；
-* 在一个很简单的任务上消耗大量模型轮次和工具调用。
-
-Odys 把这些问题视为 **Runtime Semantics**，而不是单纯依赖更强的模型或更长的提示词。
-
-### 核心问题与机制
-
-| 问题                      | Odys 机制 |
-| --------------------------- | ----------- |
-| Agent 过早说“完成”      | **CompletionAuthority + Validator**          |
-| 长任务过程中进程中断      | **Durable Task / Run / Attempt**          |
-| 失败后继续执行            | **Failure Classification + Recovery**          |
-| 恢复后丢工作              | **Checkpoint / Resume**          |
-| 失败根因被泛化            | **Failure Provenance**          |
-| 计划与现实不一致          | **Selective Repair + Macro Replan**          |
-| Provider / Model 身份漂移 | **Runtime Truth**          |
-| “活着”但没有进展        | **Execution Liveness**          |
-| 简单任务也套重型 Harness  | **Adaptive Reliability Levels**          |
-
-Odys 不试图替代模型自己的微观推理。
-
-> **Odys 决定下一步必须达成什么“可验证结果”；Agent 自己决定怎么做到。**
-
----
-
-## 🚀 快速开始
-
-### 环境要求
-
-* Python 3.11+
-* Git
-* [`uv`](https://docs.astral.sh/uv/)
-
-Clone：
-
-```bash
-git clone https://github.com/Xixiartemis/Odys.git
-cd Odys
+    G -->|Accepted| J[Verified Completion]
+    G -->|Rejected| D
 ```
 
-安装完整开发依赖：
+四个核心机制：
 
-```bash
-uv sync --extra dev --extra live --extra agent
-```
+- **Observable Progress**：Tool success 不自动等于任务推进。
+- **Recovery Budget**：Local Repair 与 Macro Replan 共享受限的 root recovery authority。
+- **Plan → Model Execution Contract**：接受后的新策略必须真实约束模型可见能力与工具参数。
+- **External Validator**：Mutation 或模型 claim 都不能直接产生 VERIFIED。
 
-运行测试：
+Odys 还通过 **Side-effect Receipt** 记录副作用证据；对未知 commit state fail closed，而不是猜测已经成功。
 
-```bash
-uv run pytest
-```
+## ✨ 为什么是 Odys
 
-初始化：
+长任务 Agent 的失败不一定表现为显式异常。更常见的问题是：
 
-```bash
-uv run odys init-db
-```
+1. 工具返回 success，但任务没有真实推进。
+2. 重复修复持续消耗剩余调用预算。
+3. 新计划虽然被接受，却没有真正约束 model → tool 执行链。
+4. 一次 mutation 成功，不代表任务已经完成。
+5. 模型声称 done，也不能代表真实环境满足验收条件。
 
-### 运行一个 Native Agent 任务
-
-```bash
-uv run odys run \
-  --repo /path/to/project \
-  --kernel native \
-  --verify "pytest -q" \
-  "Fix the failing tests and verify the implementation."
-```
-
-Windows PowerShell：
-
-```powershell
-uv run odys run `
-  --repo D:\path\to\project `
-  --kernel native `
-  --verify "pytest -q" `
-  "Fix the failing tests and verify the implementation."
-```
-
-检查持久化 Run：
-
-```bash
-uv run odys inspect <RUN_ID>
-```
-
-Odys 特别强调：
+Odys 将这些问题视为 Runtime Control 问题，而不是单纯依赖更长 Prompt 或更多 Retry。
 
 ```text
-Agent 自己执行 pytest
-        ≠
-任务已经被验证
-
-模型说 “done”
-        ≠
-任务已经被验证
-
-Odys 的权威 Validator 接受证据
-        =
+Tool Success
+     ≠
+Task Progress
+     ≠
 Verified Completion
 ```
 
----
+## 🔎 证据与可复现性
 
-## 🧭 它是怎么工作的？
-
-一个最小 Odys 执行闭环：
+结果不是人工截图，而是沿着可追溯的 artifact identity 链路关联：
 
 ```text
-Goal
- │
- ▼
-┌──────────────────────┐
-│ Native Agent Runtime │
-│                      │
-│ Model → Tool         │
-│   ↑       ↓          │
-│ State ← Observation  │
-└──────────┬───────────┘
-           │
-           │ Completion Claim
-           ▼
-┌──────────────────────┐
-│ CompletionAuthority  │
-└──────────┬───────────┘
-           │
-           ▼
-┌──────────────────────┐
-│ Authoritative        │
-│ Validator            │
-└──────────┬───────────┘
-           │
-       ┌───┴────┐
-       │        │
-      PASS     FAIL
-       │        │
-       ▼        ▼
-   VERIFIED   CLASSIFY
-                │
-                ▼
-             RECOVER
+Commit SHA
+  → Protocol Hash
+  → Task Hash
+  → Fault Hash
+  → Raw Run
+  → Execution Trace
+  → External Validator
 ```
 
-Agent 负责微观执行：
+本次 README 使用的公开 machine-readable artifacts：
+
+- [Attempt6 public summary](docs/evidence/phase4-attempt6/summary.json) — 6/6 valid，provider executed=true。
+- [Attempt6 public experiment manifest](docs/evidence/phase4-attempt6/experiment-manifest.json) — protocol/task/fault/fixture/validator identity。
+- [Attempt6 public evidence notes](docs/evidence/phase4-attempt6/README.md) — claim scope、convergence boundary 与 sanitization notes。
+- [Phase 4 evidence boundary](docs/evidence/phase4.md) — historical Attempt5 evidence boundary；不要把它当作 Attempt6 全部事实的替代品。
+- [Evaluation protocol](docs/09_EVAL_PROTOCOL.md) — evaluation identity 与 reporting rules。
+- [Phase 5 generalization plan](docs/phase5-benchmark-plan.md) — future cross-task/fault/model study。
+- [Resume claim templates](docs/evidence/resume-claims.md) — conservative claim boundary。
+
+> Phase 4 结果报告 external validator-backed completion；durable finalization evidence 仍在 Phase 4 evidence record 中单独跟踪。
+
+## 🧱 当前能力 / 已测量结果
+
+### 当前能力
+
+- Native Agent Kernel
+- Durable Task / Run / Attempt
+- Failure classification / provenance
+- Recovery Control Plane
+- Observable Progress
+- Local Repair / Macro Replan
+- Plan → Model Execution Contract
+- Request-scoped Tool Authority
+- External validation boundary
+- Side-effect evidence / reconciliation
+- Runtime Truth
+
+### 已测量结果
+
+- Phase 4 controlled real-provider recovery experiment
+- 6/6 valid runs
+- V2: 3/3 validator-backed recovery
+- Legacy: 1/3 validator-backed recovery
+- Early replan with budget preservation
+- V2 convergence: redundant post-success execution 8 → 0
+
+
+
+## 🏗️ 总体架构
+
+Odys 的长期目标是构建一个 **可靠且高效的长任务 Agent Runtime**。当前首页优先展示其中实验依据最充分的 **Recovery Control Plane**。
+
+<p align="center">
+  <img src="./docs/assets/odys-architecture.svg"
+       width="1000"
+       alt="Odys 总体架构">
+</p>
+
+Odys 将“Agent 能做什么”和“Agent 如何可靠完成任务”分开：
+
+- Capability Runtime 提供工具与外部能力。
+- Native Runtime 承担 model ↔ tool 微观执行。
+- Verified Workflow 维护任务级计划、依赖和验收。
+- Recovery Control Plane 管理失败、恢复、预算和完成授权。
+
+当前 Phase 4 的主要实验证据集中在最后一层。
+
+### 原生 Agent 运行时
 
 ```text
-读文件
-→ 搜索符号
-→ 修改代码
-→ 执行命令
-→ 阅读结果
-→ 决定下一步 Tool Call
+Context → Model → Tool → Observation → State → next Model turn
 ```
 
-Odys 负责运行时语义：
+模型保留 Tool-level micro-planning：读文件、搜索符号、修改代码、执行命令和阅读 traceback。Odys 拥有 macro planning：分解 verified outcome、管理依赖、恢复范围、验收和 replan。
+
+### 可验证工作流运行时
 
 ```text
-Task
-Run
-Attempt
-Completion
-Validation
-Failure
-Recovery
-Checkpoint
-Runtime Truth
+PLANNED → READY → RUNNING → CLAIMED_COMPLETE → VERIFIED
 ```
 
----
+`CLAIMED_COMPLETE` 不是权威状态；只有外部 acceptance evidence 可以产生 `VERIFIED`。失败沿着 failure provenance 进入 local repair、affected-subgraph repair，必要时才进入 macro replan。
 
-## 🛡️ Adaptive Reliability
+### Reliability Control Plane（可靠性控制平面）
 
-Odys 不希望所有任务都使用一个重型 Harness。
+Odys 持久化并管理：
 
-可靠性机制应该按需启用。
+- **Task / Run / Attempt**：可恢复的执行 lineage。
+- **CompletionAuthority / External Validator**：把 model claim 与完成授权分开。
+- **Failure Provenance**：保留真实根因，避免把具体失败折叠成无关标签。
+- **Observable Progress / Liveness**：区分业务进展与进程仍存在。
+- **Recovery Budget**：限制模型轮次、工具调用和恢复成本。
+- **Checkpoint / Resume / Runtime Truth**：保留执行状态，并区分 configured、effective、actual transport。
 
-| Level | 模式 | Runtime Contract                                     |
-| ------- | ------ | ------------------------------------------------------ |
-| 0     | **FAST**     | Native Model/Tool Loop + Runtime Truth               |
-| 1     | **GUARDED**     | FAST + CompletionAuthority + Validator               |
-| 2     | **DURABLE**     | GUARDED + Workflow + Checkpoint + Recovery + Replan  |
-| 3     | **MULTI_AGENT**     | DURABLE + Durable Delegation + Dependency Scheduling |
-
-概念上：
-
-```text
-简单任务
-   │
-   ▼
- FAST
-   │
-需要独立验证？
-   ▼
- GUARDED
-   │
-需要恢复 / 长时状态？
-   ▼
- DURABLE
-   │
-需要委派多个 Agent？
-   ▼
- MULTI_AGENT
-```
-
-目标不是：
-
-> “机制越多越可靠。”
-
-而是：
-
-> **Minimum Sufficient Reliability —— 最小充分可靠性。**
-
----
-
-## 🏗️ 架构
-
-```text
-┌─────────────────────────────────────────────────────┐
-│ Product Surfaces                                    │
-│ CLI · API · TUI · future Web                       │
-├─────────────────────────────────────────────────────┤
-│ Capability Runtime                                  │
-│ Tools · MCP · Skills · Retrieval · Memory          │
-│ Browser · Search · Code · Shell · Sandbox          │
-├─────────────────────────────────────────────────────┤
-│ Native Minimal Agent Runtime                        │
-│ Context → Model → Tool → Observation → State       │
-├─────────────────────────────────────────────────────┤
-│ Verified Workflow Runtime                           │
-│ TaskGraph · Dependencies · Preconditions            │
-│ Acceptance · Evidence · Repair · Replan            │
-├─────────────────────────────────────────────────────┤
-│ Adaptive Reliability Control Plane                  │
-│ Task · Run · Attempt · CompletionAuthority          │
-│ Validation · Failure · Recovery · Checkpoint        │
-│ Runtime Truth · Liveness · Budget · Cost           │
-└─────────────────────────────────────────────────────┘
-```
-
----
-
-## 1. Native Agent Runtime
-
-最小执行内核：
-
-```text
-Context
-  ↓
-Model
-  ↓
-Tool
-  ↓
-Observation
-  ↓
-State
-  └──────→ Next Turn
-```
-
-模型仍然保留 Tool-level 的自主性。
-
-Odys 不会在中心 Planner 中预先规划模型每一次 read / edit / shell 调用。
-
----
-
-## 2. Capability Runtime
-
-Capability 回答：
-
-> **Agent 能做什么？**
-
-Odys 的策略不是把所有生态重新造一遍，而是尽量复用成熟实现：
-
-```text
-MCP
-Skills
-Filesystem
-Shell / Code
-Retrieval / RAG
-Memory
-Browser / Search
-Sandbox
-Delegation
-```
-
-Odys 自己重点拥有：
-
-```text
-Capability Policy
-Risk
-Side Effect
-Evidence
-Verification
-Recovery Semantics
-```
-
-而不是重新实现底层协议、向量索引、浏览器引擎或 OAuth。
-
----
-
-## 3. Verified Workflow Runtime
-
-长时任务最终需要的不只是“更多 Model Turns”。
-
-Odys 计划把更大的任务建模为带验证语义的 Step：
-
-```text
-Step
-├── goal
-├── dependencies
-├── preconditions
-├── expected_effects
-├── acceptance_criteria
-├── evidence
-├── capabilities
-├── risk
-├── budget
-└── recovery_policy
-```
-
-状态转换：
-
-```text
-PLANNED
-   ↓
-READY
-   ↓
-RUNNING
-   ↓
-CLAIMED_COMPLETE
-   ↓
-Validator
-   ├── VERIFIED
-   │
-   └── CLASSIFIED_FAILURE
-            ↓
-       Local Repair
-            ↓
- Affected-Subgraph Repair
-            ↓
-       Macro Replan
-```
-
-关键点：
-
-> **Agent 声称一个 Step 完成，不会自动让 Workflow 进入 VERIFIED。**
-
----
-
-## 4. Reliability Control Plane
-
-Odys 的可靠性层负责持久化执行事实。
-
-```text
-Task
-└── Run
-    ├── Attempt 1
-    ├── Attempt 2
-    └── Attempt N
-```
-
-核心对象：
-
-* **CompletionAuthority**
-  将模型的完成声明和真正的完成授权分开。
-* **Validator**
-  提供独立、可重复的验收证据。
-* **Failure Provenance**
-  保留真实根因，避免错误地把具体失败折叠成泛化标签。
-* **Checkpoint / Resume**
-  在长时任务中保留有价值的执行状态。
-* **Runtime Truth**
-  区分 configured / effective / actual transport。
-* **Execution Liveness**
-  区分“最近有实际业务进展”和“进程还存在”。
-* **Budget**
-  控制模型轮次、工具调用、Attempt 和未来可靠性成本。
-
----
-
-## 🔍 Runtime Truth
-
-一个 Agent Runtime 必须知道：
-
-> **到底是谁执行了这次请求？**
-
-Odys 区分：
+## 🔐 Runtime Truth 与 Verified Completion
 
 ```text
 Configured Target
@@ -499,77 +255,11 @@ Effective Target
 Actual Transport
 ```
 
-例如：
+如果 runtime 无法证明 actual transport 与 durable target 一致，应 fail closed，而不是猜测 provider、model 或成本归属。
 
-```text
-Configured
-mimo / mimo-v2.5
+## ♻️ 失败与恢复语义
 
-Effective
-mimo / mimo-v2.5
-
-Actual Transport
-https://provider.example/v1
-```
-
-Runtime Truth 对这些场景非常重要：
-
-* Provider fallback
-* Model migration
-* Resume
-* Experiment reproducibility
-* Cost attribution
-* Failure attribution
-
-如果 Runtime 无法证明 actual transport 与 durable target 一致，应该 fail closed，而不是猜测。
-
----
-
-## ✅ Verified Completion
-
-Odys 把“完成”当成一个协议：
-
-```text
-Model
-  │
-  │ "我认为已经完成"
-  ▼
-Completion Candidate
-  │
-  ▼
-CompletionAuthority
-  │
-  ▼
-Authoritative Validator
-  │
-  ├── PASS → 可以进入完成状态
-  │
-  └── FAIL → Classification + Recovery
-```
-
-这里最重要的区别：
-
-```text
-Agent 自己执行测试
-       ↓
-Execution Evidence
-
-Odys 外部 Validator 执行测试
-       ↓
-Acceptance Evidence
-```
-
-这样可以避免一个非常常见的 Agent False Green：
-
-> 模型因为自己看到的输出“看起来正确”，就认为整个任务已经成功。
-
----
-
-## ♻️ Failure & Recovery
-
-Failure 是一等 Runtime State。
-
-理想的失败因果链：
+Failure 是一等 Runtime State，而不是普通的 retry hint：
 
 ```text
 Executor Terminal Reason
@@ -583,42 +273,91 @@ RecoveryPolicy
 Recovery Action
 ```
 
-具体失败不应该静默折叠成无关的通用类型。
+具体失败保留在 `Failure Provenance` 中。例如 `BUDGET_EXHAUSTED` 不应在没有明确映射关系时被折叠成 `EMPTY_RESULT`；否则恢复策略、统计和 benchmark interpretation 都会失真。Recovery 通过 checkpoint/resume、local repair、affected-subgraph repair 和 macro replan 逐级扩大范围，并共享 bounded root recovery authority。
 
-例如：
-
-```text
-BUDGET_EXHAUSTED
-```
-
-不应该在没有明确映射关系的情况下变成：
+完成协议则是：
 
 ```text
-EMPTY_RESULT
+Model claim
+    ↓
+Completion Candidate
+    ↓
+CompletionAuthority
+    ↓
+Authoritative External Validator
+    ├── ACCEPTED → validator-backed completion
+    └── REJECTED → failure classification + recovery
 ```
 
-因为一旦根因丢失，后续恢复策略、统计分析和 Benchmark 都会失真。
+模型自己执行测试只能产生 execution evidence；Odys 的外部 Validator 产生 acceptance evidence。两者不能混为一谈。
 
----
+
+
+## 🚀 快速开始
+
+### 环境要求
+
+- Python 3.11+
+- Git
+- [`uv`](https://docs.astral.sh/uv/)
+
+```bash
+git clone https://github.com/Xixiartemis/Odys.git
+cd Odys
+uv sync --extra dev --extra live --extra agent
+uv run pytest
+uv run odys init-db
+```
+
+运行一个 Native Agent 任务：
+
+```bash
+uv run odys run \
+  --repo /path/to/project \
+  --kernel native \
+  --verify "pytest -q" \
+  "Fix the failing tests and verify the implementation."
+```
+
+检查持久化 Run：
+
+```bash
+uv run odys inspect <RUN_ID>
+```
+
+> 快速开始只是运行入口；任务是否完成仍由 Odys 的外部 Validator 和 acceptance evidence 决定。
+
+## 🧩 能力策略（Capability Strategy）
+
+Odys 采用 **Reuse First**：复用成熟的 provider adapter、官方 MCP SDK、Skills、retrieval、memory、browser、sandbox 和 telemetry primitives；Odys 自己负责 execution lifecycle、verification、recovery 与 Runtime Truth。
+
+| 能力 | 方向 |
+|---|---|
+| Model Provider | Provider adapter |
+| MCP | Official MCP SDK behind an Odys adapter |
+| Skills | Progressive `SKILL.md`-style capability loading |
+| Retrieval / RAG | Pluggable retrieval infrastructure |
+| Memory | Pluggable memory provider |
+| Browser / Search | External automation/runtime adapter |
+| Sandbox | External isolated execution backend |
+| Telemetry | OpenTelemetry-compatible export |
+
+## ⚙️ 自适应可靠性（Adaptive Reliability）
+
+Odys 采用 **Minimum Sufficient Reliability**：不是机制越多越可靠，而是根据任务状态选择足够的控制强度。
+
+| 等级 | 模式 | Runtime Contract |
+|---:|---|---|
+| 0 | **FAST** | Native Model/Tool Loop + Runtime Truth |
+| 1 | **GUARDED** | FAST + CompletionAuthority + Validator |
+| 2 | **DURABLE** | GUARDED + Workflow + Checkpoint + Recovery + Replan |
+| 3 | **MULTI_AGENT** | DURABLE + Durable Delegation + Dependency Scheduling |
+
+Browser、Search、Memory、Delegation 和更多 Provider 属于 capability expansion；它们不改变 Odys 对 execution semantics、verification 和 recovery 的拥有权。
 
 ## 💾 Durable State ≠ Prompt State
 
-Odys 不把模型上下文窗口当数据库。
-
-Durable State 可以包含：
-
-```text
-Task / Run / Attempt
-Workflow State
-Events
-Validation Evidence
-Failure Reports
-Checkpoints
-Memory
-Artifacts
-```
-
-真正送入模型的应该只是当前需要的子集：
+Durable State 可以包含 Task / Run / Attempt、Workflow State、Events、Validation Evidence、Failure Reports、Checkpoints、Memory 和 Artifacts。每次 model turn 只接收当前目标、相关 verified state/evidence、failure context 和当前允许的 capabilities。
 
 ```text
 Durable State
@@ -630,118 +369,20 @@ Working Context
 Model
 ```
 
-这是长时任务既可靠又不过度消耗 Context 的基础。
+## 📈 指标与工程方法
 
----
-
-## 🔌 Capability Strategy
-
-Odys 采用 **Reuse First**。
-
-计划优先复用成熟生态，而不是重新造底层基础设施：
-
-| Capability      | 方向                                |
-| ----------------- | ------------------------------------- |
-| Model Provider  | Provider Adapter                    |
-| MCP             | Official MCP SDK                    |
-| Skills          | Progressive `SKILL.md` 风格能力               |
-| Retrieval / RAG | 成熟 Retrieval Infrastructure       |
-| Memory          | Pluggable Memory Provider           |
-| Browser         | 现有 Browser Automation Runtime     |
-| Sandbox         | External Isolated Execution Backend |
-| Telemetry       | OpenTelemetry-compatible Export     |
-
-这些项目负责提供 primitives。
-
-**Odys 负责 Execution Lifecycle、Verification、Recovery 和 Runtime Truth。**
-
----
-
-## 📊 Odys 关注什么指标？
-
-一个 Agent 系统不能只用：
-
-> “最后有没有打印出一个看起来不错的答案”
-
-来评估。
-
-核心可靠性指标：
+核心指标是：
 
 ```text
 Verified Completion Rate
-```
 
-核心效率指标：
-
-```text
 Cost per Verified Completion
-=
-总执行成本
-────────────
-被 Validator 接受的任务数
+= 总执行成本 / 被 Validator 接受的任务数
 ```
 
-还会关注：
+同时关注 Model Turns、Tool Calls、Recovery Turns、Duplicate Side Effects、Lost Work After Failure、Stale Plan Execution、Human Intervention、Wall Time、Token Usage 和 Provider Cost。没有证据的指标保持 `NOT_MEASURED`，而不是估算。
 
-* Model Turns
-* Tool Calls
-* Tool Failures
-* Retry Count
-* Recovery Turns
-* Duplicate Side Effects
-* Lost Work After Failure
-* Stale Plan Execution
-* Human Intervention
-* Wall Time
-* Token Usage
-* Provider Cost
-
-没有真实数据的指标统一保持：
-
-```text
-NOT_MEASURED
-```
-
-而不是估算。
-
----
-
-## 🧪 当前状态
-
-> [!WARNING]
-> Odys 目前仍处于实验性开发阶段。
-
-当前已经存在的基础能力包括：
-
-* Native Agent Kernel
-* Durable Task / Run / Attempt
-* Tool Execution + Durable Observation
-* CompletionAuthority
-* Deterministic Validation
-* Failure Classification / Recovery
-* Checkpoint / Resume Foundations
-* Runtime Truth
-* Execution Health / Liveness
-
-当前重点仍然是：
-
-> **先证明 Runtime Invariants，再扩展 Capability Surface。**
-
-Odys 当前**不宣称**：
-
-* 已经 Production Ready
-* 可以可靠完成任意 Long-Horizon Task
-* 已经优于 Pi / Hermes / LangGraph
-* 已经 Token Optimal
-* 可以无失败地全自动执行复杂项目
-
-这些结论只有在 paired live evidence 和 benchmark 足够后才会成立。
-
----
-
-## 🧪 Engineering Method
-
-Odys 使用实验驱动的 Runtime 开发流程：
+Odys 使用实验驱动的工程流程：
 
 ```text
 Reproducible Failure
@@ -759,232 +400,96 @@ Live Experiment
 Measured Result
 ```
 
-原则：
+> Green tests ≠ invariant proven；live task finished ≠ verified success。
 
-> **Green tests ≠ invariant proven.**
+## 🔭 研究方向
 
-如果测试没有覆盖真正需要证明的 Runtime Invariant，那么全绿也可能是假安全。
+Odys 正从单一机制验证逐步进入 long-horizon agent recovery control 的泛化研究。
 
-同样：
+当前研究问题包括：
 
-> **Live task finished ≠ verified success.**
+- Runtime 应在什么时候继续、局部修复、重规划、验证或终止？
+- **Observable Progress** 能否更早识别无效执行并保留 **Recovery Budget**？
+- Recovery authority 应如何与 tool side effects 协同？
+- 这些机制能否跨任务、故障类型与模型泛化？
 
-如果 durable evidence 不一致，实验仍然不能判 PASS。
+Phase 5 仍是 design / generalization work；见 [Phase 5 benchmark plan](docs/phase5-benchmark-plan.md)。这里不宣称 paper accepted、arXiv published 或 SOTA。
 
----
+<details>
+<summary>证据边界与限制</summary>
 
-## 🆚 Odys 的定位
+- Arbitrary long-horizon task generalization
+- Cross-model generalization
+- Public benchmark superiority
+- Production readiness
+- Arbitrary exactly-once external side effects
+- Same-quality cost reduction when baseline and V2 have different validator outcomes
 
-Odys 不试图成为“什么都做的 AI Assistant”。
-
-不同项目关注的问题并不相同：
-
-```text
-Lightweight Agent Runtime
-→ 低开销 Model / Tool Loop
-
-Assistant Framework
-→ Tools / Memory / Channels / UX
-
-Workflow Engine
-→ Durable Orchestration
-
-Odys
-→ Verified Execution Semantics
-  + Failure Provenance
-  + Selective Recovery
-  + Adaptive Reliability
-```
-
-Pi、Hermes、LangGraph、Temporal、MCP、现有 Memory / Retrieval 系统，都可以成为：
-
-* 参考实现
-* Capability Backend
-* Adapter
-* Baseline
-* 实验对照组
-
-但 Odys 自己拥有：
-
-> **Execution Semantics。**
-
----
+</details>
 
 ## 🗺️ 路线图
 
-### Phase 0 — Architecture Freeze
+### 当前进展
 
-* Runtime Ownership
-* Workflow Semantics
-* Open-source Reuse Policy
-* Adaptive Reliability Levels
+- **Phase 0 — Architecture Freeze**：冻结 runtime ownership、workflow semantics、reuse policy 与 adaptive reliability levels。
+- **Phase 1 — Native Vertical Slice**：完成 Model → Tool → Observation → Multiple Turns → CompletionAuthority → Validator 执行链。
+- **Phase 2 — Minimum Capability Parity**：完成 P0 read/write/edit/shell、官方 MCP adapter、selective context 与 cost accounting。
+- **Phase 3 — Verified Workflow**：typed TaskGraph、dependencies、acceptance、evidence、selective repair 与 Macro Replan。
+- **Phase 4 — Controlled Recovery Experiment**：fault-conditioned real-provider evidence 与 V2 convergence measurement。
 
-### Phase 1 — Native Vertical Slice
+### 未来 capability expansion
 
-```text
-Model
-→ Tool
-→ Observation
-→ Multiple Turns
-→ Completion Claim
-→ CompletionAuthority
-→ Validator
-→ Verified Terminal State
-```
+Browser、Search / Web、Memory、Delegation、更多 Provider 和 Sandbox backends 会根据 benchmark demand 逐步加入，不是当前首页的主要证据。
 
-### Phase 2 — Capability Runtime
+### Phase 5 及后续
 
-* MCP
-* Skills
-* Selective Context
-* Retrieval
-* Cost Accounting
-
-### Phase 3 — Verified Workflow
-
-* Typed TaskGraph
-* Dependencies
-* Preconditions
-* Expected Effects
-* Acceptance Criteria
-* Evidence
-* Selective Repair
-* Macro Replan
-
-### Phase 4 — Controlled Ablation
-
-对比：
-
-```text
-FAST
-GUARDED
-STATEFUL WORKFLOW
-DURABLE
-```
-
-### Phase 5 — Adaptive Reliability
-
-让不同任务进入最低充分可靠性级别。
-
-### Phase 6 — Capability Expansion
-
-* Browser
-* Search / Web
-* Memory
-* Delegation
-* More Providers
-* Sandbox Backends
-
-### Phase 7 — Productionization
-
-在 Runtime Semantics 有足够实验依据之后，再引入生产级基础设施。
-
-详细路线：
-
-[`docs/14\_ROADMAP.md`](docs/14_ROADMAP.md)
-
----
-
-## 🧰 开发
-
-安装完整依赖：
-
-```bash
-uv sync --extra dev --extra live --extra agent
-```
-
-运行测试：
-
-```bash
-uv run pytest
-```
-
-检查依赖：
-
-```bash
-uv run python -m pip check
-```
-
-核心文档：
-
-| 文档 | 内容                  |
-| ------ | ----------------------- |
-| [`ARCHITECTURE\_FREEZE.md`](docs/ARCHITECTURE_FREEZE.md)     | 冻结架构决策          |
-| [`PRODUCT\_DIRECTION.md`](docs/PRODUCT_DIRECTION.md)     | 产品 / 研究方向       |
-| [`01\_ARCHITECTURE.md`](docs/01_ARCHITECTURE.md)     | Runtime 架构          |
-| [`09\_EVAL\_PROTOCOL.md`](docs/09_EVAL_PROTOCOL.md)     | 实验与验证协议        |
-| [`14\_ROADMAP.md`](docs/14_ROADMAP.md)     | Roadmap               |
-| [`AGENTS.md`](AGENTS.md)     | Coding Agent 开发约束 |
-
----
+Phase 5 研究 adaptive reliability 和跨任务/跨 fault generalization；后续再考虑 productionization。详细路线见 [`docs/14_ROADMAP.md`](docs/14_ROADMAP.md)。
 
 ## 📁 项目结构
 
 ```text
 Odys/
-├── src/lhas/              # Runtime implementation
+├── src/lhas/              # Runtime 实现
 ├── tests/                 # Deterministic regression suite
-├── docs/                  # Architecture / specifications
+├── docs/                  # 架构、规范与证据
 │   ├── adr/               # Architecture Decision Records
+│   ├── assets/            # README presentation assets
 │   └── evidence/          # Engineering evidence
-├── experiments/           # Experimental records
+├── experiments/           # 实验记录
+├── results/               # Machine-readable result artifacts
 ├── benchmarks/            # Evaluation tasks
-├── scripts/               # Validation / experiment tooling
+├── scripts/               # 验证与实验工具
 └── AGENTS.md              # Coding-agent engineering policy
 ```
 
-历史 evidence 尽量保留原始事实，不为了适配新术语而重写。
+## 🧰 开发与贡献
 
----
+安装依赖并运行 deterministic suite：
 
-## 🤝 Contributing
-
-Odys 当前仍然以 Runtime 研究和工程验证为主。
-
-如果需要修改核心架构，请先：
-
-1. 阅读 [`docs/ARCHITECTURE\_FREEZE.md`](docs/ARCHITECTURE_FREEZE.md)
-2. 给出可复现限制
-3. 证明当前架构无法解决
-4. 对比替代方案
-5. 说明迁移成本
-6. 提交 ADR
-
-默认规则：
-
-> **Extend, do not rewrite.**
-
-Bug Fix 推荐流程：
-
-```text
-Reproduction
-→ RED Regression
-→ Minimal Fix
-→ Full Deterministic Validation
+```bash
+uv sync --extra dev --extra live --extra agent
+uv run pytest
+uv run python -m pip check
 ```
 
+修改核心架构前，请先阅读 [`docs/ARCHITECTURE_FREEZE.md`](docs/ARCHITECTURE_FREEZE.md)，提供可复现限制、证据、替代方案、迁移成本和 ADR。默认规则：**Extend, do not rewrite.**
+
+核心文档：
+
+- [`docs/01_ARCHITECTURE.md`](docs/01_ARCHITECTURE.md) — Runtime architecture
+- [`docs/09_EVAL_PROTOCOL.md`](docs/09_EVAL_PROTOCOL.md) — Evaluation protocol
+- [`docs/14_ROADMAP.md`](docs/14_ROADMAP.md) — Roadmap
+- [`AGENTS.md`](AGENTS.md) — Coding-agent constraints
+- [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) — Third-party notices
+
 ---
 
-## 📜 License
-
-见 [`LICENSE`](LICENSE)。
-
----
-
-<div>
 <p align="center">
   <img src="./docs/assets/odys-logo.png" width="72" alt="Odys">
 </p>
-</div>
 
-<div>
 <p align="center">
   <strong>让 Agent 不只是完成任务，而是能够证明它完成了。</strong>
 </p>
-</div>
 
-<div>
-<p align="center">
-  <em>Build agents that can prove they finished.</em>
-</p>
-</div>
+<p align="center"><em>Build agents that can prove they finished.</em></p>

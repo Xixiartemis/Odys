@@ -1,0 +1,9 @@
+{
+  "fixtures": {
+    "fixture-job-ready-recovery-v2": {
+      "version": "1",
+      "hash_source": "catalog-entry:fixture-job-ready-recovery-v2",
+      "initial_state": "state document is pending before a deterministic attempt-terminal fault"
+    }
+  }
+}

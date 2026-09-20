@@ -26,6 +26,7 @@ from lhas.persistence.database import Database
 from lhas.persistence.event_store import EventStore
 from lhas.persistence.repositories import AttemptRepository, RunRepository, TaskRepository
 from lhas.resume import CrashPoint, NoOpCrashInjector, invoke_crash_injector
+from lhas.execution_control import ExecutionControlError, ExecutionControlToken, ExecutionLayerTimeout, await_with_control
 
 logger = logging.getLogger("lhas.orchestrator")
 
@@ -78,6 +79,7 @@ class Orchestrator:
         dataset_version: str = "RUNTIME-V0.1",
         experiment_id: Optional[str] = None,
         runtime_target: Any = None,
+        execution_control: ExecutionControlToken | None = None,
     ):
         self.db = db
         self.task_repo = task_repo or TaskRepository(db)
@@ -100,6 +102,7 @@ class Orchestrator:
         self.dataset_version = dataset_version
         self.experiment_id = experiment_id
         self.runtime_target = runtime_target
+        self.execution_control = execution_control
 
     def _crash(self, point: CrashPoint, **context: Any) -> None:
         invoke_crash_injector(self.crash_injector, point, **context)
@@ -221,13 +224,62 @@ class Orchestrator:
                 "dataset_version": self.dataset_version,
                 "configured_target": self.runtime_target,
             },
+            execution_control=self.execution_control,
         )
 
         started = time.monotonic()
         try:
-            result = await asyncio.wait_for(
-                executor.execute(request), timeout=task.timeout_seconds
+            result = await (
+                await_with_control(
+                    executor.execute(request),
+                    control=self.execution_control,
+                    local_ceiling=task.timeout_seconds,
+                    timeout_failure_type="EXECUTOR_TIMEOUT",
+                    source="orchestrator",
+                )
+                if self.execution_control is not None
+                else asyncio.wait_for(
+                    executor.execute(request), timeout=task.timeout_seconds
+                )
             )
+            if self.execution_control is not None:
+                # An executor may represent cancellation as a structured
+                # failure result. The root boundary still wins before that
+                # result reaches attempt/recovery state transitions.
+                self.execution_control.check()
+        except ExecutionControlError as exc:
+            if isinstance(exc, ExecutionLayerTimeout):
+                self._emit(
+                    EventType.EXECUTOR_FAILED, task=task, run=run, attempt=attempt,
+                    payload={"reason": "timeout", "error_type": exc.failure_type,
+                             "error_message": exc.reason,
+                             "duration_ms": int((time.monotonic() - started) * 1000)},
+                )
+                await self._finalize_attempt(
+                    task, run, attempt, status=AttemptStatus.TIMED_OUT,
+                    reason="timeout", error_type=exc.failure_type,
+                    error_message=exc.reason,
+                    duration_ms=int((time.monotonic() - started) * 1000),
+                )
+                return None, "timed_out"
+            event_type = (
+                EventType.EXECUTION_DEADLINE_EXCEEDED
+                if exc.failure_type == "ROOT_DEADLINE_EXCEEDED"
+                else EventType.EXECUTION_CANCELLED
+            )
+            self._emit(event_type, task=task, run=run, attempt=attempt, payload=exc.evidence())
+            await self._finalize_attempt(
+                task, run, attempt, status=AttemptStatus.FAILED,
+                reason=exc.reason, error_type=exc.failure_type,
+                error_message=exc.reason,
+                duration_ms=int((time.monotonic() - started) * 1000),
+            )
+            run.status = RunStatus.CANCELLED
+            run.finished_at = self._now()
+            self.run_repo.update(run)
+            task.status = TaskStatus.CANCELLED
+            self.task_repo.update(task)
+            return None, "cancelled"
         except asyncio.TimeoutError:
             self._emit(
                 EventType.EXECUTOR_FAILED, task=task, run=run, attempt=attempt,

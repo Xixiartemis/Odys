@@ -13,6 +13,7 @@ from lhas.capability_registry import (
     CapabilityRegistry,
     CapabilityRuntimeContext,
 )
+from lhas.side_effects import EffectClass
 
 from .protocol import ToolEvidence, ToolRequest, ToolResult, ToolResultStatus
 
@@ -79,6 +80,11 @@ class ToolContractDecision(BaseModel):
     effective_timeout_seconds: float | None = None
     retry_allowed: bool = False
     retry_reason: str = "not evaluated"
+    effect_class: EffectClass = EffectClass.NONE
+    idempotency_support: bool = False
+    receipt_support: bool = False
+    reconciliation_support: bool = False
+    replay_safe: bool = False
 
 
 def _schema_diagnostic(error: ValidationError) -> dict[str, Any]:
@@ -275,6 +281,11 @@ class ToolContract:
             effective_timeout_seconds=effective_timeout,
             retry_allowed=definition.retryable,
             retry_reason=("capability is retryable" if definition.retryable else "capability is not retryable"),
+            effect_class=definition.effect_class,
+            idempotency_support=definition.idempotency_support,
+            receipt_support=definition.receipt_support,
+            reconciliation_support=definition.reconciliation_support,
+            replay_safe=definition.replay_safe,
         )
 
     def prepare(

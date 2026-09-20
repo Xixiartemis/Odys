@@ -9,7 +9,18 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def _scenarios():
-    return [BenchmarkScenario.model_validate(json.loads(path.read_text(encoding="utf-8"))) for path in sorted((ROOT / "evals" / "reliability").glob("*.json"))]
+    # ``environment.json`` is P43 runtime provenance, not a benchmark
+    # scenario.  Keep the scenario discovery explicit so adding required
+    # execution metadata cannot make this contract test parse the wrong shape.
+    scenario_paths = sorted(
+        path
+        for path in (ROOT / "evals" / "reliability").glob("*.json")
+        if path.name != "environment.json"
+    )
+    return [
+        BenchmarkScenario.model_validate(json.loads(path.read_text(encoding="utf-8")))
+        for path in scenario_paths
+    ]
 
 
 def test_three_reliability_families_are_declared():

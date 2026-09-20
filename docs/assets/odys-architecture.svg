@@ -1,0 +1,57 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1100" height="700" viewBox="0 0 1100 700" role="img" aria-labelledby="title desc">
+  <title id="title">Odys 总体架构</title>
+  <desc id="desc">Odys 五层架构：产品层、能力运行层、原生 Agent 运行时、可验证工作流运行时和自适应可靠性控制平面。</desc>
+  <style>
+    .bg { fill: #ffffff; }
+    .layer { fill: #f6f8fa; stroke: #d0d7de; stroke-width: 1.5; }
+    .control { fill: #eaf2ff; stroke: #8cbbff; stroke-width: 1.5; }
+    .ink { fill: #24292f; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif; }
+    .muted { fill: #57606a; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif; }
+    .title { font-size: 28px; font-weight: 700; }
+    .subtitle { font-size: 15px; }
+    .layer-title { font-size: 22px; font-weight: 700; }
+    .layer-subtitle { font-size: 15px; }
+    .content { font-size: 17px; }
+    .note { font-size: 14px; }
+    @media (prefers-color-scheme: dark) {
+      .bg { fill: #0d1117; }
+      .layer { fill: #161b22; stroke: #30363d; }
+      .control { fill: #172b4d; stroke: #388bfd; }
+      .ink { fill: #e6edf3; }
+      .muted { fill: #8b949e; }
+    }
+  </style>
+
+  <rect class="bg" width="1100" height="700" rx="18"/>
+  <text class="ink title" x="48" y="52">Odys 总体架构</text>
+  <text class="muted subtitle" x="48" y="79">Capability Runtime 提供能力；Recovery Control Plane 负责验证、恢复、预算与 Runtime Truth</text>
+
+  <rect class="layer" x="48" y="105" width="1004" height="86" rx="12"/>
+  <text class="ink layer-title" x="76" y="140">产品层</text>
+  <text class="muted layer-subtitle" x="76" y="164">Product Surfaces</text>
+  <text class="ink content" x="360" y="153">CLI · API · TUI · Web（规划中）</text>
+
+  <rect class="layer" x="48" y="207" width="1004" height="100" rx="12"/>
+  <text class="ink layer-title" x="76" y="244">能力运行层</text>
+  <text class="muted layer-subtitle" x="76" y="268">Capability Runtime</text>
+  <text class="ink content" x="360" y="244">Tools · MCP · Skills · Retrieval / RAG · Memory</text>
+  <text class="ink content" x="360" y="274">Browser · Search · Code · Shell · Sandbox</text>
+
+  <rect class="layer" x="48" y="323" width="1004" height="100" rx="12"/>
+  <text class="ink layer-title" x="76" y="360">原生 Agent 运行时</text>
+  <text class="muted layer-subtitle" x="76" y="384">Native Agent Runtime</text>
+  <text class="ink content" x="360" y="374">Context → Model → Tool → Observation → State</text>
+
+  <rect class="layer" x="48" y="439" width="1004" height="100" rx="12"/>
+  <text class="ink layer-title" x="76" y="476">可验证工作流运行时</text>
+  <text class="muted layer-subtitle" x="76" y="500">Verified Workflow Runtime</text>
+  <text class="ink content" x="360" y="476">TaskGraph · Dependencies · Preconditions</text>
+  <text class="ink content" x="360" y="506">Acceptance · Evidence · Repair · Replan</text>
+
+  <rect class="control" x="48" y="555" width="1004" height="112" rx="12"/>
+  <text class="ink layer-title" x="76" y="590">自适应可靠性控制平面</text>
+  <text class="muted layer-subtitle" x="76" y="614">Adaptive Reliability Control Plane</text>
+  <text class="ink content" x="360" y="590">Task · Run · Attempt · Completion Authority</text>
+  <text class="ink content" x="360" y="618">Validation · Failure · Recovery · Checkpoint</text>
+  <text class="ink content" x="360" y="646">Runtime Truth · Liveness · Budget · Cost</text>
+</svg>

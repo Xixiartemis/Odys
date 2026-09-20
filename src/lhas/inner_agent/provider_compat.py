@@ -152,7 +152,11 @@ class MimoModelProvider:
     def __init__(self, *, api_key: str | None, base_url: str | None, client: Any = None):
         from openai import AsyncOpenAI
 
-        self._client = client or AsyncOpenAI(api_key=api_key, base_url=base_url)
+        self._client = client or AsyncOpenAI(
+            api_key=api_key,
+            base_url=base_url,
+            max_retries=0,
+        )
         self._wrapped_client = _MimoClient(self._client)
 
     def get_model(self, model_name: str | None):

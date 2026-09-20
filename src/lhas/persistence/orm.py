@@ -320,6 +320,39 @@ class NativeToolInvocationRow(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
+class SideEffectReceiptRow(Base):
+    """Runtime-level receipt projection, independent of benchmark runners."""
+
+    __tablename__ = "side_effect_receipts"
+
+    receipt_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    operation_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    idempotency_key: Mapped[str | None] = mapped_column(String(256), nullable=True, index=True)
+    task_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    run_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    attempt_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    step_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    tool_call_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    tool_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    effect_class: Mapped[str] = mapped_column(String(40), nullable=False)
+    target_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    request_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    dispatch_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    commit_observed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    observation_received_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    status: Mapped[str] = mapped_column(String(40), nullable=False)
+    result_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    external_resource_id: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    reconciliation_strategy: Mapped[str] = mapped_column(String(40), nullable=False)
+    replay_safe: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    workspace_before_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    workspace_after_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    error_class: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    sanitized_metadata_json: Mapped[str | None] = _json_col()
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class CompletionCandidateRow(Base):
     __tablename__ = "completion_candidates"
 

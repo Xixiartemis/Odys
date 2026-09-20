@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from typing import Any
 
@@ -9,7 +10,19 @@ from lhas.native.models import ProviderResponse, ProviderToolCall
 
 
 class ModelResponseError(ValueError):
-    pass
+    """A provider response cannot be converted into a native action."""
+
+    def __init__(self, code: str, *, raw_value: Any = None):
+        super().__init__(code)
+        self.code = code
+        self.raw_value_type = type(raw_value).__name__ if raw_value is not None else None
+        if isinstance(raw_value, (str, bytes, bytearray)):
+            value = raw_value if isinstance(raw_value, str) else bytes(raw_value).decode("utf-8", "replace")
+            self.raw_value_length = len(value)
+            self.raw_value_sha256 = hashlib.sha256(value.encode("utf-8")).hexdigest()
+        else:
+            self.raw_value_length = None
+            self.raw_value_sha256 = None
 
 
 class ModelResponseParser:
@@ -65,7 +78,10 @@ class ModelResponseParser:
                 try:
                     arguments = json.loads(arguments)
                 except json.JSONDecodeError as exc:
-                    raise ModelResponseError("PROVIDER_TOOL_ARGUMENTS_INVALID") from exc
+                    raise ModelResponseError(
+                        "PROVIDER_TOOL_ARGUMENTS_INVALID",
+                        raw_value=arguments,
+                    ) from exc
             if not isinstance(arguments, dict):
                 raise ModelResponseError("PROVIDER_TOOL_ARGUMENTS_INVALID")
             calls.append(ProviderToolCall(

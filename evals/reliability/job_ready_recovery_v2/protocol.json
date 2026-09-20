@@ -1,0 +1,49 @@
+{
+  "benchmark_version": "phase4-v1",
+  "benchmark_namespace": "job-ready-recovery-v2",
+  "research_question": "Does a typed attempt-terminal pre-commit failure return control to Odys cross-attempt recovery while Minimal remains rejected under one shared root budget?",
+  "headline": {
+    "tasks": 1,
+    "configs": ["minimal", "odys_p3"],
+    "repeats": 3,
+    "total_runs": 6
+  },
+  "budgets": {
+    "timeout_seconds": 900,
+    "max_turns": 20,
+    "max_model_calls": 20,
+    "max_repair_attempts": 1,
+    "max_replan_attempts": 0
+  },
+  "fairness": {
+    "model": "profile-bound",
+    "provider": "profile-bound",
+    "tool_capability_set": ["workspace.edit"],
+    "fixture_set": "fixtures/catalog.json",
+    "validator_id": "external-observable-v1",
+    "budget_ref": "budgets"
+  },
+  "shared_validator_id": "external-observable-v1",
+  "metric_definitions": {
+    "verified_completion": "externally accepted final state",
+    "initial_acceptance_status": "validator decision before recovery",
+    "final_acceptance_status": "validator decision after recovery",
+    "recovery_candidate": "rejected initial validation with bounded repair machinery available",
+    "recovery_attempted": "one bounded repair was entered",
+    "recovery_success": "repair reached externally verified completion",
+    "attempt_terminal": "typed failure that ends the current attempt before tool commit",
+    "provider_calls": "all root and recovery provider calls"
+  },
+  "manifest": "manifest.json",
+  "faults": "faults.json",
+  "fixtures": "fixtures/catalog.json",
+  "validators": "validators.json",
+  "configs_dir": "configs",
+  "ablation": "ablation.json",
+  "result_schema": "schemas/result.schema.json",
+  "reporting": {
+    "raw_results_immutable": true,
+    "invalid_runs_separate": true,
+    "phase4_headline_excluded": true
+  }
+}

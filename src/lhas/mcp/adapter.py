@@ -27,7 +27,12 @@ class MCPToolAdapter:
 
     async def execute(self, request: ToolRequest) -> ToolResult:
         try:
-            output = await self.manager.call_tool(self.info.name, request.arguments)
+            output = await self.manager.call_tool(
+                self.info.name,
+                request.arguments,
+                timeout_seconds=request.timeout_seconds,
+                execution_control=request.execution_control,
+            )
             return ToolResult(status=ToolResultStatus.SUCCESS, output=output, metadata={"origin":"mcp","server_name":self.info.server_name})
         except Exception as exc:
             return ToolResult(status=ToolResultStatus.FAILURE,error_type=type(exc).__name__,error_message=str(exc)[:500],metadata={"origin":"mcp","server_name":self.info.server_name})

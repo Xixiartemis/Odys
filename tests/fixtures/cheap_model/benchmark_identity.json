@@ -1,0 +1,8 @@
+{
+  "base_protocol_hash": "993eae04290fe683d40fcf845b9e7325b9572b227e78e7cb3090dd7ee37637c3",
+  "base_protocol_version": "phase4-v1",
+  "benchmark_config_hash": "318a4fdf7d87b446780b5ca79381df77bf9dea5619598cd9917cee51de38f2fd",
+  "benchmark_version": "phase4-v1-cheap-model",
+  "model_identity": "mimo-v2.5",
+  "provider_identity": "xiaomimimo-openai-compatible"
+}

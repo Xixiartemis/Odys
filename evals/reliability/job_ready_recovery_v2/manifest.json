@@ -1,0 +1,30 @@
+{
+  "benchmark_version": "phase4-v1",
+  "benchmark_namespace": "job-ready-recovery-v2",
+  "tasks": [
+    {
+      "benchmark_version": "phase4-v1",
+      "task_id": "recovery-proof-01-v2",
+      "family": "RECOVERY_EFFECTIVENESS",
+      "title": "Repair the rejected state document after an attempt-terminal fault",
+      "objective": "Make the state document externally ready after the typed pre-commit attempt-terminal fault.",
+      "fixture_id": "fixture-job-ready-recovery-v2",
+      "fixture_version": "1",
+      "fixture_hash_source": "fixtures/catalog.json#fixture-job-ready-recovery-v2",
+      "initial_state": "state document is pending before a deterministic attempt-terminal fault",
+      "required_capabilities": ["workspace.edit"],
+      "acceptance_criteria": ["checksum:bbbbb0009b8c4e5e810508ee2d28d58ef9f778db678dd7de7dcaabc688e7e6ca"],
+      "validator_id": "external-observable-v1",
+      "fault_injection": "JOB_READY_ATTEMPT_TERMINAL_FAILURE",
+      "fault_timing": "before acceptance",
+      "max_turns": 20,
+      "max_model_calls": 20,
+      "timeout_seconds": 900,
+      "side_effect_policy": "one bounded state mutation",
+      "expected_observable_effects": {
+        "checksum": "bbbbb0009b8c4e5e810508ee2d28d58ef9f778db678dd7de7dcaabc688e7e6ca"
+      },
+      "measurement_tags": ["recovery-proof", "attempt-boundary", "external-validation"]
+    }
+  ]
+}

@@ -14,3 +14,22 @@ jobs:
           enable-cache: true
       - run: uv sync --extra dev --extra live --extra agent
       - run: uv run pytest
+
+  final-live-infrastructure-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - run: uv sync --extra dev --extra live --extra agent
+      - run: >-
+          uv run pytest
+          tests/test_phase4_live_no_progress_initial_path.py
+          tests/test_phase4_live_no_progress_final.py
+          tests/test_phase4_live_no_progress_02h.py
+          tests/test_phase4_live_no_progress_parity.py
+          tests/test_phase4_live_effect_policy_parity.py
+          tests/test_phase4_final_live_infrastructure.py
+          tests/test_p48_provider_identity.py
+          -q

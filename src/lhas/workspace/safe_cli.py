@@ -1,5 +1,6 @@
-import asyncio, os, re, sys, time
+import asyncio, os, re, signal, subprocess, sys, time
 from .errors import WorkspacePathEscape
+from lhas.execution_control import ExecutionControlError, ExecutionControlToken, ExecutionLayerTimeout, await_with_control
 _META = re.compile(r"^(?:&&|\|\||>>|[;|><`])$")
 _SECRET = re.compile(r"(?:API_KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|AUTH|COOKIE)", re.I)
 class SafeCli:
@@ -16,11 +17,14 @@ class SafeCli:
         if interpreter_bin:
             env["PATH"] = interpreter_bin + os.pathsep + env.get("PATH", "")
         return env
-    async def execute(self, argv, cwd=".", timeout_seconds=None):
+    async def execute(self, argv, cwd=".", timeout_seconds=None, execution_control: ExecutionControlToken | None = None):
         if not isinstance(argv, list) or not argv or not all(isinstance(x,str) for x in argv) or any(_META.match(x) for x in argv): return None, "INVALID_ARGUMENTS"
         if not self.policy.allows(argv): return None, "COMMAND_NOT_ALLOWED"
         timeout=float(timeout_seconds if timeout_seconds is not None else self.default_timeout)
         if timeout <= 0 or timeout > self.max_timeout: return None, "INVALID_TIMEOUT"
+        if execution_control is not None:
+            execution_control.check()
+            timeout = execution_control.effective_timeout(timeout) or timeout
         directory=self.workspace.resolve_path(cwd); start=time.monotonic()
         try:
             launch_argv = list(argv)
@@ -29,11 +33,72 @@ class SafeCli:
                 # Python installation. Keep the configured command contract,
                 # but execute it through the active harness interpreter.
                 launch_argv = [sys.executable, "-m", "pytest", *launch_argv[1:]]
-            proc=await asyncio.create_subprocess_exec(*launch_argv, cwd=str(directory), stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env=self._env())
-            try: out,err=await asyncio.wait_for(proc.communicate(), timeout)
+            creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) if os.name == "nt" else 0
+            kwargs = {
+                "cwd": str(directory),
+                "stdin": asyncio.subprocess.DEVNULL,
+                "stdout": asyncio.subprocess.PIPE,
+                "stderr": asyncio.subprocess.PIPE,
+                "env": self._env(),
+            }
+            if os.name == "nt":
+                kwargs["creationflags"] = creationflags
+            elif hasattr(os, "setsid"):
+                kwargs["start_new_session"] = True
+            proc=await asyncio.create_subprocess_exec(*launch_argv, **kwargs)
+            try:
+                if execution_control is None:
+                    out, err = await asyncio.wait_for(proc.communicate(), timeout)
+                else:
+                    out, err = await await_with_control(
+                        proc.communicate(),
+                        control=execution_control,
+                        local_ceiling=timeout,
+                        timeout_failure_type="PROCESS_TIMEOUT",
+                        source="process",
+                    )
+            except ExecutionLayerTimeout:
+                await _terminate_process(proc)
+                return None, "PROCESS_TIMEOUT" if execution_control is not None else "COMMAND_TIMEOUT"
             except asyncio.TimeoutError:
-                proc.kill(); await proc.communicate(); return None, "COMMAND_TIMEOUT"
+                # Preserve the legacy no-control timeout contract.  This is
+                # deliberately separate from ExecutionLayerTimeout, which is
+                # the root-control path and has its own typed classification.
+                await _terminate_process(proc)
+                return None, "COMMAND_TIMEOUT"
+            except ExecutionControlError:
+                await _terminate_process(proc)
+                raise
         except WorkspacePathEscape: raise
         except OSError as exc: return None, ("SPAWN_ERROR", str(exc))
         limit=self.max_output_bytes; out_tr=len(out)>limit; err_tr=len(err)>limit
+        if execution_control is not None:
+            execution_control.check()
         return {"exit_code":proc.returncode,"stdout":out[:limit].decode("utf-8", "replace"),"stderr":err[:limit].decode("utf-8", "replace"),"timed_out":False,"duration_ms":int((time.monotonic()-start)*1000),"stdout_truncated":out_tr,"stderr_truncated":err_tr}, None
+
+
+async def _terminate_process(proc) -> None:
+    """Terminate the process and its supported process group without waiting forever."""
+    if proc.returncode is not None:
+        return
+    if os.name != "nt" and hasattr(os, "killpg"):
+        try:
+            os.killpg(proc.pid, signal.SIGTERM)
+        except (OSError, ProcessLookupError):
+            pass
+    else:
+        try:
+            proc.terminate()
+        except ProcessLookupError:
+            return
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=2.0)
+    except asyncio.TimeoutError:
+        try:
+            if os.name != "nt" and hasattr(os, "killpg"):
+                os.killpg(proc.pid, signal.SIGKILL)
+            else:
+                proc.kill()
+        except (OSError, ProcessLookupError):
+            pass
+        await proc.wait()

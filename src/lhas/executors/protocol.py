@@ -29,6 +29,9 @@ class ExecutionRequest(BaseModel):
     context: dict[str, Any] = Field(default_factory=dict)
     # Run / Attempt metadata (executor_type, provider, model, harness_version, ...)
     metadata: dict[str, Any] = Field(default_factory=dict)
+    # In-process only: the parent root owns this authority and it is never
+    # serialized into executor input or benchmark evidence.
+    execution_control: Any = Field(default=None, exclude=True)
 
 
 class ExecutionResult(BaseModel):
