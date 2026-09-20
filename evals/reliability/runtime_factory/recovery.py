@@ -322,6 +322,7 @@ class OfficialOdysRecoveryCoordinator:
         # Keep only the durable plan/step identity needed to finalize that
         # candidate; no second recovery authority is created here.
         self._pending_external_finalizations: dict[str, dict[str, Any]] = {}
+        self._completed_external_finalizations: dict[str, dict[str, Any]] = {}
         # One controller is created at the run boundary and reused by the
         # initial native attempt and the canonical recovery path.  Keeping the
         # object here is intentionally in-process only; durable escalation
@@ -375,6 +376,12 @@ class OfficialOdysRecoveryCoordinator:
         """
         self._controllers.pop(str(run_id), None)
 
+    def discard_external_finalization(self, run_id: str) -> None:
+        """Release in-process finalization state at the outer run boundary."""
+        key = str(run_id)
+        self._pending_external_finalizations.pop(key, None)
+        self._completed_external_finalizations.pop(key, None)
+
     async def finalize_after_external_validation(
         self,
         request: Any,
@@ -389,9 +396,17 @@ class OfficialOdysRecoveryCoordinator:
         it never allocates repair/replan budget and therefore cannot create a
         second recovery attempt.
         """
-        pending = self._pending_external_finalizations.pop(
-            str(request.run_id), None
+        run_id = str(request.run_id)
+        completed_cache = getattr(
+            self, "_completed_external_finalizations", None
         )
+        if completed_cache is None:
+            completed_cache = {}
+            self._completed_external_finalizations = completed_cache
+        cached = completed_cache.get(run_id)
+        if cached is not None:
+            return dict(cached)
+        pending = self._pending_external_finalizations.get(run_id)
         if pending is None:
             return None
 
@@ -473,8 +488,7 @@ class OfficialOdysRecoveryCoordinator:
                 "plan_id": plan.id,
                 "reason": "external_validator_rejected",
             })
-        plans.update(plan)
-        return {
+        durable_result = {
             "finalized": True,
             "acceptance_status": evidence["acceptance_status"],
             "plan_id": plan.id,
@@ -483,6 +497,15 @@ class OfficialOdysRecoveryCoordinator:
             "durable_plan_status": plan.status.value,
             "budget_issued": False,
         }
+        step.evidence["external_validation"].update({
+            "durable_plan_step_status": durable_result["durable_plan_step_status"],
+            "durable_plan_status": durable_result["durable_plan_status"],
+            "budget_issued": False,
+        })
+        plans.update(plan)
+        self._pending_external_finalizations.pop(run_id, None)
+        completed_cache[run_id] = dict(durable_result)
+        return dict(durable_result)
 
     def _reserve_replan(self) -> bool:
         authority = self.root_budget_authority

@@ -53,6 +53,12 @@ Provider-free tests qualify the control-plane semantics for:
 
 These tests are qualification evidence, not additional live-model samples.
 
+## Current live evidence boundary
+
+Attempt6 is the current scoped real-provider controlled-fault result. The sanitized public bundle is [published here](phase4-attempt6/README.md): 6/6 valid runs, Legacy validator-backed recovery 1/3, Odys V2 3/3, Legacy first replan 19–20 calls, V2 first replan 2–5 calls, and V2 remaining budget 15–18 / 20 (75%–90%).
+
+These live results establish external validator-backed completion and the bounded recovery mechanism. The Attempt5→Attempt6 V2 convergence observation is 8→0 redundant post-success executions across 3/3 V2 runs. The current live artifact does not establish durable `PlanStep=VERIFIED` / `Plan=COMPLETED` finalization end-to-end. P4.5 provider-free tests qualify that semantic closure separately; they are not additional live-provider runs.
+
 ## Not proven
 
 - Generalization to arbitrary tasks or models.
@@ -61,7 +67,7 @@ These tests are qualification evidence, not additional live-model samples.
 - A public benchmark improvement.
 - Exactly-once effects in arbitrary external systems.
 - Phase 5 multi-step benchmark performance.
-- Attempt6 live results. Attempt6 has not been executed by this change.
+- Live Attempt6 durable `PlanStep=VERIFIED` / `Plan=COMPLETED` evidence is not claimed; P4.5 closes that path only as provider-free semantic qualification.
 
 ## Limitations
 
@@ -72,9 +78,9 @@ receipt design is receipt-backed, idempotency-aware, reconciliation-aware,
 and fail-closed for unknown state; it does not claim distributed exactly-once
 semantics.
 
-## Attempt6 gate
+## P4.5 provider-free finalization gate
 
-Attempt6 is permitted only after provider-free tests and both Linux and
+The provider-free P4.5 gate requires targeted tests and both Linux and
 Windows CI prove one successful post-replan mutation, zero redundant
 post-success provider/tool calls, a single root repair authority, and durable
 `PlanStep=VERIFIED` / `Plan=COMPLETED`. The frozen task hash above must remain

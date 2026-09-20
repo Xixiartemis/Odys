@@ -56,3 +56,21 @@ class RecoverableBenchmarkRuntime(BenchmarkRuntime, Protocol):
         validation: Any,
     ) -> ExecutionOutcome | dict[str, Any] | None:
         ...
+
+
+@runtime_checkable
+class ExternallyFinalizableBenchmarkRuntime(BenchmarkRuntime, Protocol):
+    """Runtime contract for the external-validator-to-durable-state bridge.
+
+    Recovery may deliberately return a candidate that is still waiting for
+    external validation. Only a runtime implementing this contract may
+    consume that validator verdict and project it into durable plan state.
+    """
+
+    async def finalize_after_external_validation(
+        self,
+        request: Any,
+        outcome: ExecutionOutcome,
+        validation: Any,
+    ) -> dict[str, Any] | None:
+        ...

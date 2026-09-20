@@ -325,9 +325,8 @@ class P45BenchmarkExecutor:
         self._trace_file = trace_file
         self._provider = provider
         self._provider_identity = dict(provider_identity or {}) or None
-        # Runtime objects are retained only until the runner asks for a
-        # validation-rejection recovery through the explicit runtime
-        # recovery contract.
+        # Runtime objects are retained through external validation and its
+        # durable finalization. The runner owns the outer cleanup boundary.
         self._active_runtimes: dict[str, Any] = {}
         self._execution_controls: dict[str, ExecutionControlToken] = {}
         self._provider_call_offsets: dict[str, int] = {}
@@ -1007,13 +1006,33 @@ class P45BenchmarkExecutor:
         except Exception:
             self._attach_provider_accounting(outcome, request.run_id)
             raise
-        finally:
-            self._active_runtimes.pop(request.run_id, None)
-            self._reset_fixture(request)
-            self._run_budgets.pop(request.run_id, None)
-            self._execution_controls.pop(request.run_id, None)
-            self._provider_call_offsets.pop(request.run_id, None)
-            self._clear_provider_control()
+
+    async def finalize_after_external_validation(
+        self,
+        request: ExecutionRequest,
+        outcome: ExecutionOutcome,
+        validation: Any,
+    ) -> dict[str, Any] | None:
+        """Delegate the validator verdict without allocating execution work."""
+        from evals.reliability.runtime_factory.protocol import (
+            ExternallyFinalizableBenchmarkRuntime,
+        )
+
+        runtime = self._active_runtimes.get(request.run_id)
+        if runtime is None:
+            raise RuntimeInfrastructureError("EXTERNAL_FINALIZATION_RUNTIME_MISSING")
+        if not isinstance(runtime, ExternallyFinalizableBenchmarkRuntime):
+            raise RuntimeInfrastructureError("EXTERNAL_FINALIZATION_DELEGATE_MISSING")
+        result = runtime.finalize_after_external_validation(
+            request,
+            outcome,
+            validation,
+        )
+        return await await_with_control(
+            result,
+            control=request.execution_control,
+            source="external_finalization",
+        )
 
     def cleanup(self, request: ExecutionRequest) -> None:
         """Release one run's workspace after validation/recovery is complete."""
@@ -1022,6 +1041,11 @@ class P45BenchmarkExecutor:
         discard_controller = getattr(recovery, "discard_controller", None)
         if callable(discard_controller):
             discard_controller(request.run_id)
+        discard_finalization = getattr(
+            recovery, "discard_external_finalization", None
+        )
+        if callable(discard_finalization):
+            discard_finalization(request.run_id)
         self._reset_fixture(request)
         self._run_budgets.pop(request.run_id, None)
         self._provider_call_offsets.pop(request.run_id, None)

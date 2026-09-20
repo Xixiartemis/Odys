@@ -580,6 +580,27 @@ def _observation_digest(outcome: ExecutionOutcome, task: Mapping[str, Any]) -> s
     """Hash only the validator-visible, externally observable state."""
     return _document_hash(_validator_observation_view(outcome, task))
 
+def _merge_tool_invocation_evidence(*segments: Any) -> list[dict[str, Any]]:
+    """Merge bounded initial/recovery evidence by stable invocation identity."""
+    merged: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for segment in segments:
+        if not isinstance(segment, list):
+            continue
+        for item in segment:
+            if not isinstance(item, Mapping):
+                continue
+            evidence = dict(item)
+            key = (
+                str(evidence.get("attempt_id", "")),
+                str(evidence.get("invocation_id", "")),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(evidence)
+    return merged
+
 
 class BenchmarkExecutor(Protocol):
     async def execute(self, request: ExecutionRequest) -> ExecutionOutcome | Mapping[str, Any]: ...
@@ -1652,11 +1673,15 @@ class Phase4Runner:
             )
         else:
             repaired.model_calls = int(outcome.model_calls) + int(repaired.model_calls)
-        repaired.tool_calls = int(outcome.tool_calls) + int(repaired.tool_calls)
-        if not repaired.tool_invocation_evidence and outcome.tool_invocation_evidence:
-            repaired.tool_invocation_evidence = [
-                dict(item) for item in outcome.tool_invocation_evidence
-            ]
+        merged_tool_evidence = _merge_tool_invocation_evidence(
+            outcome.tool_invocation_evidence,
+            repaired.tool_invocation_evidence,
+        )
+        repaired.tool_invocation_evidence = merged_tool_evidence
+        if merged_tool_evidence:
+            repaired.tool_calls = len(merged_tool_evidence)
+        else:
+            repaired.tool_calls = int(outcome.tool_calls) + int(repaired.tool_calls)
 
         repair_scope = str(repaired.repair_scope or "")
         is_macro_replan = repair_scope.upper() == "MACRO_REPLAN"
@@ -1780,10 +1805,17 @@ class Phase4Runner:
             )
 
         final_validation = self.validator.validate(spec.task, fixture, repaired)
+        requires_finalization = bool(
+            repaired.observed_state.get("external_validation_pending")
+        )
         finalize_external = getattr(
             self.executor, "finalize_after_external_validation", None
         )
-        if callable(finalize_external):
+        if requires_finalization:
+            if not callable(finalize_external):
+                raise RuntimeInfrastructureError(
+                    "EXTERNAL_FINALIZATION_DELEGATE_MISSING"
+                )
             durable_finalization = finalize_external(
                 request,
                 repaired,
@@ -1791,11 +1823,47 @@ class Phase4Runner:
             )
             if inspect.isawaitable(durable_finalization):
                 durable_finalization = await durable_finalization
-            if durable_finalization is not None:
-                repaired.observed_state["durable_external_verification"] = dict(
-                    durable_finalization
+            required_finalization_fields = {
+                "finalized",
+                "acceptance_status",
+                "plan_id",
+                "step_id",
+                "durable_plan_step_status",
+                "durable_plan_status",
+                "budget_issued",
+            }
+            if (
+                not isinstance(durable_finalization, Mapping)
+                or not required_finalization_fields.issubset(durable_finalization)
+            ):
+                raise RuntimeInfrastructureError(
+                    "EXTERNAL_FINALIZATION_EVIDENCE_INCOMPLETE"
                 )
-        if final_validation.acceptance_status == "ACCEPTED":
+            bounded_finalization = dict(durable_finalization)
+            expected_acceptance = (
+                "ACCEPTED"
+                if final_validation.acceptance_status == "ACCEPTED"
+                and bool(final_validation.verified_completion)
+                else "REJECTED"
+            )
+            if (
+                not bool(bounded_finalization.get("finalized"))
+                or bounded_finalization.get("budget_issued") is not False
+                or bounded_finalization.get("acceptance_status") != expected_acceptance
+            ):
+                raise RuntimeInfrastructureError(
+                    "EXTERNAL_FINALIZATION_EVIDENCE_MISMATCH"
+                )
+            repaired.observed_state["durable_external_verification"] = (
+                bounded_finalization
+            )
+            repaired.observed_state["state_evidence"] = {
+                "durable_external_verification": bounded_finalization
+            }
+        if (
+            final_validation.acceptance_status == "ACCEPTED"
+            and bool(final_validation.verified_completion)
+        ):
             repaired.failure_type = None
             repaired.recovery_success = True
         else:
@@ -1880,7 +1948,10 @@ class Phase4Runner:
                     },
                 )
             )
-        if final_validation.acceptance_status == "ACCEPTED":
+        if (
+            final_validation.acceptance_status == "ACCEPTED"
+            and bool(final_validation.verified_completion)
+        ):
             merged_trace.append(
                 _trace_event(
                     "STEP_VERIFIED",

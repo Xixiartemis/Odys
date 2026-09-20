@@ -83,7 +83,7 @@ prerequisite for the first resume publication.
 
 ## Execution gate
 
-No expensive run starts until the provider-free Phase 4 convergence gate
+No expensive run starts until the provider-free Phase 4/P4.5 convergence gate
 proves: one successful post-replan mutation, `VALIDATE_CANDIDATE`, external
 acceptance, durable `PlanStep=VERIFIED`, durable `Plan=COMPLETED`, no
 redundant post-success calls, and no root repair-budget bypass. Frozen Phase

@@ -185,6 +185,17 @@ class _OdysRuntime:
 
             elapsed = time.monotonic() - started
 
+            tool_invocation_evidence: list[dict[str, Any]] = []
+            if self.db is not None:
+                from lhas.persistence.event_store import EventStore
+                from evals.reliability.runtime_factory.recovery import (
+                    _tool_invocation_evidence,
+                )
+                tool_invocation_evidence = _tool_invocation_evidence(
+                    EventStore(self.db),
+                    attempt_id,
+                )
+
             # Map AgentResult to ExecutionOutcome
             claimed_complete = result.status is AgentStatus.COMPLETED
             failure_type = None
@@ -252,7 +263,12 @@ class _OdysRuntime:
                 recovery_attempted=recovery_attempted,
                 recovery_success=recovery_success,
                 repair_scope="local" if features.get("selective_repair") else None,
-                tool_calls=result.tool_call_count,
+                tool_calls=(
+                    len(tool_invocation_evidence)
+                    if tool_invocation_evidence
+                    else result.tool_call_count
+                ),
+                tool_invocation_evidence=tool_invocation_evidence,
                 model_calls=result.turn_count,
                 attempt_count=1,
                 wall_time_seconds=round(elapsed, 6),
@@ -355,6 +371,21 @@ class _OdysRuntime:
         if control is not None:
             control.check()
         return await self.recovery.recover_after_validation(
+            request,
+            outcome,
+            validation,
+        )
+
+    async def finalize_after_external_validation(
+        self,
+        request: Any,
+        outcome: ExecutionOutcome,
+        validation: Any,
+    ) -> dict[str, Any] | None:
+        """Delegate the sole external completion authority to the coordinator."""
+        if self.recovery is None:
+            raise RuntimeError("OFFICIAL_RECOVERY_AUTHORITY_UNAVAILABLE")
+        return await self.recovery.finalize_after_external_validation(
             request,
             outcome,
             validation,
