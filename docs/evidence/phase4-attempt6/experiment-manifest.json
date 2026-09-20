@@ -1,0 +1,21 @@
+{
+  "experiment": "phase4-live-no-progress-escalation-02h",
+  "attempt": 6,
+  "model_identity": "mimo-v2.5",
+  "provider_identity": "xiaomimimo-openai-compatible",
+  "protocol_hash": "993eae04290fe683d40fcf845b9e7325b9572b227e78e7cb3090dd7ee37637c3",
+  "task_projection_hash": "40bd38137adaf05343127fb090e4d13b7a7742eb42625ca875375f20f081800a",
+  "fault_hash": "6a4948a64ee341ef57273a7fcc27876cb825037e33cf6f49ac08ec8ff62e2504",
+  "fixture_hash": "cf52e7bd2058bc59a053cea5aab002ccc298485fa97655fcac2042affb59bb29",
+  "validator_hash": "708e13b8a363e03018110e4f59812af6dcf9cacd9c8702e64c222bf703a3cb1d",
+  "arm_definitions": {
+    "legacy_bounded": "LEGACY_BOUNDED",
+    "odys_v2": "NO_PROGRESS_AWARE"
+  },
+  "public_sanitization": {
+    "raw_provider_content": false,
+    "credentials": false,
+    "prompts": false,
+    "unnecessary_traces": false
+  }
+}
