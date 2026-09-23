@@ -50,3 +50,47 @@ Runtime cannot access:
 - ToolSandbox target milestones
 
 Offline evaluation runs only after runtime termination.
+
+## Research Boundary (Causal Separation)
+
+### ToolMaze controls:
+- Task definition and tool environment
+- Perturbation injection (P0–P4, C1–C4)
+- Native trace (via ExecutionEngine + TraceLogger)
+- Native evaluation (JudgeSystem)
+- Native metrics (MetricsCalculator: TSR, PRR, RC)
+
+### Odys controls only:
+- Recovery policy (frozen Phase4 DefaultRecoveryPolicy)
+- Progress observation (ShadowProgressObserver)
+- Budget policy (recovery budget allocation)
+- Runtime validation mechanism
+- Evidence substrate (VerifiedTaskState, EvidenceLedger)
+
+### Model/Provider controls:
+- Action/tool selection
+- Tool arguments
+- Final-answer generation
+- Reasoning content
+
+### Invariant:
+ToolMaze owns the environment. Odys owns the recovery strategy.
+The model owns the action selection. No party controls all three.
+
+## Execution Architecture
+
+```
+ScriptedModelDriver (or real provider)
+    ↓
+OdysToolMazeAgentAdapter(BaseAgent)
+    ↓
+Official ExecutionEngine(task_json, agent, tools_dir)
+    ↓ engine.run()
+Official perturbation injection (P0-P4, C1-C4)
+    ↓
+Official TraceLogger (native trace)
+    ↓
+Official JudgeSystem + MetricsCalculator (native metrics)
+    ↓
+Odys OfflineEvaluator (separate, post-termination)
+```

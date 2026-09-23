@@ -127,6 +127,46 @@ class RecoveryDecision:
 _NONE_DECISION = RecoveryDecision()
 
 
+# ── Phase4 RecoveryActionType → harness RecoveryActionKind mapping ─
+
+def _map_phase4_action(action_type: Any) -> RecoveryActionKind:
+    """Translate a Phase4 RecoveryActionType to a harness RecoveryActionKind.
+
+    This is the single translation boundary between frozen Phase4
+    recovery semantics and the Phase5 harness control plane.
+    """
+    from lhas.domain.enums import RecoveryActionType
+
+    _MAP = {
+        RecoveryActionType.RETRY_WITH_FAILURE_CONTEXT: RecoveryActionKind.RETRY_WITH_CONTEXT,
+        RecoveryActionType.RETRY_WITH_EXPANDED_CONTEXT: RecoveryActionKind.RETRY_WITH_CONTEXT,
+        RecoveryActionType.ESCALATE: RecoveryActionKind.ESCALATE,
+        RecoveryActionType.ABORT: RecoveryActionKind.STOP,
+        RecoveryActionType.HUMAN_APPROVAL: RecoveryActionKind.ESCALATE,
+        RecoveryActionType.BLOCK_PROVIDER: RecoveryActionKind.STOP,
+    }
+    return _MAP.get(action_type, RecoveryActionKind.RETRY)
+
+
+# ── Signal → FailureType mapping for Phase4 bridge ─────────────────
+
+def _signal_to_failure_type(signal: str) -> tuple[Any, Any]:
+    """Map a harness signal string to (FailureType, FailureClass).
+
+    Used when bridging Phase5 observations into Phase4 domain objects
+    for the DefaultRecoveryPolicy.decide() call.
+    """
+    from lhas.domain.enums import FailureClass, FailureType
+
+    _SIGNAL_MAP: dict[str, tuple[Any, Any]] = {
+        "TOOL_ERROR": (FailureType.TOOL_ERROR, FailureClass.EXECUTION),
+        "ANOMALY": (FailureType.TOOL_ERROR, FailureClass.EXECUTION),
+        "STALLED": (FailureType.STALE_CONTEXT, FailureClass.CONTEXT),
+        "REGRESSING": (FailureType.WRONG_MATCH, FailureClass.REASONING),
+    }
+    return _SIGNAL_MAP.get(signal, (FailureType.UNKNOWN, FailureClass.UNKNOWN))
+
+
 # ── PolicyStrategy protocol ────────────────────────────────────────
 
 @runtime_checkable
@@ -156,7 +196,7 @@ class PolicyStrategy(Protocol):
         """Return a progress observer, or None if progress is disabled."""
         ...
 
-    def on_step_result(
+    async def on_step_result(
         self,
         *,
         step: int,
@@ -253,7 +293,7 @@ class AgentExecutionHarness:
                 )
 
             # ── strategy recovery decision ─────────────────────────
-            decision = self._strategy.on_step_result(
+            decision = await self._strategy.on_step_result(
                 step=step_idx, result=result, observer=observer,
             )
 
@@ -263,6 +303,9 @@ class AgentExecutionHarness:
                     "action": decision.action.value,
                     "reason": decision.reason,
                     "signal": decision.signal,
+                    # Phase4 provenance fields (when available)
+                    **{k: v for k, v in decision.evidence.items()
+                       if k.startswith("phase4_")},
                 })
                 if self._strategy.recovery_budget_enabled():
                     # Budget-aware: count toward rejection limit
@@ -321,7 +364,7 @@ class BareStrategy:
     def create_observer(self):
         return None
 
-    def on_step_result(self, *, step, result, observer):
+    async def on_step_result(self, *, step, result, observer):
         return _NONE_DECISION
 
     def should_validate(self):
@@ -353,7 +396,7 @@ class RetryOnlyStrategy:
     def create_observer(self):
         return None
 
-    def on_step_result(self, *, step, result, observer):
+    async def on_step_result(self, *, step, result, observer):
         status = result.get("status", "")
         if status in {"error", "failure", "FAILURE"} and self._retries < self.MAX_RETRIES:
             self._retries += 1
@@ -387,7 +430,7 @@ class ValidatorOnlyStrategy:
     def create_observer(self):
         return None
 
-    def on_step_result(self, *, step, result, observer):
+    async def on_step_result(self, *, step, result, observer):
         return _NONE_DECISION
 
     def should_validate(self):
@@ -408,6 +451,12 @@ class OdysFullStrategy:
     Recovery delegates to the frozen Phase4 DefaultRecoveryPolicy
     imported from ``lhas.recovery``.  Observable progress signals
     influence recovery decisions.  Recovery budget policy is active.
+
+    _delegate_to_recovery() constructs minimum Phase4 domain objects
+    (Task, Attempt, FailureReport) and calls
+    ``await DefaultRecoveryPolicy().decide(...)`` to obtain a real
+    RecoveryAction, which is then translated back into a harness-level
+    RecoveryDecision.
     """
 
     def __init__(self):
@@ -416,7 +465,25 @@ class OdysFullStrategy:
         from lhas.recovery import DefaultRecoveryPolicy
         self._recovery_policy = DefaultRecoveryPolicy()
         self._attempt_number = 0
-        self._recovery_history: list[Any] = []
+        self._max_attempts: int = 3
+        self._recovery_history: list[Any] = []  # list[RecoveryAction]
+
+        # Cached Phase4 domain object references (lazy import)
+        self._Task = None
+        self._Attempt = None
+        self._FailureReport = None
+        self._new_id = None
+
+    def _ensure_domain_imports(self) -> None:
+        """Lazy-import Phase4 domain constructors (idempotent)."""
+        if self._Task is not None:
+            return
+        from lhas.domain.models import Task, Attempt, new_id
+        from lhas.failure import FailureReport
+        self._Task = Task
+        self._Attempt = Attempt
+        self._FailureReport = FailureReport
+        self._new_id = new_id
 
     @property
     def arm(self) -> ControlArm:
@@ -424,6 +491,11 @@ class OdysFullStrategy:
 
     def configure(self, *, task, generation_config):
         self._attempt_number = 0
+        self._max_attempts = getattr(task, "max_attempts", 3) if hasattr(task, "max_attempts") else 3
+        # Derive max_attempts from budget if the RuntimeTask doesn't carry it.
+        # Use min of max_turns and a recovery ceiling of 3 (matches Phase4 default).
+        if hasattr(task, "budget"):
+            self._max_attempts = min(task.budget.max_turns, 3)
         self._recovery_history.clear()
         return {
             "recovery": True,
@@ -437,7 +509,7 @@ class OdysFullStrategy:
     def create_observer(self):
         return ShadowProgressObserver(window_size=5)
 
-    def on_step_result(self, *, step, result, observer):
+    async def on_step_result(self, *, step, result, observer):
         status = result.get("status", "")
 
         # Check observable progress signal first (A3: progress influences recovery)
@@ -446,7 +518,7 @@ class OdysFullStrategy:
             if records:
                 latest = records[-1]
                 if latest.signal in {SignalKind.ANOMALY, SignalKind.STALLED, SignalKind.REGRESSING}:
-                    return self._delegate_to_recovery(
+                    return await self._delegate_to_recovery(
                         step=step,
                         result=result,
                         signal=latest.signal.value,
@@ -455,63 +527,86 @@ class OdysFullStrategy:
 
         # Direct tool error → delegate to Phase4 recovery
         if status in {"error", "failure", "FAILURE"}:
-            return self._delegate_to_recovery(
+            return await self._delegate_to_recovery(
                 step=step, result=result,
                 signal="TOOL_ERROR", reason=f"tool status={status}",
             )
 
         return _NONE_DECISION
 
-    def _delegate_to_recovery(
+    async def _delegate_to_recovery(
         self, *, step: int, result: dict[str, Any],
         signal: str, reason: str,
     ) -> RecoveryDecision:
         """Bridge Phase5 observations into the frozen Phase4 recovery policy.
 
-        The DefaultRecoveryPolicy.decide() interface expects domain objects.
-        We synthesize the minimum viable inputs and translate the decision
-        back into a harness-level RecoveryDecision.
+        Constructs minimum viable Phase4 domain objects (Task, Attempt,
+        FailureReport) from the Phase5 context, calls
+        ``DefaultRecoveryPolicy().decide()``, and translates the returned
+        ``RecoveryAction`` back into a harness-level ``RecoveryDecision``.
         """
+        self._ensure_domain_imports()
         self._attempt_number += 1
 
-        # Translate the Phase4 recovery action type into a harness action.
-        # DefaultRecoveryPolicy returns RecoveryAction with action_type.
-        # We inspect the decision synchronously by running the policy's
-        # decision logic (it is deterministic given the attempt number).
-        action_type = self._classify_recovery_action(
-            attempt_number=self._attempt_number,
-            signal=signal,
+        # ── Construct minimum Phase4 domain objects ────────────────
+        task_obj = self._Task(
+            id="phase5-harness-task",
+            project_id="phase5-pilot",
+            title="Phase5 harness recovery delegation",
+            objective="Recovery bridge from Phase5 harness to Phase4 policy",
+            max_attempts=self._max_attempts,
         )
 
+        attempt = self._Attempt(
+            id=self._new_id(),
+            run_id="phase5-harness-run",
+            attempt_number=self._attempt_number,
+        )
+
+        failure_type, failure_class = _signal_to_failure_type(signal)
+
+        failure_report = self._FailureReport(
+            attempt_id=attempt.id,
+            failure_type=failure_type,
+            failure_class=failure_class,
+            evidence=result.get("error", result.get("output", str(result)))[:500] if result else reason,
+            summary=reason,
+            confidence=0.9,
+            suggested_recovery="retry with failure context" if self._attempt_number < self._max_attempts else "escalate",
+        )
+
+        # ── Call the real Phase4 recovery policy ──────────────────
+        recovery_action = await self._recovery_policy.decide(
+            task=task_obj,
+            attempt=attempt,
+            failure_report=failure_report,
+            attempt_number=self._attempt_number,
+            max_attempts=self._max_attempts,
+            history=self._recovery_history,
+        )
+
+        # ── Record the Phase4 action in history ───────────────────
+        self._recovery_history.append(recovery_action)
+
+        # ── Translate Phase4 RecoveryAction → harness RecoveryDecision
+        harness_action = _map_phase4_action(recovery_action.action_type)
+
         return RecoveryDecision(
-            action=action_type,
-            reason=f"[Phase4 recovery] {reason} (attempt {self._attempt_number})",
+            action=harness_action,
+            reason=f"[Phase4] {recovery_action.reason} (attempt {self._attempt_number})",
             signal=signal,
             evidence={
                 "phase4_delegation": True,
+                "phase4_recovery_action_type": recovery_action.action_type.value,
+                "phase4_reason": recovery_action.reason,
+                "phase4_attempt_from": recovery_action.attempt_from,
+                "phase4_attempt_to": recovery_action.attempt_to,
+                "phase4_added_context": recovery_action.added_context,
+                "phase4_context_policy": recovery_action.context_policy,
                 "recovery_policy": "DefaultRecoveryPolicy",
                 "attempt_number": self._attempt_number,
             },
         )
-
-    def _classify_recovery_action(
-        self, *, attempt_number: int, signal: str,
-    ) -> RecoveryActionKind:
-        """Map Phase4 recovery logic to harness action kinds.
-
-        Mirrors DefaultRecoveryPolicy escalation ladder:
-          attempt 1 → RETRY_WITH_FAILURE_CONTEXT
-          attempt 2 → RETRY_WITH_EXPANDED_CONTEXT
-          attempt 3+ → ESCALATE
-          ANOMALY/STALLED → retry with context
-        """
-        if signal in {"ANOMALY", "STALLED", "REGRESSING"}:
-            if attempt_number == 1:
-                return RecoveryActionKind.RETRY_WITH_CONTEXT
-            if attempt_number == 2:
-                return RecoveryActionKind.RETRY_WITH_CONTEXT
-            return RecoveryActionKind.ESCALATE
-        return RecoveryActionKind.RETRY
 
     def should_validate(self):
         return True

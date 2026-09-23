@@ -35,7 +35,7 @@ from lhas.phase5.substrate import (
     VerifiedFact,
     VerifiedTaskState,
 )
-from lhas.phase5.types import ControlArm
+from lhas.phase5.types import ControlArm, NativeResult
 
 
 # ── Helpers ──────────────────────────────────────────────────────
@@ -657,7 +657,7 @@ class TestV15V21_BenchmarkIntegration:
 
     def test_v16_official_runtime_invoked(self):
         from lhas.phase5.runtime_backend import ToolMazeRuntimeBackend
-        assert hasattr(ToolMazeRuntimeBackend, "run_tool")
+        assert hasattr(ToolMazeRuntimeBackend, "execute")
 
     def test_v17_no_custom_perturbation_in_live_path(self):
         """Verify runtime_backend delegates to official ExecutionEngine."""
@@ -676,14 +676,47 @@ class TestV15V21_BenchmarkIntegration:
         assert "ToolMazeOfflineEvaluator" in source or "judge" in source.lower()
 
     def test_v19_tsr_parity(self):
-        """TSR from adapter must match official MetricsCalculator."""
-        pass  # Requires actual execution — structural check only
+        """TSR from adapter must match official MetricsCalculator.
+
+        Structural verification: offline_native_evaluate returns a
+        NativeResult with tsr as a float.  Golden parity (exact value
+        match) is covered in test_phase5_toolmaze_integration T8.
+        """
+        from lhas.phase5.toolmaze_adapter import ToolMazeAdapter
+        adapter = ToolMazeAdapter()
+        tasks = adapter.enumerate_tasks()
+        desc = tasks[0]
+        artifact = adapter.finalize_runtime_artifact(desc.task_id)
+        result = adapter.offline_native_evaluate(desc.task_id, artifact)
+        assert isinstance(result, NativeResult)
+        assert result.tsr is not None
+        assert isinstance(result.tsr, float)
 
     def test_v20_prr_parity(self):
-        pass  # Requires actual execution
+        """PRR from adapter is a valid float or None."""
+        from lhas.phase5.toolmaze_adapter import ToolMazeAdapter
+        adapter = ToolMazeAdapter()
+        tasks = adapter.enumerate_tasks()
+        desc = tasks[0]
+        artifact = adapter.finalize_runtime_artifact(desc.task_id)
+        result = adapter.offline_native_evaluate(desc.task_id, artifact)
+        assert isinstance(result, NativeResult)
+        # PRR may be None for P0 tasks (no perturbation)
+        if result.prr is not None:
+            assert isinstance(result.prr, float)
 
     def test_v21_rc_parity(self):
-        pass  # Requires actual execution
+        """RC from adapter is a valid float or None."""
+        from lhas.phase5.toolmaze_adapter import ToolMazeAdapter
+        adapter = ToolMazeAdapter()
+        tasks = adapter.enumerate_tasks()
+        desc = tasks[0]
+        artifact = adapter.finalize_runtime_artifact(desc.task_id)
+        result = adapter.offline_native_evaluate(desc.task_id, artifact)
+        assert isinstance(result, NativeResult)
+        # RC may be None for P0 tasks
+        if result.rc is not None:
+            assert isinstance(result.rc, float)
 
 
 # ══════════════════════════════════════════════════════════════════════
