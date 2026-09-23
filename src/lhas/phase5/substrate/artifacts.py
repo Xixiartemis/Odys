@@ -1,4 +1,4 @@
-"""Artifact Store and Effect Receipt.
+"""Artifact Store and Effect Receipt — HARDENED.
 
 Content-addressed artifact storage with integrity verification.
 Effect receipts track side-effect certainty.
@@ -25,12 +25,13 @@ class EffectStatus(str, Enum):
     UNCERTAIN = "UNCERTAIN"
 
 
+
 class ArtifactRef(BaseModel):
     """Reference to a stored artifact with content addressing."""
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     artifact_id: str = Field(default_factory=_new_id)
-    kind: str  # file_mutation | patch | test_result | workspace_snapshot | tool_output | env_snapshot
+    kind: str
     sha256: str
     size_bytes: Optional[int] = None
     mime_type: Optional[str] = None
@@ -44,19 +45,14 @@ class ArtifactRef(BaseModel):
 
 
 class EffectReceipt(BaseModel):
-    """Represents side-effect certainty.
-
-    CONFIRMED: must not blindly repeat the mutation.
-    UNCERTAIN: must require reconciliation before retry.
-    NOT_OBSERVED: retry/repair may remain eligible.
-    """
+    """Represents side-effect certainty."""
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     invocation_id: str
     effect_status: EffectStatus
     before_digest: Optional[str] = None
     after_digest: Optional[str] = None
-    artifact_refs: list[str] = Field(default_factory=list)
+    artifact_refs: tuple[str, ...] = ()
     observed_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
@@ -67,10 +63,16 @@ class ArtifactStore(Protocol):
     def get(self, artifact_id: str) -> Optional[bytes]: ...
     def ref(self, artifact_id: str) -> Optional[ArtifactRef]: ...
     def exists(self, artifact_id: str) -> bool: ...
+    def verify_integrity(self, artifact_id: str) -> bool: ...
 
 
 class InMemoryArtifactStore:
-    """In-memory artifact store with content addressing."""
+    """In-memory artifact store with content addressing.
+
+    put() stores content, computes digest, and verifies the stored
+    content matches the declared sha256 before returning the ref.
+    UNAUTHORIZED_ARTIFACT_PROMOTION=BLOCKED: only put() can create refs.
+    """
 
     def __init__(self):
         self._store: dict[str, bytes] = {}
@@ -85,7 +87,6 @@ class InMemoryArtifactStore:
         producer_evidence_id: str = "",
     ) -> ArtifactRef:
         sha = hashlib.sha256(content).hexdigest()
-        # Check if content already stored
         for existing_id, existing_ref in self._refs.items():
             if existing_ref.sha256 == sha:
                 return existing_ref
@@ -101,6 +102,10 @@ class InMemoryArtifactStore:
         )
         self._store[artifact_id] = content
         self._refs[artifact_id] = ref
+        # Post-put verification: confirm stored content matches declared digest
+        assert self.verify_integrity(artifact_id), (
+            f"Artifact integrity check failed immediately after put: {artifact_id}"
+        )
         return ref
 
     def get(self, artifact_id: str) -> Optional[bytes]:
@@ -113,7 +118,6 @@ class InMemoryArtifactStore:
         return artifact_id in self._store
 
     def verify_integrity(self, artifact_id: str) -> bool:
-        """Verify stored content matches its declared digest."""
         content = self._store.get(artifact_id)
         ref = self._refs.get(artifact_id)
         if content is None or ref is None:

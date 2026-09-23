@@ -1,16 +1,17 @@
-"""Benchmark Outcome and Runtime/Offline Separation.
+"""Benchmark Outcome and Runtime/Offline Separation — HARDENED.
 
 Runtime validator produces ValidatorFeedback (can trigger StateCommit).
 Benchmark offline grader produces BenchmarkOutcome (CANNOT mutate runtime state).
 
-Type/API firewall: BenchmarkOutcome cannot reach runtime state mutation.
+TestValidatorHelper is clearly labeled as test-only.
+Production validators implement the RuntimeValidatorProtocol.
 """
 
 from __future__ import annotations
 
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any, Optional
+from typing import Any, Optional, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -21,8 +22,9 @@ from .validation import ValidatorFeedback, ValidatorDecision, ValidatorExecution
 class BenchmarkOutcome(BaseModel):
     """Offline benchmark scoring result.
 
-    MUST NOT mutate TaskState, trigger recovery, change ControlState,
+    CANNOT mutate TaskState, trigger recovery, change ControlState,
     or decide runtime action.  For experiment scoring only.
+    No reference to runtime state objects.
     """
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -36,20 +38,41 @@ class BenchmarkOutcome(BaseModel):
     judge_output: Optional[dict[str, Any]] = None
     evaluated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
-    # CRITICAL: No reference to VerifiedTaskState, ControlState, or
-    # StateCommitter.  This type has no method to mutate runtime state.
-    # It is purely a data carrier for offline scoring.
 
+@runtime_checkable
+class RuntimeValidatorProtocol(Protocol):
+    """Protocol for production runtime validators.
 
-class RuntimeValidator:
-    """Runtime validator that produces ValidatorFeedback.
-
-    May trigger StateCommit through the reducer.
+    Production implementations receive actual runtime/environment evidence.
     """
 
-    def __init__(self, validator_id: str, version: str = "1.0"):
+    @property
+    def validator_id(self) -> str: ...
+
+    def validate(
+        self,
+        *,
+        candidate_id: str,
+        evidence_refs: list[str],
+        observed_state_digest: str = "",
+        runtime_evidence: Optional[dict[str, Any]] = None,
+    ) -> ValidatorFeedback: ...
+
+
+class TestValidatorHelper:
+    """TEST-ONLY validator helper for provider-free testing.
+
+    NOT a production validator.  Does NOT receive actual runtime evidence.
+    Use RuntimeValidatorProtocol implementations for live experiments.
+    """
+
+    def __init__(self, validator_id: str = "test-validator", version: str = "1.0"):
         self._validator_id = validator_id
         self._version = version
+
+    @property
+    def validator_id(self) -> str:
+        return self._validator_id
 
     def validate(
         self,
@@ -59,8 +82,9 @@ class RuntimeValidator:
         observed_state_digest: str = "",
         accept_condition: bool = True,
         failure_type: Optional[str] = None,
+        runtime_evidence: Optional[dict[str, Any]] = None,
     ) -> ValidatorFeedback:
-        """Produce validator feedback for a candidate."""
+        """Produce deterministic test feedback."""
         if accept_condition:
             return ValidatorFeedback(
                 validator_id=self._validator_id,
@@ -84,6 +108,10 @@ class RuntimeValidator:
             )
 
 
+# Backward-compat alias — prefer TestValidatorHelper in new code.
+RuntimeValidator = TestValidatorHelper
+
+
 class OfflineGrader:
     """Offline benchmark grader.
 
@@ -101,10 +129,6 @@ class OfflineGrader:
         native_metrics: dict[str, Any],
         judge_output: Optional[dict[str, Any]] = None,
     ) -> BenchmarkOutcome:
-        """Produce offline benchmark outcome.
-
-        This method has no reference to any runtime state object.
-        """
         return BenchmarkOutcome(
             trial_id=trial_id,
             benchmark_name=self._benchmark_name,

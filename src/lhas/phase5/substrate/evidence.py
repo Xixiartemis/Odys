@@ -1,7 +1,13 @@
-"""Append-only Evidence Ledger.
+"""Append-only Evidence Ledger — HARDENED.
 
 EvidenceEvent records are immutable once appended.
 Monotonic sequence per run.
+
+Effect taxonomy:
+  SIDE_EFFECT_CONFIRMED   — mutation verified
+  SIDE_EFFECT_UNCERTAIN   — reconciliation required before retry
+  SIDE_EFFECT_NOT_OBSERVED — retry/repair eligible
+  TERMINATED              — execution termination ONLY (never used for effect status)
 """
 
 from __future__ import annotations
@@ -32,6 +38,7 @@ class EvidenceEventType(str, Enum):
     ENVIRONMENT_OBSERVED = "ENVIRONMENT_OBSERVED"
     SIDE_EFFECT_CONFIRMED = "SIDE_EFFECT_CONFIRMED"
     SIDE_EFFECT_UNCERTAIN = "SIDE_EFFECT_UNCERTAIN"
+    SIDE_EFFECT_NOT_OBSERVED = "SIDE_EFFECT_NOT_OBSERVED"
     PROGRESS_SIGNAL = "PROGRESS_SIGNAL"
     RECOVERY_DECISION = "RECOVERY_DECISION"
     VALIDATION_CANDIDATE = "VALIDATION_CANDIDATE"
@@ -40,11 +47,16 @@ class EvidenceEventType(str, Enum):
     TERMINATED = "TERMINATED"
 
 
-class EvidenceEvent(BaseModel):
-    """Immutable append-only evidence record.
+# Effect status → event type mapping (exact, no placeholders)
+EFFECT_EVENT_MAP = {
+    "CONFIRMED": EvidenceEventType.SIDE_EFFECT_CONFIRMED,
+    "UNCERTAIN": EvidenceEventType.SIDE_EFFECT_UNCERTAIN,
+    "NOT_OBSERVED": EvidenceEventType.SIDE_EFFECT_NOT_OBSERVED,
+}
 
-    Never mutated after creation.  Sequence is monotonic per run.
-    """
+
+class EvidenceEvent(BaseModel):
+    """Immutable append-only evidence record."""
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     evidence_id: str = Field(default_factory=_new_id)
@@ -58,7 +70,7 @@ class EvidenceEvent(BaseModel):
     correlation_id: Optional[str] = None
     payload: dict[str, Any] = Field(default_factory=dict)
     payload_digest: str = ""
-    artifact_refs: list[str] = Field(default_factory=list)
+    artifact_refs: tuple[str, ...] = ()
     observed_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
     def __init__(self, **data: Any) -> None:
@@ -71,10 +83,7 @@ class EvidenceEvent(BaseModel):
 
 
 class EvidenceLedger:
-    """Append-only in-memory evidence ledger.
-
-    Monotonic sequence guarantee.  No mutation of historical records.
-    """
+    """Append-only in-memory evidence ledger.  Monotonic sequence guarantee."""
 
     def __init__(self, run_id: str):
         self._run_id = run_id
@@ -99,10 +108,9 @@ class EvidenceLedger:
         payload: Optional[dict[str, Any]] = None,
         parent_event_id: Optional[str] = None,
         correlation_id: Optional[str] = None,
-        artifact_refs: Optional[list[str]] = None,
+        artifact_refs: Optional[tuple[str, ...]] = None,
         strategy_epoch: int = 0,
     ) -> EvidenceEvent:
-        """Append a new evidence event.  Returns the immutable record."""
         event = EvidenceEvent(
             sequence=self._next_sequence,
             task_id=task_id,
@@ -113,7 +121,7 @@ class EvidenceLedger:
             parent_event_id=parent_event_id,
             correlation_id=correlation_id,
             payload=payload or {},
-            artifact_refs=artifact_refs or [],
+            artifact_refs=artifact_refs or (),
         )
         self._events.append(event)
         self._by_id[event.evidence_id] = event
@@ -124,7 +132,6 @@ class EvidenceLedger:
         return self._by_id.get(evidence_id)
 
     def events_since(self, sequence: int) -> list[EvidenceEvent]:
-        """Return events with sequence >= given value."""
         return [e for e in self._events if e.sequence >= sequence]
 
     def events_by_type(self, event_type: EvidenceEventType) -> list[EvidenceEvent]:

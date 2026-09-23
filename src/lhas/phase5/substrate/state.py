@@ -5,6 +5,8 @@ ControlState represents runtime control-plane state.
 
 Invariant: UNVERIFIED_AGENT_CLAIM_CANNOT_MUTATE_VERIFIED_STATE
 Invariant: CONTROL_STATE_CANNOT_BE_USED_AS_VERIFIED_ENVIRONMENT_STATE
+Invariant: DIRECT_VERIFIED_STATE_MUTATION=IMPOSSIBLE (frozen=True)
+Invariant: VERIFIED_STATE_DIGEST_CONTRACT=EXPLICIT
 """
 
 from __future__ import annotations
@@ -12,7 +14,7 @@ from __future__ import annotations
 import hashlib
 import json
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Any, Optional, Sequence
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -26,9 +28,9 @@ def _canonical_json(value: Any) -> bytes:
     return json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
 
 
-def _state_digest(facts: dict[str, Any], artifacts: dict[str, Any]) -> str:
+def _state_digest(facts: dict[str, Any], artifacts: Sequence[str]) -> str:
     """Deterministic digest of verified state."""
-    payload = _canonical_json({"facts": facts, "artifacts": artifacts})
+    payload = _canonical_json({"facts": facts, "artifacts": list(artifacts)})
     return hashlib.sha256(payload).hexdigest()
 
 
@@ -56,32 +58,34 @@ class VerifiedTaskState(BaseModel):
 
     Only promoted through StateCommitter after validator ACCEPT.
     Agent claims cannot directly mutate this state.
+    FROZEN: all mutations must go through with_commit() which returns
+    a new instance.  DIRECT_VERIFIED_STATE_MUTATION=IMPOSSIBLE.
     """
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", frozen=True)
 
     task_id: str
     run_id: str
     goal: str
     state_version: int = 0
-    verified_facts: dict[str, VerifiedFact] = Field(default_factory=dict)
-    verified_artifact_ids: list[str] = Field(default_factory=list)
+    verified_facts: tuple[VerifiedFact, ...] = Field(default_factory=tuple)
+    verified_artifact_ids: tuple[str, ...] = Field(default_factory=tuple)
     status: str = "ACTIVE"  # ACTIVE | COMPLETED | FAILED | ESCALATED
     last_commit_id: Optional[str] = None
     state_digest: str = ""
 
-    def __init__(self, **data: Any) -> None:
-        super().__init__(**data)
+    def model_post_init(self, _context: Any) -> None:
         if not self.state_digest:
-            self.state_digest = self._compute_digest()
+            object.__setattr__(self, "state_digest", self._compute_digest())
 
     def _compute_digest(self) -> str:
-        facts = {k: f.value for k, f in sorted(self.verified_facts.items())}
-        arts = sorted(self.verified_artifact_ids)
-        return _state_digest(facts, arts)
+        facts = {f.key: f.value for f in sorted(self.verified_facts, key=lambda f: f.key)}
+        return _state_digest(facts, sorted(self.verified_artifact_ids))
 
     def fact_value(self, key: str, default: Any = None) -> Any:
-        f = self.verified_facts.get(key)
-        return f.value if f else default
+        for f in self.verified_facts:
+            if f.key == key:
+                return f.value
+        return default
 
     def with_commit(
         self,
@@ -92,11 +96,19 @@ class VerifiedTaskState(BaseModel):
         new_artifact_ids: list[str],
         new_status: Optional[str] = None,
     ) -> "VerifiedTaskState":
-        """Produce a new immutable state version."""
-        updated_facts = dict(self.verified_facts)
+        """Produce a new immutable state version.
+
+        This is the ONLY way to mutate verified state.
+        """
+        # Merge facts: new facts override existing ones with same key
+        existing_by_key: dict[str, VerifiedFact] = {f.key: f for f in self.verified_facts}
         for f in new_facts:
-            updated_facts[f.key] = f
-        updated_arts = list(set(self.verified_artifact_ids + new_artifact_ids))
+            existing_by_key[f.key] = f
+        updated_facts = tuple(existing_by_key.values())
+
+        # Merge artifact ids (deduplicated, sorted for determinism)
+        updated_arts = tuple(sorted(set(self.verified_artifact_ids + tuple(new_artifact_ids))))
+
         new_version = self.state_version + 1
         result = VerifiedTaskState(
             task_id=self.task_id,
@@ -158,6 +170,8 @@ class StateCommit(BaseModel):
     """Immutable record of a verified state transition.
 
     Only created by StateCommitter after validator ACCEPT + SUCCESS.
+    Stores accepted_facts so rebuild_state() can reconstruct from
+    commit history alone (REBUILD_SOURCE=MATERIALIZED_STATE_INDEPENDENT).
     """
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -165,8 +179,9 @@ class StateCommit(BaseModel):
     feedback_id: str
     previous_state_version: int
     next_state_version: int
-    accepted_evidence_ids: list[str] = Field(default_factory=list)
-    accepted_artifact_ids: list[str] = Field(default_factory=list)
+    accepted_evidence_ids: tuple[str, ...] = ()
+    accepted_artifact_ids: tuple[str, ...] = ()
+    accepted_facts: tuple[VerifiedFact, ...] = ()
     resulting_state_digest: str = ""
     committed_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
