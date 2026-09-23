@@ -4,7 +4,6 @@ Validates that paired trials share identical non-policy variables.
 Generates paired_trial_manifest.json for each experiment run.
 Runs the pilot experiment infrastructure (provider-free dry-run).
 """
-
 from __future__ import annotations
 
 import hashlib
@@ -22,7 +21,11 @@ from .types import (
     TrialStatus,
 )
 from .toolmaze_adapter import ToolMazeAdapter
-from .control_arms import create_policy, assert_matched_authority
+from .control_arms import (
+    create_policy,
+    assert_matched_authority,
+    ExperimentPairValidator,
+)
 from .artifacts import ArtifactWriter
 from .firewall import OfflineGraderFirewall
 from .provenance import ProvenanceFreeze, arm_definitions_snapshot
@@ -30,114 +33,6 @@ from .provenance import ProvenanceFreeze, arm_definitions_snapshot
 
 def canonical_json(value: Any) -> bytes:
     return json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-
-
-class ExperimentPairValidator:
-    """Validates paired trial identity — only control policy may differ.
-
-    Checks:
-    - task_id identical
-    - benchmark_version identical
-    - model_id identical
-    - provider identical
-    - temperature identical
-    - prompt identical
-    - tools identical
-    - budget identical
-    - deadline identical
-    - environment identical
-    """
-
-    def validate(
-        self,
-        trials: list[dict[str, Any]],
-    ) -> dict[str, Any]:
-        """Validate a set of paired trials.
-
-        Returns validation result with violations list.
-        """
-        if len(trials) < 2:
-            return {"valid": True, "violations": [], "message": "need at least 2 trials to validate pairing"}
-
-        reference = trials[0]
-        violations: list[str] = []
-
-        identity_fields = [
-            "task_id", "benchmark_name", "benchmark_revision",
-            "model_id", "provider", "dataset_digest",
-        ]
-
-        for i, trial in enumerate(trials[1:], 1):
-            for field in identity_fields:
-                ref_val = reference.get(field)
-                trial_val = trial.get(field)
-                if ref_val != trial_val:
-                    violations.append(
-                        f"trial {i} ({trial.get('arm', '?')}): {field} mismatch "
-                        f"({trial_val!r} != {ref_val!r})"
-                    )
-
-            # Check generation config
-            ref_gen = reference.get("generation_config", {})
-            trial_gen = trial.get("generation_config", {})
-            for gen_field in ["model_id", "provider", "temperature"]:
-                if ref_gen.get(gen_field) != trial_gen.get(gen_field):
-                    violations.append(
-                        f"trial {i}: generation_config.{gen_field} mismatch"
-                    )
-
-            # Check budget
-            ref_budget = reference.get("root_budget", {})
-            trial_budget = trial.get("root_budget", {})
-            if ref_budget != trial_budget:
-                violations.append(f"trial {i}: root_budget mismatch")
-
-            # Check that arm differs
-            if trial.get("arm") == reference.get("arm"):
-                violations.append(f"trial {i}: arm must differ from reference")
-
-        return {
-            "valid": len(violations) == 0,
-            "violations": violations,
-            "trial_count": len(trials),
-            "reference_arm": reference.get("arm"),
-        }
-
-    def generate_paired_manifest(
-        self,
-        experiment_id: str,
-        task_id: str,
-        trials: list[dict[str, Any]],
-    ) -> dict[str, Any]:
-        """Generate paired_trial_manifest.json."""
-        validation = self.validate(trials)
-
-        manifest = {
-            "experiment_id": experiment_id,
-            "task_id": task_id,
-            "trial_count": len(trials),
-            "paired_at": datetime.now(timezone.utc).isoformat(),
-            "validation": validation,
-            "trials": [],
-        }
-
-        for trial in trials:
-            trial_entry = {
-                "trial_id": trial.get("trial_id"),
-                "task_id": trial.get("task_id"),
-                "arm": trial.get("arm"),
-                "seed": trial.get("seed"),
-                "budget": trial.get("root_budget"),
-                "policy_hash": hashlib.sha256(
-                    canonical_json({"arm": trial.get("arm"), "policy_config": trial.get("policy_config", {})})
-                ).hexdigest()[:16],
-                "environment_hash": hashlib.sha256(
-                    canonical_json(trial.get("environment_snapshot", {}))
-                ).hexdigest()[:16],
-            }
-            manifest["trials"].append(trial_entry)
-
-        return manifest
 
 
 class PilotRunner:
@@ -209,32 +104,30 @@ class PilotRunner:
                 ))
                 self.firewall.end_runtime()
 
-                # Build trial manifest
+                # Build trial manifest with ALL invariant fields
                 trial_id = f"{self.experiment_id}_{desc.task_id}_{arm.value}"
-                manifest = TrialManifest(
+                invariants = ExperimentPairValidator.compute_trial_invariants(
                     experiment_id=self.experiment_id,
                     trial_id=trial_id,
-                    benchmark_name=self.adapter.benchmark_identity.benchmark_name,
-                    benchmark_revision=self.adapter.benchmark_identity.benchmark_revision,
-                    dataset_digest=self.adapter.benchmark_identity.dataset_digest,
-                    task_id=desc.task_id,
-                    native_condition=self.adapter.native_condition(desc),
-                    complexity=desc.complexity,
-                    perturbation_mode=desc.perturbation_mode,
-                    arm=arm,
-                    model_id=gen_config.model_id,
-                    provider=gen_config.provider,
+                    adapter=self.adapter,
+                    task=runtime_task,
                     generation_config=gen_config,
-                    root_budget=runtime_task.budget,
+                    arm=arm,
+                    perturbation_mode=desc.perturbation_mode.value,
+                    fault_source="BENCHMARK_NATIVE",
+                    validator_identity="phase5-default",
+                    offline_grader_identity="toolmaze-judge",
                 )
+                invariants["seed"] = gen_config.seed
+                invariants["environment_snapshot"] = runtime_task.environment_snapshot
 
                 arm_results[arm] = result
-                trial_manifests.append(manifest.model_dump(mode="json"))
+                trial_manifests.append(invariants)
 
                 # Write artifacts
-                self._write_trial_artifacts(trial_id, desc, manifest, result)
+                self._write_trial_artifacts(trial_id, desc, invariants, result)
 
-            # Validate pairing
+            # Validate pairing — comprehensive invariant check
             pairing = self.validator.validate(trial_manifests)
             paired_manifest = self.validator.generate_paired_manifest(
                 self.experiment_id, desc.task_id, trial_manifests,
@@ -248,6 +141,7 @@ class PilotRunner:
                 "arm_results": {arm.value: r for arm, r in arm_results.items()},
                 "pairing_valid": pairing["valid"],
                 "pairing_violations": pairing.get("violations", []),
+                "invariant_fields_checked": pairing.get("invariant_fields_checked", 0),
             })
 
         # Generate firewall report
@@ -267,6 +161,7 @@ class PilotRunner:
             "results_summary": {
                 "all_pairings_valid": all(r["pairing_valid"] for r in results),
                 "total_violations": sum(len(r["pairing_violations"]) for r in results),
+                "invariant_fields_count": len(ExperimentPairValidator.INVARIANT_FIELDS),
             },
             "generated_at": datetime.now(timezone.utc).isoformat(),
         }
@@ -291,6 +186,7 @@ class PilotRunner:
             "total_trials": len(sample_tasks) * len(arms),
             "all_pairings_valid": experiment_manifest["results_summary"]["all_pairings_valid"],
             "total_violations": experiment_manifest["results_summary"]["total_violations"],
+            "invariant_fields_count": len(ExperimentPairValidator.INVARIANT_FIELDS),
             "firewall_clean": all(
                 v != "YES" for v in firewall_report.firewall.values()
             ),
@@ -333,7 +229,7 @@ class PilotRunner:
         self,
         trial_id: str,
         desc: Any,
-        manifest: TrialManifest,
+        manifest: dict[str, Any],
         result: dict[str, Any],
     ) -> None:
         """Write all trial artifacts."""

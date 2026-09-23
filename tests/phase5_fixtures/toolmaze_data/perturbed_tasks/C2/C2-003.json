@@ -1,0 +1,105 @@
+{
+  "task_id": "C2-003",
+  "template_id": "T001",
+  "domains": [
+    "web",
+    "data"
+  ],
+  "complexity": "C2",
+  "perturbation_mode": "P2",
+  "task_description": "Complete the C2/P2 task: C2-003",
+  "user_input": {
+    "query": "Please find and analyze data for C2-003",
+    "context": {
+      "domain": "web"
+    }
+  },
+  "execution_trace": [
+    {
+      "step": 0,
+      "tool_name": "search_web",
+      "arguments": {
+        "query": "find C2-003 data"
+      },
+      "output": {
+        "results": [
+          {
+            "url": "http://example.com/data"
+          }
+        ]
+      },
+      "is_perturbed": true
+    },
+    {
+      "step": 1,
+      "tool_name": "read_file",
+      "arguments": {
+        "path": "/tmp/result.txt"
+      },
+      "output": {
+        "content": "sample content for task"
+      },
+      "is_perturbed": false
+    },
+    {
+      "step": 2,
+      "tool_name": "write_report",
+      "arguments": {
+        "title": "Report C2-003",
+        "body": "analysis complete"
+      },
+      "output": {
+        "status": "success",
+        "report_id": "R-C2-003"
+      },
+      "is_perturbed": true
+    }
+  ],
+  "perturbation_point": 0,
+  "expected_result": {
+    "success": true,
+    "tool_calls": [
+      "search_web",
+      "read_file",
+      "write_report"
+    ],
+    "final_output": "Report C2-003"
+  },
+  "valid_paths": [
+    {
+      "path_id": "alt-0",
+      "tools": [
+        "search_web",
+        "process_data",
+        "write_report"
+      ],
+      "oracle_trace": [
+        {
+          "step": 0,
+          "tool_name": "process_data",
+          "arguments": {
+            "input": "data"
+          }
+        }
+      ]
+    }
+  ],
+  "alternative_tools": [
+    {
+      "paths": [
+        {
+          "tools": [
+            {
+              "tool_name": "process_data",
+              "description": "Process data"
+            },
+            {
+              "tool_name": "write_report",
+              "description": "Write report"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

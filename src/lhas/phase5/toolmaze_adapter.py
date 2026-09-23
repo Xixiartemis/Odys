@@ -1,8 +1,21 @@
 """ToolMaze primary benchmark adapter — official data integration.
 
 Loads tasks from the official ToolMaze HuggingFace dataset (frozen locally).
-Uses the official JudgeSystem for offline evaluation.
 FaultSource.BENCHMARK_NATIVE only — Odys must not alter P1/P2/P3/P4 semantics.
+
+**Three-plane architecture** (Phase 5):
+
+  1. ``ToolMazeRuntimeEnvelope`` (runtime_envelope.py) — what control arms
+     see: task_id, objective, tool skeletons from YAML, prompt, env snapshot,
+     budget.  Never contains hidden fields.
+
+  2. ``ToolMazeRuntimeBackend`` (runtime_backend.py) — wraps the official
+     ExecutionEngine.  Holds the full task JSON for perturbation injection
+     but never exposes hidden fields through its public API.
+
+  3. ``ToolMazeOfflineEvaluator`` (offline_evaluator.py) — runs after
+     runtime termination.  Owns hidden task state, official JudgeSystem,
+     and MetricsCalculator.
 
 Hidden fields stripped from runtime-visible tasks:
   - expected_result (ground truth tool calls)
@@ -55,7 +68,12 @@ class ToolMazeAdapter:
 
     Loads from experiments/phase5/benchmarks/toolmaze/data/perturbed_tasks/.
     Strips hidden fields before passing to runtime.
-    Uses official JudgeSystem for offline evaluation.
+
+    **Three-plane architecture**: Tools are loaded from official YAML
+    definitions (``tools/definitions/*.yaml``) via ``ToolLoader``, NOT
+    from ``execution_trace``.  Offline evaluation delegates to
+    ``ToolMazeOfflineEvaluator`` which owns the hidden task state and
+    the official ``JudgeSystem`` + ``MetricsCalculator``.
     """
 
     def __init__(
@@ -196,40 +214,56 @@ class ToolMazeAdapter:
     def _extract_visible_tools(self, task: dict[str, Any]) -> list[dict[str, Any]]:
         """Extract tool definitions visible to the runtime agent.
 
-        For C1: tools are inferred from execution_trace (minus hidden outputs).
-        For C2-C4: alternative_tools provide the tool definitions.
+        Tools are loaded from official YAML definitions via ToolLoader.
+        This replaces the previous oracle-leaking implementation that
+        read tool names from ``execution_trace`` and
+        ``alternative_tools`` (hidden fields).
         """
-        tools: list[dict[str, Any]] = []
+        import sys as _sys
+        repo_str = str(self._repo_dir)
+        if repo_str not in _sys.path:
+            _sys.path.insert(0, repo_str)
+        try:
+            from tools.loader import ToolLoader
 
-        # From execution_trace: extract tool names (no outputs)
-        for step in task.get("execution_trace", []):
-            tool_name = step.get("tool_name")
-            if tool_name:
-                tools.append({
-                    "name": tool_name,
-                    "description": f"Tool: {tool_name}",
-                    "parameters": step.get("arguments", {}),
-                })
+            definitions_dir = self._repo_dir / "tools" / "definitions"
+            loader = ToolLoader(str(definitions_dir))
 
-        # From alternative_tools (C2-C4)
-        for alt in task.get("alternative_tools", []):
-            if isinstance(alt, dict):
-                for path in alt.get("paths", []):
-                    for tool in path.get("tools", []):
-                        if isinstance(tool, dict) and tool.get("tool_name"):
-                            tools.append({
-                                "name": tool["tool_name"],
-                                "description": f"Alternative tool: {tool['tool_name']}",
-                            })
+            # Collect all tool names that appear in this task's
+            # execution_trace (name only — no outputs or arguments).
+            trace_tool_names: set[str] = set()
+            for step in task.get("execution_trace", []):
+                tn = step.get("tool_name")
+                if tn:
+                    trace_tool_names.add(tn)
 
-        # Deduplicate by name
-        seen: set[str] = set()
-        unique: list[dict[str, Any]] = []
-        for t in tools:
-            if t["name"] not in seen:
-                seen.add(t["name"])
-                unique.append(t)
-        return unique
+            # Build skeletons from YAML definitions
+            tools: list[dict[str, Any]] = []
+            for tool_name in sorted(trace_tool_names):
+                tool_def = loader.get_tool_by_name(tool_name)
+                if tool_def:
+                    paradigms = tool_def.get("paradigms", {})
+                    fc = paradigms.get("function_call", {})
+                    spec = fc.get("spec", {})
+                    tools.append({
+                        "name": tool_name,
+                        "description": tool_def.get("description", ""),
+                        "parameters": spec.get("parameters", {}),
+                        "category": tool_def.get("category", ""),
+                        "domain": tool_def.get("domain", ""),
+                    })
+                else:
+                    # Fallback for tools not in YAML definitions
+                    tools.append({
+                        "name": tool_name,
+                        "description": f"Tool: {tool_name}",
+                        "parameters": {},
+                    })
+
+            return tools
+        finally:
+            if repo_str in _sys.path:
+                _sys.path.remove(repo_str)
 
     async def reset_environment(self, task: RuntimeTask) -> None:
         """Reset environment for a new trial."""
@@ -267,9 +301,12 @@ class ToolMazeAdapter:
     ) -> NativeResult:
         """Offline evaluation using official ToolMaze judge.
 
-        This runs ONLY after runtime termination.  It accesses the full
-        task data including hidden fields.
+        This runs ONLY after runtime termination.  It delegates to
+        ``ToolMazeOfflineEvaluator`` which owns the hidden task state
+        and the official ``JudgeSystem`` + ``MetricsCalculator``.
         """
+        from .offline_evaluator import ToolMazeOfflineEvaluator
+
         raw = self._find_task(task_id)
         if raw is None:
             return NativeResult(
@@ -277,139 +314,17 @@ class ToolMazeAdapter:
                 native_metrics={"error": f"task not found: {task_id}"},
             )
 
-        # Build a simulated trace from the runtime artifact
-        # In production, this would use the actual agent trace
-        mode = raw.get("perturbation_mode", "P0")
-        complexity = raw.get("complexity", "C1")
+        evaluator = ToolMazeOfflineEvaluator(repo_dir=self._repo_dir)
+        evaluator.register_task(raw)
+        return evaluator.evaluate(task_id, runtime_artifact)
 
-        # Use the official judge logic
-        try:
-            judge_result = self._run_official_judge(raw, runtime_artifact)
-        except Exception as e:
-            judge_result = {"pass": False, "failure_reason": str(e), "trace_check": {}}
-
-        passed = judge_result.get("pass", False)
-
-        # Compute native metrics
-        tsr = 1.0 if passed else 0.0
-        prr = self._compute_prr(raw, judge_result, mode)
-        rc = self._compute_rc(raw, judge_result, mode, passed)
-
-        return NativeResult(
-            tsr=tsr,
-            prr=prr,
-            rc=rc,
-            raw_score=tsr,
-            native_metrics={
-                "toolmaze_task_success": passed,
-                "perturbation_mode": mode,
-                "complexity": complexity,
-                "judge_reason": judge_result.get("failure_reason"),
-            },
-            judge_output=judge_result,
-        )
-
-    def _run_official_judge(
-        self,
-        task: dict[str, Any],
-        runtime_artifact: dict[str, Any],
-    ) -> dict[str, Any]:
-        """Run the official ToolMaze judge.
-
-        Adds the ToolMaze repo to sys.path temporarily to import the judge.
-        """
-        repo_str = str(self._repo_dir)
-        if repo_str not in sys.path:
-            sys.path.insert(0, repo_str)
-
-        try:
-            from evaluation.core.judge import JudgeSystem
-            judge = JudgeSystem()
-
-            # Build a minimal trace dict for the judge
-            # The judge expects {"messages": [...]} format
-            # For dry-run, we use the execution_trace as the agent's trace
-            trace = self._build_simulated_trace(task)
-
-            result = judge.judge(task, trace)
-            return result
-        except ImportError as e:
-            return {"pass": False, "failure_reason": f"judge import failed: {e}", "trace_check": {}}
-        finally:
-            if repo_str in sys.path:
-                sys.path.remove(repo_str)
-
-    def _build_simulated_trace(self, task: dict[str, Any]) -> dict[str, Any]:
-        """Build a simulated trace for judge evaluation.
-
-        In a real run, this would be the agent's actual trace.
-        For dry-run/simulated evaluation, we use the oracle trace.
-        """
-        execution_trace = task.get("execution_trace", [])
-        messages = []
-        for step in execution_trace:
-            messages.append({
-                "role": "assistant",
-                "type": "tool_call",
-                "tool_call": {
-                    "id": f"call_{step.get('step', 0)}",
-                    "name": step.get("tool_name", ""),
-                    "arguments": step.get("arguments", {}),
-                },
-            })
-            messages.append({
-                "role": "tool",
-                "call_id": f"call_{step.get('step', 0)}",
-                "name": step.get("tool_name", ""),
-                "content": step.get("output", {}),
-                "metadata": {"perturbation_status": "perturbed" if step.get("is_perturbed") else "clean"},
-            })
-        return {"messages": messages}
-
-    def _compute_prr(
-        self,
-        task: dict[str, Any],
-        judge_result: dict[str, Any],
-        mode: str,
-    ) -> Optional[float]:
-        """Compute PRR for this task (single-task, returns 0.0 or 1.0 or None)."""
-        if mode == "P0":
-            return None
-        trace_check = judge_result.get("trace_check", {})
-        if not trace_check.get("victim_tool"):
-            return None
-        return 1.0 if judge_result.get("pass") else 0.0
-
-    def _compute_rc(
-        self,
-        task: dict[str, Any],
-        judge_result: dict[str, Any],
-        mode: str,
-        passed: bool,
-    ) -> Optional[float]:
-        """Compute RC for this task."""
-        if mode == "P0":
-            return None
-        if not passed:
-            return 1.0
-        return 0.0  # Simplified: passed = no recovery cost
-
-    # ── Hidden-state access (offline audit only) ────────────────────
-
-    def _get_raw_task(self, task_id: str) -> Optional[dict[str, Any]]:
-        """Offline-only access to full task data including hidden fields."""
-        return self._find_task(task_id)
-
-    def _get_execution_trace(self, task_id: str) -> list[dict[str, Any]]:
-        """Offline-only access to oracle execution trace."""
-        raw = self._find_task(task_id)
-        if raw is None:
-            return []
-        return raw.get("execution_trace", [])
-
-    def _get_expected_result(self, task_id: str) -> dict[str, Any]:
-        """Offline-only access to expected result (ground truth)."""
-        raw = self._find_task(task_id)
-        if raw is None:
-            return {}
-        return raw.get("expected_result", {})
+    # ── Three-plane architecture notes ────────────────────────────────
+    #
+    # Hidden-state accessors (_get_raw_task, _get_execution_trace,
+    # _get_expected_result), metric computation helpers (_compute_prr,
+    # _compute_rc), and judge delegation (_run_official_judge) have been
+    # REMOVED.  These responsibilities now live in:
+    #
+    #   • ToolMazeRuntimeEnvelope  — runtime-visible data plane
+    #   • ToolMazeRuntimeBackend   — execution + perturbation plane
+    #   • ToolMazeOfflineEvaluator — evaluation + metrics plane
