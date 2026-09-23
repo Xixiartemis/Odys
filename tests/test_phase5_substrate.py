@@ -504,7 +504,7 @@ class TestV7_DuplicateCandidateBlocked:
         store = InMemoryArtifactStore()
         reducer = TaskStateReducer(state, ledger, store)
         _commit_evidence(reducer, ledger, feedback_id="fb-1", candidate_id="cand-X")
-        with pytest.raises(CommitRejected, match="Duplicate commit for candidate"):
+        with pytest.raises(CommitRejected, match="Duplicate commit for candidate_id"):
             _commit_evidence(reducer, ledger, feedback_id="fb-2", candidate_id="cand-X")
 
 
