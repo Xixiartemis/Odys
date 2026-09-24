@@ -47,6 +47,7 @@ class ModelAction:
     content: Optional[str] = None
     thought: Optional[str] = None
     tool_calls: Optional[List["ModelToolCall"]] = None
+    tool_call_id: Optional[str] = None  # For correlating tool results
 
 
 @dataclass

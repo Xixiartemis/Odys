@@ -1,0 +1,20 @@
+{
+  "canary_id": "phase5-real-canary-001",
+  "code_sha": "e9e1211c8eadbf5d6a025edc38d285238e2323fe",
+  "provider_config_hash": "N/A",
+  "task_id": "C1_task_082",
+  "trial_ids": [
+    "phase5-real-canary-001_C1_task_082_A0_BARE",
+    "phase5-real-canary-001_C1_task_082_A1_RETRY_ONLY",
+    "phase5-real-canary-001_C1_task_082_A2_VALIDATOR_ONLY",
+    "phase5-real-canary-001_C1_task_082_A3_ODYS_FULL",
+    "phase5-real-canary-001_C1_task_082_A4_ODYS_MINUS_OBSERVABLE_PROGRESS",
+    "phase5-real-canary-001_C1_task_082_A5_ODYS_MINUS_RECOVERY_BUDGET_POLICY"
+  ],
+  "failure_classification": "INVALID_INFRA",
+  "artifacts": {
+    "experiments\\phase5\\runs\\phase5-real-canary-001\\canary_report.json": "3ba8f98ed0096526d4bc6da6063a5d1e765060b9946b0830cb29200949473846"
+  },
+  "immutable": true,
+  "preserved_at": "2026-09-24T07:14:29.141580+00:00"
+}

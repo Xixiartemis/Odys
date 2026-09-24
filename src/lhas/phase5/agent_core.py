@@ -11,6 +11,7 @@ and converts to official ToolMaze types at the boundary.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from typing import Any, Dict, List, Optional
 
@@ -76,6 +77,7 @@ class Phase5AgentCore:
         self._recovery_decisions: List[Dict[str, Any]] = []
         self._escalation_flag: bool = False
         self._escalation_reason: str = ""
+        self._last_tool_call_id: Optional[str] = None
 
     # ── Injection points ─────────────────────────────────────────────
 
@@ -91,8 +93,26 @@ class Phase5AgentCore:
 
     @staticmethod
     def _run_async(coro):
-        """Run an async coroutine synchronously."""
-        return asyncio.run(coro)
+        """Run an async coroutine synchronously.
+
+        Handles two contexts:
+        - No running loop: use asyncio.run()
+        - Running loop exists: run on a dedicated thread with its own loop
+        """
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        if loop is None:
+            # No running loop — safe to use asyncio.run()
+            return asyncio.run(coro)
+        else:
+            # Running loop exists — run on a dedicated thread
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                future = pool.submit(asyncio.run, coro)
+                return future.result()
 
     # ── Public API (benchmark-neutral) ───────────────────────────────
 
@@ -179,6 +199,9 @@ class Phase5AgentCore:
                 "name": action.tool_name,
                 "arguments": action.arguments or {},
             }
+            if action.tool_call_id:
+                action_msg["tool_call"]["id"] = action.tool_call_id
+                self._last_tool_call_id = action.tool_call_id
         if action.thought:
             action_msg.setdefault("metadata", {})["thought"] = action.thought
         self._conversation_history.append(action_msg)
@@ -187,12 +210,15 @@ class Phase5AgentCore:
 
     def receive_tool_result(self, tool_name: str, result: Dict[str, Any]) -> None:
         """Process a tool result: record, observe, consult strategy."""
-        # 1. Conversation history
-        self._conversation_history.append({
+        # 1. Conversation history — include tool_call_id if available
+        tool_msg: Dict[str, Any] = {
             "role": "tool",
             "name": tool_name,
-            "content": result,
-        })
+            "content": json.dumps(result, default=str, ensure_ascii=False) if isinstance(result, dict) else str(result),
+        }
+        if self._last_tool_call_id:
+            tool_msg["tool_call_id"] = self._last_tool_call_id
+        self._conversation_history.append(tool_msg)
 
         # 2. Notify model driver (failure detection hooks)
         self._model_driver.record_tool_result(tool_name, result)
@@ -305,6 +331,7 @@ class Phase5AgentCore:
         self._recovery_decisions.clear()
         self._escalation_flag = False
         self._escalation_reason = ""
+        self._last_tool_call_id = None
         self._model_driver.reset()
 
     # ── Private helpers ──────────────────────────────────────────────
