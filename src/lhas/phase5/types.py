@@ -60,6 +60,7 @@ class FaultSource(str, Enum):
 class TrialStatus(str, Enum):
     """Classification of a completed trial."""
     VALID = "VALID"
+    VALID_TASK_OUTCOME = "VALID_TASK_OUTCOME"
     INVALID_INFRA = "INVALID_INFRA"
     EXCLUDED = "EXCLUDED"
 
@@ -266,3 +267,15 @@ class ControlPolicy(Protocol):
         adapter: BenchmarkAdapter,
         generation_config: GenerationConfig,
     ) -> dict[str, Any]: ...
+
+
+# ── Exceptions ───────────────────────────────────────────────────────
+
+class PolicyExecutionError(Exception):
+    """Raised when a PolicyStrategy.configure() call fails.
+
+    This replaces silent ``except Exception: pass`` patterns in the
+    runtime backend, ensuring that strategy misconfiguration is
+    surfaced as a clear, catchable error.
+    """
+    pass
