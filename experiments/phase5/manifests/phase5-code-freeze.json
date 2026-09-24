@@ -1,0 +1,14 @@
+{
+  "schema_version": "phase5-code-freeze-001",
+  "merge_sha": "e9e1211c8eadbf5d6a025edc38d285238e2323fe",
+  "pr34_head_sha": "5113db5b2eb4275c7a7e44f4a2c565d0d14aa6f3",
+  "merge_commit_time": "2026-09-24T13:57:19+08:00",
+  "tree_clean": true,
+  "toolmaze_commit": "ef0798aa7f31ac9b33403254b1ef76e8673305fa",
+  "dataset_digest": "9fcd7d7ec3c06afcee098877cca1ae8c29b87a1102be4b365a1055f824a76bc8",
+  "evaluator_digest": "412f9c3615bfd997af903f6514f716be94a7741f",
+  "pilot_manifest_hash": "94b7597d783c6dc85764254e05a645a617da21b1946997ce62cb34ff167ba150",
+  "python_version": "3.11.11",
+  "dependency_lock_digest": "9f1adb0423daedd3e227856ea653bf0262a305c3638b0bcc820e134e83d3b435",
+  "created_at": "2026-09-24T06:01:34.592058+00:00"
+}
