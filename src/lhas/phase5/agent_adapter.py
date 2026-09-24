@@ -30,6 +30,7 @@ Design contract
 from __future__ import annotations
 
 import asyncio
+import logging
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -50,6 +51,23 @@ if str(_TOOLMAZE_REPO) in sys.path:
 
 from .control_arms import PolicyStrategy, RecoveryActionKind, RecoveryDecision  # noqa: E402
 from .model_driver import ModelDriver  # noqa: E402
+
+logger = logging.getLogger(__name__)
+
+# ── Policy execution error ─────────────────────────────────────────
+
+class PolicyExecutionError(Exception):
+    """Raised when a policy/strategy operation fails and must not be silently swallowed.
+
+    Wraps the original exception so callers can inspect the root cause.
+    """
+
+
+# Terminal recovery actions that must halt the agent loop immediately.
+_TERMINAL_RECOVERY_ACTIONS = frozenset({
+    RecoveryActionKind.STOP,
+    RecoveryActionKind.ESCALATE,
+})
 
 
 class OdysToolMazeAgentAdapter(BaseAgent):
@@ -187,6 +205,14 @@ class OdysToolMazeAgentAdapter(BaseAgent):
                 "content": user_message,
             })
 
+        # ── Terminal recovery gate — halt immediately if escalated or ──
+        # a terminal recovery decision (STOP, ESCALATE) was stored.
+        if self._escalation_flag:
+            return AgentAction(
+                type="final_answer",
+                content=f"TERMINATED: {self._escalation_reason}",
+            )
+
         # ── Check pending recovery decision ──────────────────────────
         if self._pending_recovery is not None:
             decision = self._pending_recovery
@@ -197,7 +223,16 @@ class OdysToolMazeAgentAdapter(BaseAgent):
                 self._escalation_reason = decision.reason or "Policy strategy requested escalation"
                 return AgentAction(
                     type="final_answer",
-                    content=f"[ESCALATED] {self._escalation_reason}",
+                    content=f"TERMINATED: {self._escalation_reason}",
+                )
+
+            if decision.action is RecoveryActionKind.STOP:
+                reason = decision.reason or "Policy strategy requested stop"
+                self._escalation_flag = True
+                self._escalation_reason = reason
+                return AgentAction(
+                    type="final_answer",
+                    content=f"TERMINATED: {reason}",
                 )
 
             if decision.action is RecoveryActionKind.RETRY_WITH_CONTEXT:
@@ -209,9 +244,7 @@ class OdysToolMazeAgentAdapter(BaseAgent):
                     "content": failure_context,
                 })
 
-            # For RETRY / NONE / STOP — fall through to normal model call.
-            # STOP is handled at the harness level; here we just let the
-            # model try again (the harness will check stop conditions).
+            # For RETRY / NONE — fall through to normal model call.
 
         # ── Delegate to the model driver ─────────────────────────────
         action = self._model_driver.next_action(
@@ -272,8 +305,16 @@ class OdysToolMazeAgentAdapter(BaseAgent):
                         "step": self._step_count,
                     },
                 )
-            except Exception:
-                pass  # best-effort
+            except ImportError as exc:
+                # EvidenceEventType import failure — ledger module may not be available
+                logger.debug("Evidence event type import failed (non-critical): %s", exc)
+            except AttributeError as exc:
+                # Ledger append method may not exist on injected object
+                logger.debug("Evidence ledger attribute error (non-critical): %s", exc)
+            except Exception as exc:
+                raise PolicyExecutionError(
+                    f"Evidence ledger append failed at step {self._step_count}"
+                ) from exc
 
         # ── 4. Notify shadow observer ────────────────────────────────
         shadow_record = None
@@ -286,8 +327,12 @@ class OdysToolMazeAgentAdapter(BaseAgent):
                     action_identity=action_identity,
                     tool_result=result,
                 )
-            except Exception:
-                pass  # best-effort
+            except AttributeError as exc:
+                # Observer may not have the expected method — diagnostic only
+                logger.warning("Shadow observer attribute error (non-critical): %s", exc)
+            except Exception as exc:
+                # Shadow observer is diagnostic-only; log but don't break the loop
+                logger.warning("Shadow observer failed at step %d: %s", self._step_count, exc)
 
         # ── 5. Consult policy strategy for recovery ──────────────────
         if self._strategy is not None:
@@ -319,8 +364,13 @@ class OdysToolMazeAgentAdapter(BaseAgent):
                         "evidence": dict(decision.evidence) if decision.evidence else {},
                     })
 
-            except Exception:
-                pass  # best-effort — strategy failure must not break the agent loop
+            except PolicyExecutionError:
+                # Already wrapped — re-raise as-is
+                raise
+            except Exception as exc:
+                raise PolicyExecutionError(
+                    f"Policy strategy on_step_result failed at step {self._step_count}"
+                ) from exc
 
     def get_total_tokens(self) -> int:
         """Get total tokens consumed."""

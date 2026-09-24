@@ -15,6 +15,11 @@ Design contract
 * Stratified sampling: ``select_20_tasks()`` picks one task from each
   C1-C4 × P0-P4 cell for the 20-task pilot.
 * Pilot manifest has ``experiment_role=PIPELINE_PILOT``.
+* A fresh ModelDriver is created per trial via ``model_driver_factory``
+  to prevent state leakage between trials.
+* Budget exhaustion is classified as ``VALID_TASK_OUTCOME`` (the task
+  ran and exhausted its budget — that is a valid experimental outcome),
+  not ``INVALID_INFRA``.
 
 This runner does NOT call AgentExecutionHarness or any synthetic
 execution path.  It is the real-model execution counterpart to the
@@ -29,7 +34,7 @@ import json
 import random
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Optional, Sequence
+from typing import Any, Callable, Optional, Sequence
 
 from .types import (
     BenchmarkName,
@@ -44,7 +49,8 @@ from .types import (
     TrialStatus,
 )
 from .toolmaze_adapter import ToolMazeAdapter
-from .runtime_backend import ToolMazeRuntimeBackend, BudgetExhausted
+from .runtime_backend import ToolMazeRuntimeBackend
+from .model_driver import BudgetExhausted
 from .artifacts import ArtifactWriter
 from .firewall import OfflineGraderFirewall
 from .provenance import ProvenanceFreeze, arm_definitions_snapshot
@@ -117,7 +123,6 @@ def select_20_tasks(
 
     return selected
 
-
 # ── Pilot manifest schema ────────────────────────────────────────────
 
 PILOT_MANIFEST_SCHEMA_VERSION = "phase5-real-pilot-001"
@@ -163,9 +168,13 @@ def build_pilot_manifest(
         "experiment_id": experiment_id,
         "frozen_at": datetime.now(timezone.utc).isoformat(),
         "benchmark": benchmark_identity,
+        # Both field names for schema compatibility
         "selected_task_ids": sorted(task_ids),
+        "tasks": sorted(task_ids),
         "task_count": len(task_ids),
+        # Both field names for schema compatibility
         "arm_definitions": arm_definitions,
+        "arms": list(arm_definitions.keys()),
         "arm_count": len(arm_definitions),
         "total_trials": len(task_ids) * len(arm_definitions),
         "generation_config": (
@@ -173,7 +182,9 @@ def build_pilot_manifest(
             if hasattr(model_config, "model_dump")
             else model_config
         ),
+        # Both field names for schema compatibility
         "budgets": budgets,
+        "root_budget": budgets,
         "seed": seed,
         "stratified_sampling": {
             "method": "one_per_CxP_cell",
@@ -197,10 +208,13 @@ class RealPilotRunner:
     Uses ``ToolMazeRuntimeBackend.execute()`` as the single execution
     path.  Never calls ``AgentExecutionHarness`` or synthetic execution.
 
+    A fresh ``ModelDriver`` is created per trial via the injected
+    ``model_driver_factory`` callable to prevent state leakage.
+
     Lifecycle::
 
         runner = RealPilotRunner(
-            model_driver=driver,
+            model_driver_factory=lambda: MyDriver(config),
             manifest_path="experiments/phase5/manifests/phase5-real-pilot-001.json",
         )
         results = runner.run_pilot()
@@ -209,7 +223,8 @@ class RealPilotRunner:
     def __init__(
         self,
         *,
-        model_driver: Any,
+        model_driver: Any = None,
+        model_driver_factory: Optional[Callable[[], Any]] = None,
         manifest_path: Optional[Path] = None,
         output_dir: Optional[Path] = None,
         adapter: Optional[ToolMazeAdapter] = None,
@@ -218,8 +233,13 @@ class RealPilotRunner:
 
         Parameters
         ----------
-        model_driver : ModelDriver
-            The model backend that produces actions for all trials.
+        model_driver : ModelDriver, optional
+            DEPRECATED — use model_driver_factory instead.  If provided,
+            it is wrapped in a lambda for backward compatibility.
+        model_driver_factory : callable, optional
+            A zero-argument callable that returns a fresh ModelDriver
+            instance.  Called once per trial to prevent state leakage.
+            Required unless model_driver is provided.
         manifest_path : Path, optional
             Path to the frozen pilot manifest JSON.  If None, uses
             the default location.
@@ -229,10 +249,25 @@ class RealPilotRunner:
         adapter : ToolMazeAdapter, optional
             Pre-configured adapter.  If None, creates a new one.
         """
-        self._model_driver = model_driver
+        # Resolve the factory — prefer model_driver_factory
+        if model_driver_factory is not None:
+            self._model_driver_factory = model_driver_factory
+        elif model_driver is not None:
+            # Backward compatibility: wrap a single driver in a lambda
+            # that calls reset() each time (best-effort isolation)
+            _driver_ref = model_driver
+            def _factory() -> Any:
+                _driver_ref.reset()
+                return _driver_ref
+            self._model_driver_factory = _factory
+        else:
+            raise ValueError(
+                "Either model_driver_factory or model_driver must be provided"
+            )
+
         self._adapter = adapter or ToolMazeAdapter()
 
-        # Load or create manifest
+        # Load or create manifest — handle both schema variants
         self._manifest_path = (
             manifest_path
             or Path("experiments/phase5/manifests/phase5-real-pilot-001.json")
@@ -240,12 +275,50 @@ class RealPilotRunner:
         self._manifest = self._load_manifest()
 
         self._experiment_id = self._manifest["experiment_id"]
-        self._task_ids = self._manifest["selected_task_ids"]
-        self._arm_definitions = self._manifest["arm_definitions"]
+
+        # FIX: accept both 'selected_task_ids' and 'tasks' keys
+        if "selected_task_ids" in self._manifest:
+            self._task_ids = self._manifest["selected_task_ids"]
+        elif "tasks" in self._manifest:
+            # Legacy schema: 'tasks' is a list of task objects or IDs
+            raw_tasks = self._manifest["tasks"]
+            if raw_tasks and isinstance(raw_tasks[0], dict):
+                self._task_ids = [t["task_id"] for t in raw_tasks]
+            else:
+                self._task_ids = list(raw_tasks)
+        else:
+            raise ValueError(
+                "Manifest missing both 'selected_task_ids' and 'tasks' keys"
+            )
+
+        # FIX: accept both 'arm_definitions' and 'arms' keys
+        if "arm_definitions" in self._manifest:
+            self._arm_definitions = self._manifest["arm_definitions"]
+        elif "arms" in self._manifest:
+            # Legacy schema: 'arms' is a list of arm names
+            self._arm_definitions = {
+                arm_name: {} for arm_name in self._manifest["arms"]
+            }
+        else:
+            raise ValueError(
+                "Manifest missing both 'arm_definitions' and 'arms' keys"
+            )
+
         self._gen_config = self._parse_gen_config(
             self._manifest["generation_config"]
         )
-        self._budgets = self._manifest["budgets"]
+
+        # FIX: accept both 'budgets' and 'root_budget' keys
+        if "budgets" in self._manifest:
+            self._budgets = self._manifest["budgets"]
+        elif "root_budget" in self._manifest:
+            self._budgets = self._manifest["root_budget"]
+        else:
+            self._budgets = {
+                "max_turns": 30,
+                "max_model_calls": 50,
+            }
+
         self._seed = self._manifest.get("seed", 42)
 
         # Output directory
@@ -302,6 +375,9 @@ class RealPilotRunner:
         For each task × arm: runs through the official ExecutionEngine
         via ``ToolMazeRuntimeBackend.execute()`` with the appropriate
         ``PolicyStrategy``.  Writes all artifacts per trial.
+
+        A fresh ModelDriver is created per trial via the injected
+        ``model_driver_factory`` to prevent state leakage.
 
         Parameters
         ----------
@@ -370,6 +446,9 @@ class RealPilotRunner:
                     deadline_seconds=self._budgets.get("deadline_seconds"),
                 )
 
+                # FIX: create a fresh driver per trial
+                model_driver = self._model_driver_factory()
+
                 # Create the runtime backend with full raw task
                 backend = ToolMazeRuntimeBackend(
                     raw_task,
@@ -381,7 +460,7 @@ class RealPilotRunner:
                     self._firewall.begin_runtime()
 
                     result = backend.execute(
-                        self._model_driver,
+                        model_driver,
                         strategy=strategy,
                         max_rounds=max_rounds,
                     )
@@ -413,19 +492,50 @@ class RealPilotRunner:
                     # Write artifacts
                     self._write_trial_artifacts(
                         trial_id, desc, invariants, result,
+                        raw_task=raw_task,
                     )
 
                 except BudgetExhausted as e:
                     self._firewall.end_runtime()
+
+                    # FIX: budget exhaustion is a VALID_TASK_OUTCOME
+                    # The trial ran and exhausted its budget — that is a
+                    # valid experimental outcome, not an infra failure.
                     arm_results[arm.value] = {
                         "error": str(e),
                         "budget_exhausted": True,
                         "arm": arm.value,
+                        "classification": TrialStatus.VALID_TASK_OUTCOME.value,
                     }
-                    errors.append({
-                        "trial_id": trial_id,
-                        "error": f"Budget exhausted: {e}",
-                    })
+                    # Still record as valid outcome (not an error)
+                    runtime_task = self._adapter.build_runtime_task(desc)
+                    invariants = ExperimentPairValidator.compute_trial_invariants(
+                        experiment_id=self._experiment_id,
+                        trial_id=trial_id,
+                        adapter=self._adapter,
+                        task=runtime_task,
+                        generation_config=self._gen_config,
+                        arm=arm,
+                        perturbation_mode=desc.perturbation_mode.value,
+                        fault_source="BENCHMARK_NATIVE",
+                        validator_identity="phase5-real-pilot",
+                        offline_grader_identity="toolmaze-judge",
+                    )
+                    invariants["seed"] = self._seed
+                    invariants["environment_snapshot"] = runtime_task.environment_snapshot
+                    invariants["strategy_config"] = {}
+                    invariants["budget_accounting"] = {
+                        "budget_exhausted": True,
+                        "error": str(e),
+                    }
+                    trial_manifests.append(invariants)
+
+                    # Write artifacts with VALID_TASK_OUTCOME classification
+                    self._write_trial_artifacts(
+                        trial_id, desc, invariants, arm_results[arm.value],
+                        raw_task=raw_task,
+                        override_status=TrialStatus.VALID_TASK_OUTCOME,
+                    )
 
                 except Exception as e:
                     self._firewall.end_runtime()
@@ -536,8 +646,28 @@ class RealPilotRunner:
         desc: TaskDescriptor,
         manifest: dict[str, Any],
         result: dict[str, Any],
+        *,
+        raw_task: Optional[dict[str, Any]] = None,
+        override_status: Optional[TrialStatus] = None,
     ) -> None:
-        """Write all trial artifacts."""
+        """Write all trial artifacts.
+
+        Parameters
+        ----------
+        trial_id : str
+            The trial identifier.
+        desc : TaskDescriptor
+            Task descriptor.
+        manifest : dict
+            Trial manifest/invariants.
+        result : dict
+            Execution result from the backend.
+        raw_task : dict, optional
+            Full raw task JSON (with hidden fields) for native scoring.
+        override_status : TrialStatus, optional
+            If set, use this status instead of computing it from the result.
+            Used for budget exhaustion (VALID_TASK_OUTCOME).
+        """
         # Raw artifact
         self._artifacts.write_raw_artifact(
             trial_id,
@@ -548,30 +678,50 @@ class RealPilotRunner:
             budget_ledger=result.get("budget_accounting", {}),
         )
 
-        # Native score (placeholder — real scoring uses offline evaluator)
-        native = NativeResult(
-            tsr=None,  # Not scored during pilot
-            raw_score=None,
-            native_metrics={
-                "arm": manifest.get("arm"),
-                "recovery_decisions": len(
-                    result.get("recovery_decisions", [])
-                ),
-                "budget_accounting": result.get("budget_accounting", {}),
-            },
-        )
+        # FIX: use actual ToolMazeOfflineEvaluator for native scoring
+        # when the benchmark is available and the raw task JSON is provided
+        native = None
+        if raw_task is not None:
+            try:
+                from .offline_evaluator import ToolMazeOfflineEvaluator
+                evaluator = ToolMazeOfflineEvaluator()
+                evaluator.register_task(raw_task)
+                native = evaluator.evaluate(
+                    desc.task_id, result,
+                )
+            except Exception:
+                native = None
+
+        # Fallback to placeholder if evaluator not available or failed
+        if native is None:
+            native = NativeResult(
+                tsr=None,  # Not scored during pilot (no evaluator)
+                raw_score=None,
+                native_metrics={
+                    "arm": manifest.get("arm"),
+                    "recovery_decisions": len(
+                        result.get("recovery_decisions", [])
+                    ),
+                    "budget_accounting": result.get("budget_accounting", {}),
+                    "native_scoring": "placeholder_no_evaluator",
+                },
+            )
         self._artifacts.write_benchmark_result(trial_id, native)
 
         # Classification
-        budget_exhausted = result.get("budget_accounting", {}).get(
-            "budget_exhausted", False
-        )
-        if budget_exhausted:
-            status = TrialStatus.INVALID_INFRA
-        elif result.get("error"):
-            status = TrialStatus.INVALID_INFRA
+        if override_status is not None:
+            status = override_status
         else:
-            status = TrialStatus.VALID
+            budget_exhausted = result.get("budget_accounting", {}).get(
+                "budget_exhausted", False
+            )
+            if budget_exhausted:
+                # FIX: budget exhaustion → VALID_TASK_OUTCOME, not INVALID_INFRA
+                status = TrialStatus.VALID_TASK_OUTCOME
+            elif result.get("error"):
+                status = TrialStatus.INVALID_INFRA
+            else:
+                status = TrialStatus.VALID
         self._artifacts.classify_trial(trial_id, status)
 
 

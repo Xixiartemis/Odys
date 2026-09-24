@@ -152,5 +152,61 @@
     "max_turns": 15,
     "max_tokens": 100000
   },
-  "output_dir": "experiments/phase5/runs/phase5-real-pilot-001"
+  "output_dir": "experiments/phase5/runs/phase5-real-pilot-001",
+  "selected_task_ids": [
+    "C1_task_004",
+    "C1_task_015",
+    "C1_task_036",
+    "C1_task_082",
+    "C1_task_095",
+    "C2_task_014",
+    "C2_task_018",
+    "C2_task_029",
+    "C2_task_032",
+    "C2_task_095",
+    "C3_task_012",
+    "C3_task_070",
+    "C3_task_076",
+    "C3_task_087",
+    "C3_task_095",
+    "C4_task_004",
+    "C4_task_005",
+    "C4_task_012",
+    "C4_task_028",
+    "C4_task_055"
+  ],
+  "arm_definitions": {
+    "A0_BARE": {
+      "name": "A0_BARE",
+      "description": "Control arm A0_BARE"
+    },
+    "A1_RETRY_ONLY": {
+      "name": "A1_RETRY_ONLY",
+      "description": "Control arm A1_RETRY_ONLY"
+    },
+    "A2_VALIDATOR_ONLY": {
+      "name": "A2_VALIDATOR_ONLY",
+      "description": "Control arm A2_VALIDATOR_ONLY"
+    },
+    "A3_ODYS_FULL": {
+      "name": "A3_ODYS_FULL",
+      "description": "Control arm A3_ODYS_FULL"
+    },
+    "A4_ODYS_MINUS_OBSERVABLE_PROGRESS": {
+      "name": "A4_ODYS_MINUS_OBSERVABLE_PROGRESS",
+      "description": "Control arm A4_ODYS_MINUS_OBSERVABLE_PROGRESS"
+    },
+    "A5_ODYS_MINUS_RECOVERY_BUDGET_POLICY": {
+      "name": "A5_ODYS_MINUS_RECOVERY_BUDGET_POLICY",
+      "description": "Control arm A5_ODYS_MINUS_RECOVERY_BUDGET_POLICY"
+    }
+  },
+  "budgets": {
+    "max_model_calls": 50,
+    "max_turns": 15,
+    "max_tokens": 100000
+  },
+  "task_count": 20,
+  "arm_count": 6,
+  "total_trials": 120
 }

@@ -17,9 +17,9 @@ runtime plane.  Its public API is:
     ``ModelDriver`` and ``PolicyStrategy``.
     Returns a result dict with:
       - official trace (from TraceLogger)
-      - recovery decisions (from strategy)
+      - recovery decisions (from agent_adapter.get_recovery_decisions())
       - evidence events (from EvidenceLedger)
-      - budget accounting (model calls tracked against root budget)
+      - budget accounting (model calls tracked by BudgetedModelDriver)
 
 Design contract
 ───────────────
@@ -32,8 +32,9 @@ Design contract
 * Strategy integration: when a ``PolicyStrategy`` is passed, the backend
   wires the strategy's observer + evidence into the adapter, and after
   each tool result consults the strategy for recovery decisions.
-* Budget enforcement: model calls are tracked against
-  ``root_budget.max_model_calls``; exceeding the budget terminates.
+* Budget enforcement: model calls are tracked via a
+  ``BudgetedModelDriver`` wrapper around the injected ModelDriver;
+  exceeding the budget raises ``BudgetExhausted``.
 """
 
 from __future__ import annotations
@@ -48,7 +49,7 @@ from .runtime_envelope import (
     ToolSkeleton,
     build_envelope_from_task,
 )
-from .types import BudgetConfig
+from .types import BudgetConfig, PolicyExecutionError
 
 
 # ── ToolMaze repo path resolution ────────────────────────────────────
@@ -115,13 +116,14 @@ class ToolMazeRuntimeBackend:
         self._token_usage: Optional[dict[str, int]] = None
         self._finalized = False
 
-        # ── Budget tracking ──
-        self._model_calls_used: int = 0
+        # ── Budget ──
         self._root_budget: Optional[BudgetConfig] = budget or self._envelope.budget
 
         # ── Strategy / substrate state ──
-        self._recovery_decisions: list[dict[str, Any]] = []
         self._evidence_events: list[dict[str, Any]] = []
+
+        # ── Stored observer reference (created once per execute()) ──
+        self._observer: Any = None
 
     # ── Public properties ─────────────────────────────────────────────
 
@@ -137,18 +139,6 @@ class ToolMazeRuntimeBackend:
     @property
     def is_finalized(self) -> bool:
         return self._finalized
-
-    @property
-    def model_calls_used(self) -> int:
-        """Total model calls consumed so far."""
-        return self._model_calls_used
-
-    @property
-    def budget_remaining(self) -> int:
-        """Model calls remaining in the root budget."""
-        if self._root_budget is None:
-            return 0
-        return max(0, self._root_budget.max_model_calls - self._model_calls_used)
 
     # ── Tool skeleton loading ─────────────────────────────────────────
 
@@ -192,22 +182,6 @@ class ToolMazeRuntimeBackend:
             if repo_str in sys.path:
                 sys.path.remove(repo_str)
 
-    # ── Budget enforcement ────────────────────────────────────────────
-
-    def _check_budget(self) -> None:
-        """Raise if root budget is exhausted."""
-        if self._root_budget is not None:
-            if self._model_calls_used >= self._root_budget.max_model_calls:
-                raise BudgetExhausted(
-                    f"Root budget exhausted: {self._model_calls_used}/"
-                    f"{self._root_budget.max_model_calls} model calls used"
-                )
-
-    def _record_model_call(self) -> None:
-        """Increment the model call counter and check budget."""
-        self._model_calls_used += 1
-        self._check_budget()
-
     # ── Execution via official ExecutionEngine ────────────────────────
 
     def execute(
@@ -230,9 +204,9 @@ class ToolMazeRuntimeBackend:
           - The substrate ``EvidenceLedger`` (for evidence collection)
           - Recovery decision recording (consulted after each tool result)
 
-        Budget enforcement: each model call is tracked against
-        ``root_budget.max_model_calls``.  If the budget is exhausted,
-        execution terminates early with a ``BudgetExhausted`` error.
+        Budget enforcement: the model driver is wrapped in a
+        ``BudgetedModelDriver`` that counts calls and raises
+        ``BudgetExhausted`` when the limit is reached.
 
         Parameters
         ----------
@@ -257,28 +231,41 @@ class ToolMazeRuntimeBackend:
         ------
         BudgetExhausted
             If the root budget is exhausted before completion.
+        PolicyExecutionError
+            If strategy.configure() fails.
         RuntimeError
             If the backend is already finalized.
         """
         if self._finalized:
             raise RuntimeError("Backend is finalized — cannot execute again.")
 
-        # Reset budget tracking for this execution
-        self._model_calls_used = 0
-        self._recovery_decisions = []
+        # Reset state for this execution
         self._evidence_events = []
+        self._observer = None
+
+        # ── Wrap model driver with BudgetedModelDriver ──────────────
+        from .model_driver import BudgetedModelDriver, BudgetExhausted
+
+        max_calls = (
+            self._root_budget.max_model_calls
+            if self._root_budget is not None
+            else 50  # fallback default
+        )
+        budgeted_driver = BudgetedModelDriver(model_driver, max_model_calls=max_calls)
 
         # Import the adapter
         from .agent_adapter import OdysToolMazeAgentAdapter
 
-        # Create the adapter wrapping the model driver
-        agent_adapter = OdysToolMazeAgentAdapter(model_driver)
+        # Create the adapter wrapping the budgeted driver
+        # FIX: pass strategy to adapter constructor (line 275 fix)
+        agent_adapter = OdysToolMazeAgentAdapter(budgeted_driver, strategy=strategy)
 
         # ── Wire strategy + substrate handles ─────────────────────────
         strategy_config: dict[str, Any] = {}
 
         if strategy is not None:
             # Strategy config snapshot
+            # FIX: raise PolicyExecutionError instead of silent except (line 300 fix)
             try:
                 from .types import RuntimeTask, GenerationConfig
                 # Build a minimal RuntimeTask from the envelope for configure()
@@ -297,13 +284,17 @@ class ToolMazeRuntimeBackend:
                     provider=getattr(model_driver, '_provider', 'unknown'),
                 )
                 strategy_config = strategy.configure(task=rt, generation_config=gen_cfg)
-            except Exception:
-                strategy_config = {"configured": False}
+            except PolicyExecutionError:
+                raise  # re-raise as-is
+            except Exception as exc:
+                raise PolicyExecutionError(
+                    f"strategy.configure() failed: {exc}"
+                ) from exc
 
-            # Inject shadow observer if strategy provides one
-            observer = strategy.create_observer()
-            if observer is not None:
-                agent_adapter.set_shadow_observer(observer)
+            # FIX: create observer ONCE, store reference (line 304 fix)
+            self._observer = strategy.create_observer()
+            if self._observer is not None:
+                agent_adapter.set_shadow_observer(self._observer)
 
             # Inject evidence ledger
             try:
@@ -330,9 +321,9 @@ class ToolMazeRuntimeBackend:
                 tools_dir=tools_dir,
             )
 
-            # Run the full agent loop with budget tracking
+            # Run the full agent loop — BudgetExhausted is raised by
+            # BudgetedModelDriver.next_action() if the budget is hit
             try:
-                self._check_budget()
                 trace_logger, token_usage = engine.run(max_rounds=max_rounds)
                 self._trace_logger = trace_logger
                 self._token_usage = token_usage
@@ -346,21 +337,24 @@ class ToolMazeRuntimeBackend:
                 sys.path.remove(repo_str)
 
         # ── Collect strategy recovery decisions ───────────────────────
-        if strategy is not None:
+        # FIX: use agent_adapter.get_recovery_decisions() instead of
+        #      self._recovery_decisions (which was always empty)
+        recovery_decisions = agent_adapter.get_recovery_decisions()
+
+        # ── Collect evidence from the stored observer ─────────────────
+        # FIX: reuse stored self._observer, not strategy.create_observer() again
+        if self._observer is not None:
             try:
-                # The strategy's observer has records we can extract
-                observer = strategy.create_observer()
-                if observer is not None:
-                    records = observer.get_records()
-                    self._evidence_events = [
-                        {
-                            "step": r.step,
-                            "signal": r.signal.value,
-                            "reason": r.signal_reason,
-                            "confidence": r.confidence,
-                        }
-                        for r in records
-                    ]
+                records = self._observer.get_records()
+                self._evidence_events = [
+                    {
+                        "step": r.step,
+                        "signal": r.signal.value,
+                        "reason": r.signal_reason,
+                        "confidence": r.confidence,
+                    }
+                    for r in records
+                ]
             except Exception:
                 pass
 
@@ -368,16 +362,13 @@ class ToolMazeRuntimeBackend:
         artifact = self.finalize()
 
         # Enrich with strategy + budget information
-        artifact["recovery_decisions"] = self._recovery_decisions
+        artifact["recovery_decisions"] = recovery_decisions
         artifact["evidence_events"] = self._evidence_events
         artifact["budget_accounting"] = {
-            "model_calls_used": self._model_calls_used,
-            "model_calls_limit": (
-                self._root_budget.max_model_calls
-                if self._root_budget else None
-            ),
-            "budget_remaining": self.budget_remaining,
-            "budget_exhausted": self.budget_remaining <= 0,
+            "model_calls_used": budgeted_driver.calls_used,
+            "model_calls_limit": max_calls,
+            "budget_remaining": budgeted_driver.calls_remaining,
+            "budget_exhausted": budgeted_driver.calls_remaining <= 0,
         }
         artifact["strategy_config"] = strategy_config
 
@@ -412,8 +403,5 @@ class ToolMazeRuntimeBackend:
         }
 
 
-# ── Budget enforcement exception ─────────────────────────────────────
-
-class BudgetExhausted(Exception):
-    """Raised when the root execution budget is exhausted."""
-    pass
+# ── Re-export BudgetExhausted for backward compatibility ─────────────
+from .model_driver import BudgetExhausted  # noqa: E402, F811
