@@ -41,6 +41,7 @@ def _try_import(module_name: str):
         return None
 
 _model_driver_mod = _try_import("lhas.phase5.model_driver")
+_agent_core_mod = _try_import("lhas.phase5.agent_core")
 _agent_adapter_mod = _try_import("lhas.phase5.agent_adapter")
 _runtime_backend_mod = _try_import("lhas.phase5.runtime_backend")
 _control_arms_mod = _try_import("lhas.phase5.control_arms")
@@ -199,7 +200,7 @@ class TestT1_StrategyPassedToAdapter:
     @requires_all_core
     def test_adapter_receives_strategy_via_constructor(self):
         """The OdysToolMazeAgentAdapter accepts strategy at construction."""
-        OdysToolMazeAgentAdapter = _agent_adapter_mod.OdysToolMazeAgentAdapter
+        OdysToolMazeAgentAdapter = _agent_core_mod.Phase5AgentCore
         ScriptedModelDriver = _model_driver_mod.ScriptedModelDriver
         BareStrategy = _control_arms_mod.BareStrategy
 
@@ -252,14 +253,14 @@ class TestT1_StrategyPassedToAdapter:
                 agent_arg = ckw[0][1]
 
             assert agent_arg is not None, "Agent not passed to ExecutionEngine"
-            assert agent_arg._strategy is strategy, (
-                f"Strategy not wired to adapter. Got: {agent_arg._strategy}"
+            assert agent_arg._core._strategy is strategy, (
+                f"Strategy not wired to core. Got: {agent_arg._core._strategy}"
             )
 
     @requires_all_core
     def test_strategy_set_shadow_observer_on_adapter(self):
         """When strategy provides an observer, it is injected into the adapter."""
-        OdysToolMazeAgentAdapter = _agent_adapter_mod.OdysToolMazeAgentAdapter
+        OdysToolMazeAgentAdapter = _agent_core_mod.Phase5AgentCore
         ScriptedModelDriver = _model_driver_mod.ScriptedModelDriver
 
         driver = ScriptedModelDriver([])
@@ -328,9 +329,9 @@ class TestT2_PolicyExecutionError:
         """If strategy.on_step_result raises, the adapter wraps it as
         PolicyExecutionError and re-raises. Strategy failures are NOT silently swallowed.
         """
-        from lhas.phase5.agent_adapter import PolicyExecutionError
+        from lhas.phase5.types import PolicyExecutionError
 
-        OdysToolMazeAgentAdapter = _agent_adapter_mod.OdysToolMazeAgentAdapter
+        OdysToolMazeAgentAdapter = _agent_core_mod.Phase5AgentCore
         ScriptedModelDriver = _model_driver_mod.ScriptedModelDriver
 
         driver = ScriptedModelDriver([
@@ -346,7 +347,7 @@ class TestT2_PolicyExecutionError:
         adapter.initialize("test task", [{"name": "t"}])
 
         # Step 1: tool_call
-        action = adapter.step()
+        action = adapter.next_model_action()
         assert action.type == "tool_call"
 
         # receive_tool_result — strategy raises → PolicyExecutionError
@@ -358,7 +359,7 @@ class TestT2_PolicyExecutionError:
         """PolicyExecutionError is defined in agent_adapter.py and
         is raised when strategy.on_step_result() fails.
         """
-        from lhas.phase5.agent_adapter import PolicyExecutionError
+        from lhas.phase5.types import PolicyExecutionError
 
         assert issubclass(PolicyExecutionError, Exception)
         # Verify it can be raised and caught
@@ -647,7 +648,7 @@ class TestT6_RecoveryDecisionsFromAdapter:
     @requires_all_core
     def test_adapter_records_recovery_decisions(self):
         """When strategy returns a non-NONE decision, adapter records it."""
-        OdysToolMazeAgentAdapter = _agent_adapter_mod.OdysToolMazeAgentAdapter
+        OdysToolMazeAgentAdapter = _agent_core_mod.Phase5AgentCore
         ScriptedModelDriver = _model_driver_mod.ScriptedModelDriver
         ScriptedAction = _model_driver_mod.ScriptedAction
         RecoveryDecision = _control_arms_mod.RecoveryDecision
@@ -670,7 +671,7 @@ class TestT6_RecoveryDecisionsFromAdapter:
         adapter.initialize("test task", [{"name": "t"}])
 
         # Step 1: tool_call
-        action = adapter.step()
+        action = adapter.next_model_action()
         assert action.type == "tool_call"
 
         # receive_tool_result triggers strategy consultation
@@ -685,7 +686,7 @@ class TestT6_RecoveryDecisionsFromAdapter:
     @requires_all_core
     def test_adapter_recovery_decisions_sourced_from_strategy(self):
         """Recovery decisions come from strategy.on_step_result(), not fabricated."""
-        OdysToolMazeAgentAdapter = _agent_adapter_mod.OdysToolMazeAgentAdapter
+        OdysToolMazeAgentAdapter = _agent_core_mod.Phase5AgentCore
         ScriptedModelDriver = _model_driver_mod.ScriptedModelDriver
         ScriptedAction = _model_driver_mod.ScriptedAction
         RecoveryDecision = _control_arms_mod.RecoveryDecision
@@ -708,7 +709,7 @@ class TestT6_RecoveryDecisionsFromAdapter:
 
         adapter = OdysToolMazeAgentAdapter(driver, strategy=strategy)
         adapter.initialize("test task", [{"name": "t"}])
-        adapter.step()
+        adapter.next_model_action()
         adapter.receive_tool_result("t", {"status": "error"})
 
         decisions = adapter.get_recovery_decisions()
@@ -719,7 +720,7 @@ class TestT6_RecoveryDecisionsFromAdapter:
     @requires_all_core
     def test_no_recovery_decisions_when_strategy_returns_none(self):
         """When strategy returns NONE, no recovery decisions are recorded."""
-        OdysToolMazeAgentAdapter = _agent_adapter_mod.OdysToolMazeAgentAdapter
+        OdysToolMazeAgentAdapter = _agent_core_mod.Phase5AgentCore
         ScriptedModelDriver = _model_driver_mod.ScriptedModelDriver
         ScriptedAction = _model_driver_mod.ScriptedAction
         RecoveryDecision = _control_arms_mod.RecoveryDecision
@@ -737,7 +738,7 @@ class TestT6_RecoveryDecisionsFromAdapter:
 
         adapter = OdysToolMazeAgentAdapter(driver, strategy=strategy)
         adapter.initialize("test task", [{"name": "t"}])
-        adapter.step()
+        adapter.next_model_action()
         adapter.receive_tool_result("t", {"status": "success"})
 
         decisions = adapter.get_recovery_decisions()
@@ -859,7 +860,7 @@ class TestT8_TerminalActionStopsExecution:
     @requires_all_core
     def test_escalate_produces_final_answer(self):
         """When pending recovery is ESCALATE, step() returns final_answer."""
-        OdysToolMazeAgentAdapter = _agent_adapter_mod.OdysToolMazeAgentAdapter
+        OdysToolMazeAgentAdapter = _agent_core_mod.Phase5AgentCore
         ScriptedModelDriver = _model_driver_mod.ScriptedModelDriver
         ScriptedAction = _model_driver_mod.ScriptedAction
         RecoveryDecision = _control_arms_mod.RecoveryDecision
@@ -882,14 +883,14 @@ class TestT8_TerminalActionStopsExecution:
         adapter.initialize("test task", [{"name": "t"}])
 
         # Step 1: normal tool_call
-        action = adapter.step()
+        action = adapter.next_model_action()
         assert action.type == "tool_call"
 
         # receive_tool_result triggers ESCALATE decision
         adapter.receive_tool_result("t", {"status": "error"})
 
         # Step 2: should be final_answer due to ESCALATE
-        action = adapter.step()
+        action = adapter.next_model_action()
         assert action.type == "final_answer", (
             f"Expected final_answer due to ESCALATE/TERMINATE, got: {action.type}"
         )
@@ -898,7 +899,7 @@ class TestT8_TerminalActionStopsExecution:
     @requires_all_core
     def test_escalation_flag_set_on_adapter(self):
         """After ESCALATE, adapter.is_escalated is True."""
-        OdysToolMazeAgentAdapter = _agent_adapter_mod.OdysToolMazeAgentAdapter
+        OdysToolMazeAgentAdapter = _agent_core_mod.Phase5AgentCore
         ScriptedModelDriver = _model_driver_mod.ScriptedModelDriver
         ScriptedAction = _model_driver_mod.ScriptedAction
         RecoveryDecision = _control_arms_mod.RecoveryDecision
@@ -920,9 +921,9 @@ class TestT8_TerminalActionStopsExecution:
 
         assert not adapter.is_escalated
 
-        adapter.step()
+        adapter.next_model_action()
         adapter.receive_tool_result("t", {"status": "error"})
-        adapter.step()
+        adapter.next_model_action()
 
         assert adapter.is_escalated
         assert "critical failure" in adapter.escalation_reason
@@ -1007,7 +1008,7 @@ class TestT9_FreshDriverPerTrial:
     @requires_all_core
     def test_adapter_reset_creates_fresh_state(self):
         """OdysToolMazeAgentAdapter.reset() clears all state."""
-        OdysToolMazeAgentAdapter = _agent_adapter_mod.OdysToolMazeAgentAdapter
+        OdysToolMazeAgentAdapter = _agent_core_mod.Phase5AgentCore
         ScriptedModelDriver = _model_driver_mod.ScriptedModelDriver
         ScriptedAction = _model_driver_mod.ScriptedAction
 
@@ -1018,7 +1019,7 @@ class TestT9_FreshDriverPerTrial:
 
         adapter = OdysToolMazeAgentAdapter(driver)
         adapter.initialize("task 1", [{"name": "t"}])
-        adapter.step()
+        adapter.next_model_action()
 
         assert adapter._step_count == 1
         assert len(adapter._conversation_history) > 0

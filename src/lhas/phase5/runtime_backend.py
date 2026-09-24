@@ -253,22 +253,16 @@ class ToolMazeRuntimeBackend:
         )
         budgeted_driver = BudgetedModelDriver(model_driver, max_model_calls=max_calls)
 
-        # Import the adapter
-        from .agent_adapter import OdysToolMazeAgentAdapter
-
-        # Create the adapter wrapping the budgeted driver
-        # FIX: pass strategy to adapter constructor (line 275 fix)
-        agent_adapter = OdysToolMazeAgentAdapter(budgeted_driver, strategy=strategy)
+        # Create the benchmark-neutral agent core
+        from .agent_core import Phase5AgentCore
+        core = Phase5AgentCore(budgeted_driver, strategy=strategy)
 
         # ── Wire strategy + substrate handles ─────────────────────────
         strategy_config: dict[str, Any] = {}
 
         if strategy is not None:
-            # Strategy config snapshot
-            # FIX: raise PolicyExecutionError instead of silent except (line 300 fix)
             try:
                 from .types import RuntimeTask, GenerationConfig
-                # Build a minimal RuntimeTask from the envelope for configure()
                 rt = RuntimeTask(
                     task_id=self._envelope.task_id,
                     objective=self._envelope.objective,
@@ -285,24 +279,26 @@ class ToolMazeRuntimeBackend:
                 )
                 strategy_config = strategy.configure(task=rt, generation_config=gen_cfg)
             except PolicyExecutionError:
-                raise  # re-raise as-is
+                raise
             except Exception as exc:
                 raise PolicyExecutionError(
                     f"strategy.configure() failed: {exc}"
                 ) from exc
 
-            # FIX: create observer ONCE, store reference (line 304 fix)
             self._observer = strategy.create_observer()
             if self._observer is not None:
-                agent_adapter.set_shadow_observer(self._observer)
+                core.set_shadow_observer(self._observer)
 
-            # Inject evidence ledger
             try:
                 from .substrate.evidence import EvidenceLedger
                 ledger = EvidenceLedger(run_id=f"trial-{self.task_id}")
-                agent_adapter.set_evidence_ledger(ledger)
+                core.set_evidence_ledger(ledger)
             except ImportError:
                 ledger = None
+
+        # Create the live ToolMaze adapter from the core
+        from .agent_adapter import create_toolmaze_agent_adapter
+        agent_adapter = create_toolmaze_agent_adapter(core)
 
         # ── Execute through official ExecutionEngine ──────────────────
         tools_dir = str(self._repo_dir / "tools")
@@ -336,10 +332,8 @@ class ToolMazeRuntimeBackend:
             if repo_str in sys.path:
                 sys.path.remove(repo_str)
 
-        # ── Collect strategy recovery decisions ───────────────────────
-        # FIX: use agent_adapter.get_recovery_decisions() instead of
-        #      self._recovery_decisions (which was always empty)
-        recovery_decisions = agent_adapter.get_recovery_decisions()
+        # ── Collect strategy recovery decisions from the core ─────────
+        recovery_decisions = core.get_recovery_decisions()
 
         # ── Collect evidence from the stored observer ─────────────────
         # FIX: reuse stored self._observer, not strategy.create_observer() again

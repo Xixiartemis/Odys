@@ -42,6 +42,7 @@ def _require_module(module_name: str):
 # Attempt imports — guard at module level for tests that need them
 _model_driver_mod = None
 _agent_adapter_mod = None
+_agent_core_mod = None
 
 try:
     _model_driver_mod = importlib.import_module("lhas.phase5.model_driver")
@@ -53,9 +54,15 @@ try:
 except (ModuleNotFoundError, ImportError):
     pass
 
+try:
+    _agent_core_mod = importlib.import_module("lhas.phase5.agent_core")
+except (ModuleNotFoundError, ImportError):
+    pass
+
 _HAS_MODEL_DRIVER = _model_driver_mod is not None
 _HAS_AGENT_ADAPTER = _agent_adapter_mod is not None
-_HAS_BOTH = _HAS_MODEL_DRIVER and _HAS_AGENT_ADAPTER
+_HAS_AGENT_CORE = _agent_core_mod is not None
+_HAS_BOTH = _HAS_MODEL_DRIVER and _HAS_AGENT_CORE
 
 # Helper: get AgentAction class if available
 def _get_agent_action():
@@ -288,10 +295,10 @@ class TestT3_AgentAdapterSatisfiesProtocol:
     """T3: OdysToolMazeAgentAdapter satisfies the BaseAgent protocol."""
 
     def test_has_required_methods(self):
-        mod = _agent_adapter_mod
-        Adapter = mod.OdysToolMazeAgentAdapter
+        mod = _agent_core_mod
+        Adapter = _agent_core_mod.Phase5AgentCore
         assert hasattr(Adapter, "initialize")
-        assert hasattr(Adapter, "step")
+        assert hasattr(Adapter, "next_model_action")
         assert hasattr(Adapter, "receive_tool_result")
         assert hasattr(Adapter, "get_total_tokens")
         assert hasattr(Adapter, "get_token_usage")
@@ -299,21 +306,21 @@ class TestT3_AgentAdapterSatisfiesProtocol:
         assert hasattr(Adapter, "reset")
 
     def test_adapter_is_class(self):
-        mod = _agent_adapter_mod
-        Adapter = mod.OdysToolMazeAgentAdapter
+        mod = _agent_core_mod
+        Adapter = _agent_core_mod.Phase5AgentCore
         assert inspect.isclass(Adapter)
 
     def test_adapter_requires_model_driver(self):
         """Constructor requires a ModelDriver instance."""
-        mod = _agent_adapter_mod
-        Adapter = mod.OdysToolMazeAgentAdapter
+        mod = _agent_core_mod
+        Adapter = _agent_core_mod.Phase5AgentCore
         with pytest.raises(TypeError):
             Adapter()  # Missing required model_driver arg
 
     def test_adapter_subclasses_base_agent(self):
         """Adapter inherits from BaseAgent (only when ToolMaze is available)."""
-        mod = _agent_adapter_mod
-        Adapter = mod.OdysToolMazeAgentAdapter
+        mod = _agent_core_mod
+        Adapter = _agent_core_mod.Phase5AgentCore
         # Check the class MRO for BaseAgent — only meaningful when ToolMaze is present
         base_names = [c.__name__ for c in inspect.getmro(Adapter)]
         if "BaseAgent" not in base_names:
@@ -332,9 +339,9 @@ class TestT4_AgentAdapterRecordsHistory:
 
     def test_history_starts_empty_after_init(self):
         """After initialize(), conversation history has the initial user message."""
-        mod = _agent_adapter_mod
+        mod = _agent_core_mod
         md_mod = _model_driver_mod
-        Adapter = mod.OdysToolMazeAgentAdapter
+        Adapter = _agent_core_mod.Phase5AgentCore
         ScriptedModelDriver = md_mod.ScriptedModelDriver
         driver = ScriptedModelDriver(script=[])
         adapter = Adapter(model_driver=driver)
@@ -345,9 +352,9 @@ class TestT4_AgentAdapterRecordsHistory:
 
     def test_history_grows_with_steps(self):
         """Each step() adds an assistant message to history."""
-        mod = _agent_adapter_mod
+        mod = _agent_core_mod
         md_mod = _model_driver_mod
-        Adapter = mod.OdysToolMazeAgentAdapter
+        Adapter = _agent_core_mod.Phase5AgentCore
         ScriptedModelDriver = md_mod.ScriptedModelDriver
         script = [
             _make_scripted_action("tool_a", {"x": 1}),
@@ -358,7 +365,7 @@ class TestT4_AgentAdapterRecordsHistory:
         adapter.initialize("test task", [{"name": "tool_a"}])
 
         # First step: tool call
-        action = adapter.step()
+        action = adapter.next_model_action()
         history = adapter.get_conversation_history()
         assert len(history) == 2  # user + assistant
         assert history[-1]["role"] == "assistant"
@@ -366,9 +373,9 @@ class TestT4_AgentAdapterRecordsHistory:
 
     def test_tool_result_recorded_in_history(self):
         """receive_tool_result() appends tool message to history."""
-        mod = _agent_adapter_mod
+        mod = _agent_core_mod
         md_mod = _model_driver_mod
-        Adapter = mod.OdysToolMazeAgentAdapter
+        Adapter = _agent_core_mod.Phase5AgentCore
         ScriptedModelDriver = md_mod.ScriptedModelDriver
         script = [
             _make_scripted_action("tool_a", {}),
@@ -378,7 +385,7 @@ class TestT4_AgentAdapterRecordsHistory:
         adapter = Adapter(model_driver=driver)
         adapter.initialize("test task", [{"name": "tool_a"}])
 
-        adapter.step()
+        adapter.next_model_action()
         adapter.receive_tool_result("tool_a", {"status": "success", "output": "ok"})
 
         history = adapter.get_conversation_history()
@@ -398,21 +405,21 @@ class TestT5_AgentAdapterRecordsEvidence:
 
     def test_adapter_has_evidence_injection_point(self):
         """Adapter has set_evidence_ledger method."""
-        mod = _agent_adapter_mod
-        Adapter = mod.OdysToolMazeAgentAdapter
+        mod = _agent_core_mod
+        Adapter = _agent_core_mod.Phase5AgentCore
         assert hasattr(Adapter, "set_evidence_ledger")
 
     def test_adapter_has_shadow_observer_injection(self):
         """Adapter has set_shadow_observer method."""
-        mod = _agent_adapter_mod
-        Adapter = mod.OdysToolMazeAgentAdapter
+        mod = _agent_core_mod
+        Adapter = _agent_core_mod.Phase5AgentCore
         assert hasattr(Adapter, "set_shadow_observer")
 
     def test_adapter_records_to_evidence_ledger(self):
         """When evidence ledger is set, tool results are recorded."""
-        mod = _agent_adapter_mod
+        mod = _agent_core_mod
         md_mod = _model_driver_mod
-        Adapter = mod.OdysToolMazeAgentAdapter
+        Adapter = _agent_core_mod.Phase5AgentCore
         ScriptedModelDriver = md_mod.ScriptedModelDriver
 
         script = [_make_scripted_action("tool_a", {})]
@@ -424,7 +431,7 @@ class TestT5_AgentAdapterRecordsEvidence:
         mock_ledger = MagicMock()
         adapter.set_evidence_ledger(mock_ledger)
 
-        adapter.step()
+        adapter.next_model_action()
         adapter.receive_tool_result("tool_a", {"status": "success"})
 
         # Ledger should have been called
@@ -432,9 +439,9 @@ class TestT5_AgentAdapterRecordsEvidence:
 
     def test_adapter_records_to_shadow_observer(self):
         """When shadow observer is set, tool results are observed."""
-        mod = _agent_adapter_mod
+        mod = _agent_core_mod
         md_mod = _model_driver_mod
-        Adapter = mod.OdysToolMazeAgentAdapter
+        Adapter = _agent_core_mod.Phase5AgentCore
         ScriptedModelDriver = md_mod.ScriptedModelDriver
 
         script = [_make_scripted_action("tool_a", {})]
@@ -446,7 +453,7 @@ class TestT5_AgentAdapterRecordsEvidence:
         mock_observer = MagicMock()
         adapter.set_shadow_observer(mock_observer)
 
-        adapter.step()
+        adapter.next_model_action()
         adapter.receive_tool_result("tool_a", {"status": "success"})
 
         # Observer should have been called
@@ -464,9 +471,9 @@ class TestT6_ExecutionEngineWithAgentAdapter:
     def test_adapter_and_driver_can_coexist(self):
         """Both modules importable and classes exist."""
         md_mod = _model_driver_mod
-        aa_mod = _agent_adapter_mod
+        aa_mod = _agent_core_mod
         assert hasattr(md_mod, "ScriptedModelDriver")
-        assert hasattr(aa_mod, "OdysToolMazeAgentAdapter")
+        assert hasattr(aa_mod, "Phase5AgentCore")
 
     def test_harness_accepts_adapter_as_strategy(self):
         """AgentExecutionHarness can wrap any PolicyStrategy."""
