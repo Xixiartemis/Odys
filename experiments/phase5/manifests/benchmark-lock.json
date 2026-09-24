@@ -1,0 +1,44 @@
+{
+  "schema_version": "phase5-benchmark-lock-v1",
+  "frozen_at": "2026-09-23T06:11:24.255558+00:00",
+  "benchmarks": {
+    "toolmaze": {
+      "benchmark_name": "toolmaze",
+      "repository": "https://github.com/Zhudongsheng75/ToolMaze",
+      "commit_sha": "ef0798aa7f31ac9b33403254b1ef76e8673305fa",
+      "release": "latest (no tags)",
+      "dataset_source": "https://huggingface.co/datasets/dongsheng/ToolMaze",
+      "dataset_hash": "9fcd7d7ec3c06afcee098877cca1ae8c29b87a1102be4b365a1055f824a76bc8",
+      "dataset_file_count": 2000,
+      "dataset_task_counts": {
+        "c1": 500,
+        "c2": 500,
+        "c3": 500,
+        "c4": 500
+      },
+      "evaluator_hash": "412f9c3615bfd997af903f6514f716be94a774140975b82c8ff2fd16b6547833",
+      "evaluator_files": [
+        "evaluation\\core\\judge.py",
+        "evaluation\\core\\metrics.py",
+        "evaluation\\core\\sandbox.py"
+      ],
+      "local_path": "experiments/phase5/benchmarks/toolmaze",
+      "frozen_at": "2026-09-23T06:11:24.255558+00:00"
+    },
+    "toolsandbox": {
+      "benchmark_name": "toolsandbox",
+      "repository": "https://github.com/apple/ToolSandbox",
+      "commit_sha": "c8571d7854316d2e1c5f288e59fe1e34e53f6dd1",
+      "release": "latest (no tags)",
+      "evaluator_hash": "12dc2c2b0943a17a93e9803c6e9d0299cd8ca28aade264ddf6e2f22981c66889",
+      "local_path": "experiments/phase5/benchmarks/toolsandbox",
+      "frozen_at": "2026-09-23T06:11:24.255558+00:00"
+    },
+    "terminal_bench": {
+      "status": "EXTENSION_ONLY_NOT_DOWNLOADED"
+    },
+    "tua_bench": {
+      "status": "EXTENSION_ONLY_NOT_DOWNLOADED"
+    }
+  }
+}

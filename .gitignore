@@ -40,3 +40,10 @@ Thumbs.db
 artifacts/
 results/
 evals/reliability/results/
+
+# Phase5 external benchmark data and run artifacts
+experiments/phase5/benchmarks/
+experiments/phase5/runs/
+
+# Zip archives
+*.zip
