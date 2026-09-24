@@ -78,6 +78,7 @@ class Phase5AgentCore:
         self._escalation_flag: bool = False
         self._escalation_reason: str = ""
         self._last_tool_call_id: Optional[str] = None
+        self._last_tool_call: Optional[Dict[str, Any]] = None  # For A1 retry
 
     # ── Injection points ─────────────────────────────────────────────
 
@@ -175,6 +176,32 @@ class Phase5AgentCore:
                     content=f"TERMINATED: {reason}",
                 )
 
+            if decision.action is RecoveryActionKind.RETRY:
+                # A1: same tool, same arguments — replay last tool call
+                if self._last_tool_call is not None:
+                    replay = ModelAction(
+                        type="tool_call",
+                        tool_name=self._last_tool_call["tool_name"],
+                        arguments=self._last_tool_call["arguments"],
+                        thought=f"[RETRY] {decision.reason}",
+                        tool_call_id=self._last_tool_call.get("tool_call_id"),
+                    )
+                    # Record in conversation history
+                    action_msg: Dict[str, Any] = {
+                        "role": "assistant",
+                        "type": "tool_call",
+                        "content": replay.thought or "",
+                        "tool_call": {
+                            "name": replay.tool_name,
+                            "arguments": replay.arguments or {},
+                        },
+                    }
+                    if replay.tool_call_id:
+                        action_msg["tool_call"]["id"] = replay.tool_call_id
+                    self._conversation_history.append(action_msg)
+                    return replay
+                # No last tool call to replay — fall through to model
+
             if decision.action is RecoveryActionKind.RETRY_WITH_CONTEXT:
                 failure_context = self._build_failure_context(decision)
                 self._conversation_history.append({
@@ -202,6 +229,12 @@ class Phase5AgentCore:
             if action.tool_call_id:
                 action_msg["tool_call"]["id"] = action.tool_call_id
                 self._last_tool_call_id = action.tool_call_id
+            # Track for A1 same-tool-same-args retry
+            self._last_tool_call = {
+                "tool_name": action.tool_name,
+                "arguments": action.arguments or {},
+                "tool_call_id": action.tool_call_id,
+            }
         if action.thought:
             action_msg.setdefault("metadata", {})["thought"] = action.thought
         self._conversation_history.append(action_msg)
@@ -332,6 +365,7 @@ class Phase5AgentCore:
         self._escalation_flag = False
         self._escalation_reason = ""
         self._last_tool_call_id = None
+        self._last_tool_call = None
         self._model_driver.reset()
 
     # ── Private helpers ──────────────────────────────────────────────
