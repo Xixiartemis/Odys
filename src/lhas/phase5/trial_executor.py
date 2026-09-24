@@ -47,6 +47,9 @@ class TrialResult:
         self.official_trace: Dict[str, Any] = {}
         self.derived_view: Dict[str, Any] = {}
         self.recovery_decisions: list = []
+        self.shadow_records: list = []  # K: actual observer records
+        self.evidence_events: list = []  # K: actual ledger events
+        self.recovery_budget_ledger: list = []  # E: budget gate ledger
         self.provider_usage: Dict[str, Any] = {}
         self.grader_result: Dict[str, Any] = {}
         self.error_diagnostics: Optional[Dict[str, Any]] = None
@@ -64,9 +67,11 @@ class TrialResult:
             "round_count": self.derived_view.get("round_count", 0),
             "has_final_answer": self.derived_view.get("has_final_answer", False),
             "grader_pass": self.grader_result.get("judgement", {}).get("pass") if self.grader_result.get("judgement") else None,
-            "tsr": self.grader_result.get("metrics", {}).get("tsr") if self.grader_result.get("metrics") else None,
+            "tsr": self.grader_result.get("metrics_summary", {}).get("tsr") if self.grader_result.get("metrics_summary") else None,
             "provider_usage": self.provider_usage,
             "recovery_decisions": self.recovery_decisions,
+            "shadow_records_count": len(self.shadow_records),
+            "evidence_events_count": len(self.evidence_events),
             "strategy_config": self.strategy_config,
             "error_diagnostics": self.error_diagnostics,
             "wall_time_seconds": round(self.wall_time, 1),
@@ -126,7 +131,16 @@ def execute_trial(
     )
     result.strategy_config = strategy.configure(task=rt, generation_config=gen_cfg)
 
-    # 3. Create observer — canonical lifecycle (A3/A4 create observer, A0/A1/A2 don't)
+    # 3. Create recovery budget gate — E: A3/A4 active, A5 pass-through
+    from .recovery_budget import RecoveryBudgetGate, PassThroughRecoveryBudgetGate
+    if arm == ControlArm.A5_ODYS_MINUS_RECOVERY_BUDGET_POLICY:
+        budget_gate = PassThroughRecoveryBudgetGate()
+    elif strategy.recovery_budget_enabled():
+        budget_gate = RecoveryBudgetGate(max_recovery_attempts=3)
+    else:
+        budget_gate = None
+
+    # 4. Create observer — canonical lifecycle (A3/A4 create observer, A0/A1/A2 don't)
     observer = strategy.create_observer()
 
     # 4. Create core with strategy
@@ -162,9 +176,12 @@ def execute_trial(
     )
 
     start_time = time.time()
+    token_usage_dict = {}
     try:
         trace_logger, token_usage = engine.run(max_rounds=max_rounds)
-        result.official_trace = trace_logger.to_dict() if hasattr(trace_logger, 'to_dict') else {}
+        # L: include actual token usage in official trace
+        result.official_trace = trace_logger.to_dict(token_usage=token_usage) if hasattr(trace_logger, 'to_dict') else {}
+        token_usage_dict = token_usage if isinstance(token_usage, dict) else {}
         result.termination_reason = "completed"
     except BudgetExhausted as exc:
         result.termination_reason = "budget_exhausted"
@@ -183,23 +200,40 @@ def execute_trial(
     result.derived_view = build_derived_view(result.official_trace)
     result.recovery_decisions = core.get_recovery_decisions()
 
+    # K: persist recovery budget gate ledger
+    result.recovery_budget_ledger = budget_gate.ledger if budget_gate is not None else []
+
+    # K: persist actual observer/evidence data
+    result.shadow_records = observer.get_records() if observer is not None and hasattr(observer, 'get_records') else []
+    result.evidence_events = ledger.export_events() if ledger is not None and hasattr(ledger, 'export_events') else []
+
     # 9. Provider usage
     result.provider_usage = {
         "model_calls_used": model_driver.calls_used if hasattr(model_driver, 'calls_used') else 0,
         "input_tokens": model_driver.get_token_usage().input_tokens,
         "output_tokens": model_driver.get_token_usage().output_tokens,
+        "provider_request_count": getattr(model_driver, 'provider_request_count', 0),
         "wall_time_seconds": round(result.wall_time, 1),
+        "official_token_usage": token_usage_dict,
     }
 
-    # 10. Run official offline grader
+    # 10. Run official offline grader (always, even on budget exhaustion)
     result.grader_result = _run_offline_grader(task_json, result.official_trace)
 
-    # 11. Classify validity
+    # J: Classify validity — budget exhaustion is VALID scientific outcome
     grader_error = result.grader_result.get("error")
-    if result.termination_reason == "completed" and grader_error is None:
+    if result.termination_reason in ("completed", "budget_exhausted") and grader_error is None:
         result.validity = "VALID"
-    else:
+    elif result.termination_reason == "provider_transport_failure":
         result.validity = "INVALID_INFRA"
+    elif result.termination_reason == "policy_error":
+        result.validity = "INVALID_INFRA"
+    elif result.termination_reason == "infrastructure_error":
+        result.validity = "INVALID_INFRA"
+    elif grader_error is not None:
+        result.validity = "INVALID_INFRA"
+    else:
+        result.validity = "VALID"
 
     return result
 
@@ -217,12 +251,11 @@ def _run_offline_grader(task_json: dict, official_trace: dict) -> dict:
         calc.add_result(task_json, official_trace, judgement)
         report = calc.generate_report()
 
+        # M: persist complete MetricsCalculator report verbatim
         return {
-            "judgement": {
-                "pass": judgement.get("pass", False),
-                "failure_reason": judgement.get("failure_reason", ""),
-            },
-            "metrics": {
+            "judgement": judgement,
+            "metrics_report": report,  # full verbatim report
+            "metrics_summary": {
                 "tsr": report.get("tsr"),
                 "prr": report.get("prr"),
                 "rc": report.get("rc"),

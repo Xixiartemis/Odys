@@ -36,17 +36,25 @@ def _persist_trial_artifacts(trial_dir: Path, result: TrialResult):
         json.dumps(result.derived_view, indent=2, default=str, ensure_ascii=False))
     (trial_dir / "recovery_decisions.json").write_text(
         json.dumps(result.recovery_decisions, indent=2, default=str, ensure_ascii=False))
-    (trial_dir / "progress_shadow.json").write_text("[]")
+    # K: actual observer records (not placeholder)
+    (trial_dir / "progress_shadow.json").write_text(
+        json.dumps(result.shadow_records, indent=2, default=str, ensure_ascii=False))
+    # K: actual evidence events (not placeholder)
+    (trial_dir / "evidence.jsonl").write_text(
+        "\n".join(json.dumps(e, default=str, ensure_ascii=False) for e in result.evidence_events) if result.evidence_events else "")
+    # E: recovery budget gate ledger
+    (trial_dir / "recovery_budget_ledger.json").write_text(
+        json.dumps(result.recovery_budget_ledger, indent=2, default=str, ensure_ascii=False))
     (trial_dir / "budget_ledger.json").write_text(
-        json.dumps({"model_calls_used": result.provider_usage.get("model_calls_used", 0),
-                     "input_tokens": result.provider_usage.get("input_tokens", 0),
-                     "output_tokens": result.provider_usage.get("output_tokens", 0)}, indent=2))
+        json.dumps(result.provider_usage, indent=2, default=str))
     (trial_dir / "provider_usage.json").write_text(
         json.dumps(result.provider_usage, indent=2, default=str))
+    # M: verbatim native judgement
     (trial_dir / "native_judgement.json").write_text(
-        json.dumps(result.grader_result.get("judgement") or {}, indent=2, default=str))
+        json.dumps(result.grader_result.get("judgement") or {}, indent=2, default=str, ensure_ascii=False))
+    # M: verbatim native metrics (full MetricsCalculator report)
     (trial_dir / "native_metrics.json").write_text(
-        json.dumps(result.grader_result.get("metrics") or {}, indent=2, default=str))
+        json.dumps(result.grader_result.get("metrics_report") or result.grader_result.get("metrics_summary") or {}, indent=2, default=str, ensure_ascii=False))
     (trial_dir / "validity.json").write_text(
         json.dumps({"validity": result.validity,
                      "termination_reason": result.termination_reason,
