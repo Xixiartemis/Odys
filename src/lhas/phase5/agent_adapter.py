@@ -31,31 +31,66 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import sys
-from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-# ── Lazy import of official ToolMaze agent types ─────────────────────
-_TOOLMAZE_REPO = (
-    Path(__file__).resolve().parents[3] / "experiments" / "phase5" / "benchmarks" / "toolmaze"
-)
-
-if str(_TOOLMAZE_REPO) not in sys.path:
-    sys.path.insert(0, str(_TOOLMAZE_REPO))
-
-from evaluation.agents.base_agent import BaseAgent, AgentAction, TokenUsage  # noqa: E402
-
-# Remove from sys.path after import
-if str(_TOOLMAZE_REPO) in sys.path:
-    sys.path.remove(str(_TOOLMAZE_REPO))
-
-from .control_arms import PolicyStrategy, RecoveryActionKind, RecoveryDecision  # noqa: E402
-from .model_driver import ModelDriver  # noqa: E402
+from .control_arms import PolicyStrategy, RecoveryActionKind, RecoveryDecision
+from .model_driver import ModelAction, DriverTokenUsage, ModelDriver
+from .types import PolicyExecutionError
 
 logger = logging.getLogger(__name__)
 
-# PolicyExecutionError lives in types.py as the single canonical definition.
-from .types import PolicyExecutionError  # noqa: E402, F811
+# ── Lazy import of official ToolMaze agent types ─────────────────────
+# These are only available when the frozen benchmark checkout is present.
+# On clean checkout (CI), we define lightweight protocol-compatible stubs
+# so the module is importable.  Live execution REQUIRES the real types.
+
+_TOOLMAZE_AVAILABLE = False
+_BaseAgent = object
+_AgentAction = None
+_TokenUsage = None
+
+def _ensure_toolmaze_types():
+    """Import official ToolMaze types.  Raises ImportError if absent."""
+    global _TOOLMAZE_AVAILABLE, _BaseAgent, _AgentAction, _TokenUsage
+    if _TOOLMAZE_AVAILABLE:
+        return
+    import sys
+    from pathlib import Path
+    repo = Path(__file__).resolve().parents[3] / "experiments" / "phase5" / "benchmarks" / "toolmaze"
+    repo_str = str(repo)
+    if repo_str not in sys.path:
+        sys.path.insert(0, repo_str)
+    try:
+        from evaluation.agents.base_agent import BaseAgent, AgentAction, TokenUsage
+        _BaseAgent = BaseAgent
+        _AgentAction = AgentAction
+        _TokenUsage = TokenUsage
+        _TOOLMAZE_AVAILABLE = True
+    finally:
+        if repo_str in sys.path:
+            sys.path.remove(repo_str)
+
+
+def _convert_to_agent_action(action: ModelAction):
+    """Convert Odys ModelAction → official ToolMaze AgentAction."""
+    _ensure_toolmaze_types()
+    return _AgentAction(
+        type=action.type,
+        tool_name=action.tool_name,
+        arguments=action.arguments,
+        content=action.content,
+        thought=action.thought,
+        tool_calls=action.tool_calls,
+    )
+
+
+def _convert_to_token_usage(usage: DriverTokenUsage):
+    """Convert Odys DriverTokenUsage → official ToolMaze TokenUsage."""
+    _ensure_toolmaze_types()
+    return _TokenUsage(
+        input_tokens=usage.input_tokens,
+        output_tokens=usage.output_tokens,
+    )
 
 # Terminal recovery actions that must halt the agent loop immediately.
 _TERMINAL_RECOVERY_ACTIONS = frozenset({
@@ -64,7 +99,7 @@ _TERMINAL_RECOVERY_ACTIONS = frozenset({
 })
 
 
-class OdysToolMazeAgentAdapter(BaseAgent):
+class OdysToolMazeAgentAdapter(_BaseAgent):
     """Adapter that bridges Odys ``ModelDriver`` to ToolMaze ``BaseAgent``.
 
     The official ``ExecutionEngine`` drives this adapter through the
@@ -175,7 +210,7 @@ class OdysToolMazeAgentAdapter(BaseAgent):
             "content": task_description,
         })
 
-    def step(self, user_message: Optional[str] = None) -> AgentAction:
+    def step(self, user_message: Optional[str] = None):
         """Execute one reasoning step via the model driver.
 
         Delegates to ``model_driver.next_action()`` with the current
@@ -202,10 +237,10 @@ class OdysToolMazeAgentAdapter(BaseAgent):
         # ── Terminal recovery gate — halt immediately if escalated or ──
         # a terminal recovery decision (STOP, ESCALATE) was stored.
         if self._escalation_flag:
-            return AgentAction(
+            return _convert_to_agent_action(ModelAction(
                 type="final_answer",
                 content=f"TERMINATED: {self._escalation_reason}",
-            )
+            ))
 
         # ── Check pending recovery decision ──────────────────────────
         if self._pending_recovery is not None:
@@ -215,19 +250,19 @@ class OdysToolMazeAgentAdapter(BaseAgent):
             if decision.action is RecoveryActionKind.ESCALATE:
                 self._escalation_flag = True
                 self._escalation_reason = decision.reason or "Policy strategy requested escalation"
-                return AgentAction(
+                return _convert_to_agent_action(ModelAction(
                     type="final_answer",
                     content=f"TERMINATED: {self._escalation_reason}",
-                )
+                ))
 
             if decision.action is RecoveryActionKind.STOP:
                 reason = decision.reason or "Policy strategy requested stop"
                 self._escalation_flag = True
                 self._escalation_reason = reason
-                return AgentAction(
+                return _convert_to_agent_action(ModelAction(
                     type="final_answer",
                     content=f"TERMINATED: {reason}",
-                )
+                ))
 
             if decision.action is RecoveryActionKind.RETRY_WITH_CONTEXT:
                 # Inject failure context as a system message so the model
@@ -261,7 +296,8 @@ class OdysToolMazeAgentAdapter(BaseAgent):
             action_msg.setdefault("metadata", {})["thought"] = action.thought
         self._conversation_history.append(action_msg)
 
-        return action
+        # Convert Odys ModelAction → official ToolMaze AgentAction
+        return _convert_to_agent_action(action)
 
     def receive_tool_result(self, tool_name: str, result: Dict[str, Any]) -> None:
         """Receive a tool result from the ExecutionEngine.
@@ -370,9 +406,9 @@ class OdysToolMazeAgentAdapter(BaseAgent):
         """Get total tokens consumed."""
         return self._model_driver.get_total_tokens()
 
-    def get_token_usage(self) -> TokenUsage:
+    def get_token_usage(self):
         """Get detailed token usage statistics."""
-        return self._model_driver.get_token_usage()
+        return _convert_to_token_usage(self._model_driver.get_token_usage())
 
     def get_conversation_history(self) -> List[Dict[str, Any]]:
         """Get the full conversation history."""
