@@ -1,0 +1,11 @@
+{
+  "canary_id": "phase5-real-canary-002",
+  "code_sha": "c2d9005160c88330747fe44218b1f4b653a4c9c1",
+  "immutable": true,
+  "trials_valid": "6/6",
+  "official_grader": "NOT_RUN",
+  "official_trace_persisted": false,
+  "artifact_completeness": "FAIL",
+  "reason": "official_trace.json absent from trial artifacts",
+  "preserved_at": "2026-09-24T07:53:23.360314+00:00"
+}
