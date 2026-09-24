@@ -54,14 +54,8 @@ from .model_driver import ModelDriver  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
-# ── Policy execution error ─────────────────────────────────────────
-
-class PolicyExecutionError(Exception):
-    """Raised when a policy/strategy operation fails and must not be silently swallowed.
-
-    Wraps the original exception so callers can inspect the root cause.
-    """
-
+# PolicyExecutionError lives in types.py as the single canonical definition.
+from .types import PolicyExecutionError  # noqa: E402, F811
 
 # Terminal recovery actions that must halt the agent loop immediately.
 _TERMINAL_RECOVERY_ACTIONS = frozenset({
