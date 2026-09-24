@@ -99,6 +99,48 @@ requires_types = pytest.mark.skipif(
 #  Shared fixtures and helpers
 # ══════════════════════════════════════════════════════════════════════
 
+
+class _FakeToolMazeAdapter:
+    """Minimal adapter that wraps a Phase5AgentCore for testing.
+
+    Satisfies what a mocked ExecutionEngine needs: initialize, step,
+    receive_tool_result, get_total_tokens, get_token_usage,
+    get_conversation_history, reset.  Returns ModelAction directly
+    (no ToolMaze conversion needed when engine is mocked).
+    """
+
+    def __init__(self, core):
+        self._core = core
+
+    def initialize(self, task_description, tool_definitions):
+        self._core.initialize(task_description, tool_definitions)
+
+    def step(self, user_message=None):
+        return self._core.next_model_action(user_message)
+
+    def receive_tool_result(self, tool_name, result):
+        self._core.receive_tool_result(tool_name, result)
+
+    def get_total_tokens(self):
+        return self._core.get_total_tokens()
+
+    def get_token_usage(self):
+        return self._core.get_token_usage()
+
+    def get_conversation_history(self):
+        return self._core.get_conversation_history()
+
+    def reset(self):
+        self._core.reset()
+
+
+def _patch_toolmaze_factory():
+    """Patch create_toolmaze_agent_adapter to return _FakeToolMazeAdapter."""
+    def _fake_factory(core):
+        return _FakeToolMazeAdapter(core)
+    return patch("lhas.phase5.agent_adapter.create_toolmaze_agent_adapter", side_effect=_fake_factory)
+
+
 def _get_agent_action():
     """Get AgentAction from ToolMaze's base_agent via model_driver."""
     if _HAS_MODEL_DRIVER:
@@ -241,7 +283,8 @@ class TestT1_StrategyPassedToAdapter:
                 {"type": "final_answer", "content": "done"},
             ])
 
-            backend.execute(driver, strategy=strategy, max_rounds=1)
+            with _patch_toolmaze_factory():
+                backend.execute(driver, strategy=strategy, max_rounds=1)
 
             # Check that ExecutionEngine was created with an agent that has the strategy
             mock_engine_cls.assert_called_once()
@@ -619,7 +662,8 @@ class TestT5_ShadowObserverSingleInstance:
         ])
 
         with patch.dict(_sys.modules, {"evaluation": MagicMock(), "evaluation.core": MagicMock(), "evaluation.core.sandbox": mock_sandbox}):
-            backend.execute(driver, strategy=strategy, max_rounds=1)
+            with _patch_toolmaze_factory():
+                backend.execute(driver, strategy=strategy, max_rounds=1)
 
             assert strategy.create_observer.call_count >= 1
 
@@ -1061,7 +1105,8 @@ class TestT9_FreshDriverPerTrial:
         with patch.dict(_sys.modules, {"evaluation": MagicMock(), "evaluation.core": MagicMock(), "evaluation.core.sandbox": mock_sandbox}):
             # execute resets the counter
             backend._finalized = False  # allow re-execution
-            result = backend.execute(driver, strategy=None, max_rounds=1)
+            with _patch_toolmaze_factory():
+                result = backend.execute(driver, strategy=None, max_rounds=1)
 
             # Budget was reset at start of execute
             assert backend._model_calls_used >= 0
@@ -1114,7 +1159,8 @@ class TestT10_BudgetExhaustionIsValid:
 
         with patch.dict(_sys.modules, {"evaluation": MagicMock(), "evaluation.core": MagicMock(), "evaluation.core.sandbox": mock_sandbox}):
             # Should not raise BudgetExhausted — it is captured internally
-            result = backend.execute(driver, strategy=None, max_rounds=5)
+            with _patch_toolmaze_factory():
+                result = backend.execute(driver, strategy=None, max_rounds=5)
 
             # Result is a well-formed dict with budget_accounting
             assert "budget_accounting" in result
@@ -1380,3 +1426,42 @@ class TestA4A5_SingleVariableAblation:
 
         a5 = OdysMinusRecoveryBudgetPolicy()
         assert a5.progress_signals_recovery() is True
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  MISSING_TOOLMAZE_DEPENDENCY_TEST
+# ══════════════════════════════════════════════════════════════════════
+
+class TestToolMazeDependencyBoundary:
+    """Verify live ToolMaze execution fails closed without benchmark."""
+
+    def test_create_adapter_raises_without_toolmaze(self):
+        """create_toolmaze_agent_adapter raises ToolMazeDependencyUnavailable
+        when frozen ToolMaze checkout is absent."""
+        from lhas.phase5.agent_adapter import create_toolmaze_agent_adapter, ToolMazeDependencyUnavailable
+        from lhas.phase5.agent_core import Phase5AgentCore
+        from lhas.phase5.model_driver import ScriptedModelDriver, ScriptedAction
+
+        driver = ScriptedModelDriver([ScriptedAction(type="final_answer", content="done")])
+        core = Phase5AgentCore(driver)
+
+        # Reset cached types so _import_toolmaze_types runs fresh
+        import lhas.phase5.agent_adapter as aa_mod
+        from unittest.mock import patch as _patch
+        from pathlib import Path as _Path
+        old_base = aa_mod._ToolMaze_BaseAgent
+        old_action = aa_mod._ToolMaze_AgentAction
+        old_token = aa_mod._ToolMaze_TokenUsage
+        aa_mod._ToolMaze_BaseAgent = None
+        aa_mod._ToolMaze_AgentAction = None
+        aa_mod._ToolMaze_TokenUsage = None
+
+        try:
+            # Mock Path.is_dir to simulate missing ToolMaze checkout
+            with _patch.object(_Path, 'is_dir', return_value=False):
+                with pytest.raises(ToolMazeDependencyUnavailable):
+                    create_toolmaze_agent_adapter(core)
+        finally:
+            aa_mod._ToolMaze_BaseAgent = old_base
+            aa_mod._ToolMaze_AgentAction = old_action
+            aa_mod._ToolMaze_TokenUsage = old_token
