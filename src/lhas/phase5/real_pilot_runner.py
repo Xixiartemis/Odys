@@ -58,6 +58,7 @@ from .control_arms import (
     _STRATEGY_MAP,
     ExperimentPairValidator,
 )
+from .trial_executor import execute_trial, TrialResult
 
 
 def _canonical_json(value: Any) -> bytes:
@@ -267,6 +268,18 @@ class RealPilotRunner:
 
         self._adapter = adapter or ToolMazeAdapter()
 
+        # Tool loader for canonical tool definitions
+        _repo = Path(__file__).resolve().parents[3] / "experiments" / "phase5" / "benchmarks" / "toolmaze"
+        _tools_dir = _repo / "tools" / "definitions"
+        if _tools_dir.is_dir():
+            import sys
+            if str(_repo) not in sys.path:
+                sys.path.insert(0, str(_repo))
+            from tools.loader import ToolLoader
+            self._tool_loader = ToolLoader(str(_tools_dir))
+        else:
+            self._tool_loader = None
+
         # Load or create manifest — handle both schema variants
         self._manifest_path = (
             manifest_path
@@ -427,16 +440,16 @@ class RealPilotRunner:
             for arm in arms:
                 trial_id = f"{self._experiment_id}_{task_id}_{arm.value}"
 
-                # Get the strategy for this arm
-                strategy_cls = _STRATEGY_MAP.get(arm)
-                if strategy_cls is None:
-                    errors.append({
-                        "trial_id": trial_id,
-                        "error": f"No strategy for arm {arm.value}",
-                    })
-                    continue
-
-                strategy = strategy_cls()
+                # Build tool definitions from raw task (canonical)
+                tool_names = set()
+                for step in raw_task.get("execution_trace", []):
+                    if "tool_name" in step:
+                        tool_names.add(step["tool_name"])
+                tool_definitions = []
+                for tn in sorted(tool_names):
+                    tool = self._tool_loader.get_tool_by_name(tn)
+                    if tool:
+                        tool_definitions.append(tool)
 
                 # Build budget from manifest
                 budget = BudgetConfig(
@@ -446,30 +459,27 @@ class RealPilotRunner:
                     deadline_seconds=self._budgets.get("deadline_seconds"),
                 )
 
-                # FIX: create a fresh driver per trial
+                # Fresh model driver per trial
                 model_driver = self._model_driver_factory()
 
-                # Create the runtime backend with full raw task
-                backend = ToolMazeRuntimeBackend(
-                    raw_task,
-                    budget=budget,
-                )
-
-                # Run through the official ExecutionEngine with strategy
+                # ── Canonical execution via TrialExecutor ──────────
                 try:
                     self._firewall.begin_runtime()
 
-                    result = backend.execute(
-                        model_driver,
-                        strategy=strategy,
+                    trial_result: TrialResult = execute_trial(
+                        arm=arm,
+                        task_json=raw_task,
+                        tool_definitions=tool_definitions,
+                        model_driver=model_driver,
+                        budget=budget,
+                        experiment_id=self._experiment_id,
+                        task_id=task_id,
                         max_rounds=max_rounds,
                     )
 
                     self._firewall.end_runtime()
 
-                    arm_results[arm.value] = result
-
-                    # Build trial manifest invariants
+                    # Build pairing invariants from TrialResult
                     runtime_task = self._adapter.build_runtime_task(desc)
                     invariants = ExperimentPairValidator.compute_trial_invariants(
                         experiment_id=self._experiment_id,
@@ -485,68 +495,22 @@ class RealPilotRunner:
                     )
                     invariants["seed"] = self._seed
                     invariants["environment_snapshot"] = runtime_task.environment_snapshot
-                    invariants["strategy_config"] = result.get("strategy_config", {})
-                    invariants["budget_accounting"] = result.get("budget_accounting", {})
+                    invariants["strategy_config"] = trial_result.strategy_config
+                    invariants["budget_accounting"] = trial_result.provider_usage
                     trial_manifests.append(invariants)
 
-                    # Write artifacts
+                    arm_results[arm.value] = trial_result.to_dict()
+
+                    # Write canonical artifacts
                     self._write_trial_artifacts(
-                        trial_id, desc, invariants, result,
+                        trial_id, desc, invariants, trial_result,
                         raw_task=raw_task,
-                    )
-
-                except BudgetExhausted as e:
-                    self._firewall.end_runtime()
-
-                    # FIX: budget exhaustion is a VALID_TASK_OUTCOME
-                    # The trial ran and exhausted its budget — that is a
-                    # valid experimental outcome, not an infra failure.
-                    arm_results[arm.value] = {
-                        "error": str(e),
-                        "budget_exhausted": True,
-                        "arm": arm.value,
-                        "classification": TrialStatus.VALID_TASK_OUTCOME.value,
-                    }
-                    # Still record as valid outcome (not an error)
-                    runtime_task = self._adapter.build_runtime_task(desc)
-                    invariants = ExperimentPairValidator.compute_trial_invariants(
-                        experiment_id=self._experiment_id,
-                        trial_id=trial_id,
-                        adapter=self._adapter,
-                        task=runtime_task,
-                        generation_config=self._gen_config,
-                        arm=arm,
-                        perturbation_mode=desc.perturbation_mode.value,
-                        fault_source="BENCHMARK_NATIVE",
-                        validator_identity="phase5-real-pilot",
-                        offline_grader_identity="toolmaze-judge",
-                    )
-                    invariants["seed"] = self._seed
-                    invariants["environment_snapshot"] = runtime_task.environment_snapshot
-                    invariants["strategy_config"] = {}
-                    invariants["budget_accounting"] = {
-                        "budget_exhausted": True,
-                        "error": str(e),
-                    }
-                    trial_manifests.append(invariants)
-
-                    # Write artifacts with VALID_TASK_OUTCOME classification
-                    self._write_trial_artifacts(
-                        trial_id, desc, invariants, arm_results[arm.value],
-                        raw_task=raw_task,
-                        override_status=TrialStatus.VALID_TASK_OUTCOME,
                     )
 
                 except Exception as e:
                     self._firewall.end_runtime()
-                    arm_results[arm.value] = {
-                        "error": str(e),
-                        "arm": arm.value,
-                    }
-                    errors.append({
-                        "trial_id": trial_id,
-                        "error": str(e),
-                    })
+                    arm_results[arm.value] = {"error": str(e), "arm": arm.value}
+                    errors.append({"trial_id": trial_id, "error": str(e)})
 
             # Validate pairing
             if len(trial_manifests) >= 2:
@@ -645,83 +609,75 @@ class RealPilotRunner:
         trial_id: str,
         desc: TaskDescriptor,
         manifest: dict[str, Any],
-        result: dict[str, Any],
+        trial_result: TrialResult,
         *,
         raw_task: Optional[dict[str, Any]] = None,
-        override_status: Optional[TrialStatus] = None,
     ) -> None:
-        """Write all trial artifacts.
+        """Write all trial artifacts from canonical TrialResult."""
+        trial_dir = self._output_dir / trial_id
+        trial_dir.mkdir(parents=True, exist_ok=True)
 
-        Parameters
-        ----------
-        trial_id : str
-            The trial identifier.
-        desc : TaskDescriptor
-            Task descriptor.
-        manifest : dict
-            Trial manifest/invariants.
-        result : dict
-            Execution result from the backend.
-        raw_task : dict, optional
-            Full raw task JSON (with hidden fields) for native scoring.
-        override_status : TrialStatus, optional
-            If set, use this status instead of computing it from the result.
-            Used for budget exhaustion (VALID_TASK_OUTCOME).
-        """
-        # Raw artifact
-        self._artifacts.write_raw_artifact(
-            trial_id,
-            runtime_events=result.get("tool_calls", []),
-            tool_calls=result.get("tool_calls", []),
-            state_observations=result.get("evidence_events", []),
-            progress_shadow=result.get("recovery_decisions", []),
-            budget_ledger=result.get("budget_accounting", {}),
+        # Official trace — verbatim
+        (trial_dir / "official_trace.json").write_text(
+            json.dumps(trial_result.official_trace, indent=2, default=str, ensure_ascii=False))
+
+        # Derived view — separate
+        (trial_dir / "derived_runtime_view.json").write_text(
+            json.dumps(trial_result.derived_view, indent=2, default=str, ensure_ascii=False))
+
+        # Recovery decisions
+        (trial_dir / "recovery_decisions.json").write_text(
+            json.dumps(trial_result.recovery_decisions, indent=2, default=str, ensure_ascii=False))
+
+        # Actual shadow records (not placeholder)
+        (trial_dir / "progress_shadow.json").write_text(
+            json.dumps(trial_result.shadow_records, indent=2, default=str, ensure_ascii=False))
+
+        # Actual evidence events
+        (trial_dir / "evidence.jsonl").write_text(
+            "\n".join(json.dumps(e, default=str, ensure_ascii=False)
+                       for e in trial_result.evidence_events) if trial_result.evidence_events else "")
+
+        # Recovery budget ledger
+        (trial_dir / "recovery_budget_ledger.json").write_text(
+            json.dumps(trial_result.recovery_budget_ledger, indent=2, default=str, ensure_ascii=False))
+
+        # Budget/provider usage
+        (trial_dir / "budget_ledger.json").write_text(
+            json.dumps(trial_result.provider_usage, indent=2, default=str))
+        (trial_dir / "provider_usage.json").write_text(
+            json.dumps(trial_result.provider_usage, indent=2, default=str))
+
+        # Native judgement + metrics from official grader (verbatim)
+        (trial_dir / "native_judgement.json").write_text(
+            json.dumps(trial_result.grader_result.get("judgement") or {}, indent=2, default=str, ensure_ascii=False))
+        (trial_dir / "native_metrics.json").write_text(
+            json.dumps(trial_result.grader_result.get("metrics_report") or
+                        trial_result.grader_result.get("metrics_summary") or {},
+                        indent=2, default=str, ensure_ascii=False))
+
+        # Validity
+        (trial_dir / "validity.json").write_text(
+            json.dumps({"validity": trial_result.validity,
+                         "termination_reason": trial_result.termination_reason,
+                         "grader_error": trial_result.grader_result.get("error"),
+                         "error_diagnostics": trial_result.error_diagnostics},
+                        indent=2, default=str, ensure_ascii=False))
+
+        # Trial manifest
+        (trial_dir / "trial_manifest.json").write_text(
+            json.dumps(manifest, indent=2, default=str, ensure_ascii=False))
+
+        # Native result for backward compat with ArtifactWriter
+        native = NativeResult(
+            tsr=trial_result.grader_result.get("metrics_summary", {}).get("tsr"),
+            raw_score=None,
+            native_metrics=trial_result.grader_result.get("metrics_report") or {},
         )
-
-        # FIX: use actual ToolMazeOfflineEvaluator for native scoring
-        # when the benchmark is available and the raw task JSON is provided
-        native = None
-        if raw_task is not None:
-            try:
-                from .offline_evaluator import ToolMazeOfflineEvaluator
-                evaluator = ToolMazeOfflineEvaluator()
-                evaluator.register_task(raw_task)
-                native = evaluator.evaluate(
-                    desc.task_id, result,
-                )
-            except Exception:
-                native = None
-
-        # Fallback to placeholder if evaluator not available or failed
-        if native is None:
-            native = NativeResult(
-                tsr=None,  # Not scored during pilot (no evaluator)
-                raw_score=None,
-                native_metrics={
-                    "arm": manifest.get("arm"),
-                    "recovery_decisions": len(
-                        result.get("recovery_decisions", [])
-                    ),
-                    "budget_accounting": result.get("budget_accounting", {}),
-                    "native_scoring": "placeholder_no_evaluator",
-                },
-            )
         self._artifacts.write_benchmark_result(trial_id, native)
 
         # Classification
-        if override_status is not None:
-            status = override_status
-        else:
-            budget_exhausted = result.get("budget_accounting", {}).get(
-                "budget_exhausted", False
-            )
-            if budget_exhausted:
-                # FIX: budget exhaustion → VALID_TASK_OUTCOME, not INVALID_INFRA
-                status = TrialStatus.VALID_TASK_OUTCOME
-            elif result.get("error"):
-                status = TrialStatus.INVALID_INFRA
-            else:
-                status = TrialStatus.VALID
+        status = TrialStatus.VALID if trial_result.validity == "VALID" else TrialStatus.INVALID_INFRA
         self._artifacts.classify_trial(trial_id, status)
 
 

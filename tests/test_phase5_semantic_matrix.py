@@ -308,3 +308,36 @@ class TestSyncAsyncBridge:
             core.receive_tool_result("search", {"status": "success"})
             assert len(core.get_recovery_decisions()) == 0
         asyncio.run(_test())
+
+
+# ══════════════════════════════════════════════════════════════════════
+#  Canonical Execution Path Identity
+# ══════════════════════════════════════════════════════════════════════
+
+class TestCanonicalPathIdentity:
+    """Canary and pilot must use the same execute_trial function."""
+
+    def test_canary_uses_execute_trial(self):
+        """CanaryRunner imports and calls execute_trial."""
+        import lhas.phase5.canary_runner as cr_mod
+        # Verify the import is present
+        source = open(cr_mod.__file__).read()
+        assert "from lhas.phase5.trial_executor import execute_trial" in source or \
+               "from .trial_executor import execute_trial" in source
+
+    def test_pilot_uses_execute_trial(self):
+        """RealPilotRunner imports and calls execute_trial."""
+        import lhas.phase5.real_pilot_runner as rp_mod
+        source = open(rp_mod.__file__).read()
+        assert "from .trial_executor import execute_trial" in source
+        # Must NOT import ToolMazeRuntimeBackend for execution
+        assert "backend.execute(" not in source or \
+               "backend = ToolMazeRuntimeBackend(" not in source
+
+    def test_same_function_identity(self):
+        """Both modules import the same execute_trial function object."""
+        from lhas.phase5.trial_executor import execute_trial as te_func
+        from lhas.phase5.canary_runner import execute_trial as cr_func
+        from lhas.phase5.real_pilot_runner import execute_trial as rp_func
+        assert cr_func is te_func
+        assert rp_func is te_func
