@@ -71,6 +71,8 @@ class Phase5AgentCore:
         # ── Optional integration points ──
         self._shadow_observer: Any = None
         self._evidence_ledger: Any = None
+        self._runtime_validator: Any = None
+        self._validator_events: List[Dict[str, Any]] = []
 
         # ── Recovery state ──
         self._pending_recovery: Optional[RecoveryDecision] = None
@@ -89,6 +91,14 @@ class Phase5AgentCore:
     def set_evidence_ledger(self, ledger: Any) -> None:
         """Inject the substrate EvidenceLedger (optional)."""
         self._evidence_ledger = ledger
+
+    def set_runtime_validator(self, validator: Any) -> None:
+        """Inject production runtime validator (RuntimeValidatorProtocol)."""
+        self._runtime_validator = validator
+
+    def get_validator_events(self) -> List[Dict[str, Any]]:
+        """Return recorded validator events."""
+        return list(self._validator_events)
 
     # ── Async/sync bridge ────────────────────────────────────────────
 
@@ -238,6 +248,73 @@ class Phase5AgentCore:
         if action.thought:
             action_msg.setdefault("metadata", {})["thought"] = action.thought
         self._conversation_history.append(action_msg)
+
+        # ── Validation gate (Section 5/7) ─────────────────────────
+        # When model produces final_answer and strategy requires validation,
+        # validate BEFORE returning to the caller.
+        if (action.type == "final_answer"
+                and self._strategy.should_validate()
+                and self._runtime_validator is not None):
+            from .runtime_validator import PublicValidationEvidence
+            evidence = PublicValidationEvidence(
+                candidate_answer=action.content or "",
+                conversation_history=list(self._conversation_history),
+                tool_definitions=list(self._tool_definitions),
+                evidence_refs=list(self._evidence_ledger.export_evidence_ids()) if self._evidence_ledger and hasattr(self._evidence_ledger, 'export_evidence_ids') else [],
+                has_pending_recovery=self._pending_recovery is not None,
+                observed_state_digest="",
+                public_tool_results=[m.get("content", {}) for m in self._conversation_history if m.get("role") == "tool"],
+            )
+            try:
+                feedback = self._runtime_validator.validate(
+                    candidate_id=f"candidate-{self._step_count}",
+                    evidence_refs=evidence.evidence_refs,
+                    observed_state_digest="",
+                    runtime_evidence=evidence.__dict__,
+                )
+                self._validator_events.append({
+                    "step": self._step_count,
+                    "validator_id": feedback.validator_id,
+                    "decision": feedback.decision.value,
+                    "failure_type": feedback.failure_type,
+                    "candidate_answer_preview": (action.content or "")[:200],
+                })
+
+                # A2: REJECT/INDETERMINATE → terminate with validation-blocked state
+                # A3/A4/A5: delegate to on_validation_result strategy hook
+                if feedback.decision.value in ("REJECT", "INDETERMINATE"):
+                    # Check if strategy has on_validation_result hook
+                    hook = getattr(self._strategy, 'on_validation_result', None)
+                    if hook is not None:
+                        recovery_decision = self._run_async(hook(
+                            feedback=feedback,
+                            candidate=action,
+                            observer=self._shadow_observer,
+                        ))
+                        if recovery_decision and hasattr(recovery_decision, 'action'):
+                            if recovery_decision.action is not RecoveryActionKind.NONE:
+                                self._pending_recovery = recovery_decision
+                                self._recovery_decisions.append({
+                                    "step": self._step_count,
+                                    "action": recovery_decision.action.value,
+                                    "reason": recovery_decision.reason,
+                                    "signal": "VALIDATION_REJECT",
+                                })
+                    else:
+                        # A2: no hook → validation-blocked termination
+                        action = ModelAction(
+                            type="final_answer",
+                            content=f"[VALIDATION_BLOCKED] {feedback.failure_type}: {action.content}",
+                        )
+            except Exception as exc:
+                # Validator exception → INVALID_INFRA (Section 12)
+                self._validator_events.append({
+                    "step": self._step_count,
+                    "validator_id": "unknown",
+                    "decision": "INFRA_ERROR",
+                    "failure_type": str(type(exc).__name__),
+                    "error": str(exc)[:200],
+                })
 
         return action
 

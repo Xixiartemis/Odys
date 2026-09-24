@@ -45,6 +45,9 @@ def _persist_trial_artifacts(trial_dir: Path, result: TrialResult):
     # E: recovery budget gate ledger
     (trial_dir / "recovery_budget_ledger.json").write_text(
         json.dumps(result.recovery_budget_ledger, indent=2, default=str, ensure_ascii=False))
+    # Section 14: validator events
+    (trial_dir / "validator_events.json").write_text(
+        json.dumps(result.validator_events, indent=2, default=str, ensure_ascii=False))
     (trial_dir / "budget_ledger.json").write_text(
         json.dumps(result.provider_usage, indent=2, default=str))
     (trial_dir / "provider_usage.json").write_text(

@@ -50,6 +50,7 @@ class TrialResult:
         self.shadow_records: list = []  # K: actual observer records
         self.evidence_events: list = []  # K: actual ledger events
         self.recovery_budget_ledger: list = []  # E: budget gate ledger
+        self.validator_events: list = []  # Section 14: validator events
         self.provider_usage: Dict[str, Any] = {}
         self.grader_result: Dict[str, Any] = {}
         self.error_diagnostics: Optional[Dict[str, Any]] = None
@@ -72,6 +73,7 @@ class TrialResult:
             "recovery_decisions": self.recovery_decisions,
             "shadow_records_count": len(self.shadow_records),
             "evidence_events_count": len(self.evidence_events),
+            "validator_events_count": len(self.validator_events),
             "strategy_config": self.strategy_config,
             "error_diagnostics": self.error_diagnostics,
             "wall_time_seconds": round(self.wall_time, 1),
@@ -158,6 +160,11 @@ def execute_trial(
     except ImportError:
         ledger = None
 
+    # 6b. Wire runtime validator (canonical)
+    from .runtime_validator import PublicEvidenceCompletionValidator
+    validator = PublicEvidenceCompletionValidator()
+    core.set_runtime_validator(validator)
+
     # 7. Create ToolMaze adapter
     try:
         adapter = create_toolmaze_agent_adapter(core)
@@ -206,6 +213,9 @@ def execute_trial(
     # K: persist actual observer/evidence data
     result.shadow_records = observer.get_records() if observer is not None and hasattr(observer, 'get_records') else []
     result.evidence_events = ledger.export_events() if ledger is not None and hasattr(ledger, 'export_events') else []
+
+    # K: persist actual validator events
+    result.validator_events = validator.get_events() if validator is not None else []
 
     # 9. Provider usage
     result.provider_usage = {

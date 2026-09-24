@@ -642,6 +642,10 @@ class RealPilotRunner:
         (trial_dir / "recovery_budget_ledger.json").write_text(
             json.dumps(trial_result.recovery_budget_ledger, indent=2, default=str, ensure_ascii=False))
 
+        # Section 14: validator events
+        (trial_dir / "validator_events.json").write_text(
+            json.dumps(trial_result.validator_events, indent=2, default=str, ensure_ascii=False))
+
         # Budget/provider usage
         (trial_dir / "budget_ledger.json").write_text(
             json.dumps(trial_result.provider_usage, indent=2, default=str))

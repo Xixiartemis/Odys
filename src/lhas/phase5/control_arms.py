@@ -206,6 +206,21 @@ class PolicyStrategy(Protocol):
         """Called after every tool result.  Returns a recovery decision."""
         ...
 
+    async def on_validation_result(
+        self,
+        *,
+        feedback: Any,  # ValidatorFeedback
+        candidate: Any,  # ModelAction
+        observer: Optional[ShadowProgressObserver],
+    ) -> RecoveryDecision:
+        """Called when validator rejects/indetermines a final answer.
+
+        Returns recovery decision. BareStrategy/RetryOnlyStrategy
+        return NONE (validator inactive). OdysFullStrategy delegates
+        to Phase4 recovery policy.
+        """
+        return _NONE_DECISION
+
     def should_validate(self) -> bool:
         """Whether the validator gate is active for this arm."""
         ...
@@ -606,6 +621,21 @@ class OdysFullStrategy:
                 "recovery_policy": "DefaultRecoveryPolicy",
                 "attempt_number": self._attempt_number,
             },
+        )
+
+    async def on_validation_result(
+        self,
+        *,
+        feedback,
+        candidate,
+        observer,
+    ) -> RecoveryDecision:
+        """A3: delegate validation rejection to frozen Phase4 recovery."""
+        return await self._delegate_to_recovery(
+            step=0,
+            result={"status": "validation_rejected", "failure_type": feedback.failure_type},
+            signal="VALIDATION_REJECT",
+            reason=f"Validator {feedback.validator_id} rejected: {feedback.failure_type}",
         )
 
     def should_validate(self):
