@@ -15,7 +15,7 @@ import logging
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Literal, Mapping
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[3]
 _REPO = _PROJECT_ROOT / "experiments" / "phase5" / "benchmarks" / "toolmaze"
@@ -41,7 +41,11 @@ from lhas.phase5.types import BudgetConfig
 logger = logging.getLogger(__name__)
 
 _LOCK_PATH = _PROJECT_ROOT / "experiments" / "phase5" / "manifests" / "provider-lock.json"
-_PREFLIGHT_NAME = "canary_preflight.json"
+_HISTORICAL_PREFLIGHT_NAME = "canary_preflight.json"
+_LIVE_PREFLIGHT_NAME = "live_preflight.json"
+_QUALIFICATION_ROOT = (
+    _PROJECT_ROOT / "experiments" / "phase5" / "runs" / "_qualification_preflights"
+)
 _FROZEN_DATASET_REVISION = "08b0239a98b0b07839d673f5bc0ef7d836db9296"
 _FROZEN_DATASET_HASH_SCOPE = (
     "data/perturbed_tasks/**/*.json sorted by POSIX path, concatenated bytes"
@@ -228,43 +232,76 @@ def _validate_budget(manifest: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def _validate_output_dir(output_dir: Path, *, manifest_hash: str) -> dict[str, Any]:
+def _validate_live_output_dir(output_dir: Path) -> dict[str, Any]:
     if not output_dir.exists():
-        return {"path": str(output_dir), "status": "AVAILABLE"}
+        return {
+            "path": str(output_dir),
+            "status": "READY",
+            "historical_preflight_preserved": False,
+        }
     if not output_dir.is_dir():
         raise CanaryPreflightError(f"output path is not a directory: {output_dir}")
     entries = sorted(path.name for path in output_dir.iterdir())
-    if entries != [_PREFLIGHT_NAME]:
+    allowed = {_HISTORICAL_PREFLIGHT_NAME, _LIVE_PREFLIGHT_NAME}
+    if any(entry not in allowed for entry in entries):
         raise CanaryPreflightError(
             "output directory is occupied by immutable/unknown artifacts: "
             f"{entries}"
         )
-    preflight_path = output_dir / _PREFLIGHT_NAME
-    try:
-        prior = json.loads(preflight_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise CanaryPreflightError("existing preflight artifact is unreadable") from exc
-    if prior.get("manifest_hash") != manifest_hash or prior.get("provider_requests") != 0:
-        raise CanaryPreflightError(
-            "existing preflight artifact does not match this manifest"
-        )
-    return {"path": str(output_dir), "status": "PREFLIGHT_ARTIFACT_ONLY"}
+    return {
+        "path": str(output_dir),
+        # Keep the report stable across the first write and an idempotent
+        # recheck; the live artifact itself is the namespace state marker.
+        "status": "READY",
+        "historical_preflight_preserved": _HISTORICAL_PREFLIGHT_NAME in entries,
+    }
 
 
-def _write_preflight_artifact(output_dir: Path, report: dict[str, Any]) -> None:
-    path = output_dir / _PREFLIGHT_NAME
+def _write_immutable_artifact(path: Path, report: dict[str, Any]) -> None:
     if path.exists():
-        existing = json.loads(path.read_text(encoding="utf-8"))
+        try:
+            existing = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise CanaryPreflightError(
+                f"existing preflight artifact is unreadable: {path}"
+            ) from exc
         if existing != report:
             raise CanaryPreflightError("preflight artifact is immutable and differs")
         return
-    output_dir.mkdir(parents=True, exist_ok=True)
+    path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("x", encoding="utf-8") as handle:
         json.dump(report, handle, indent=2, ensure_ascii=False)
 
 
-def preflight_canary(manifest_path: str | Path) -> dict[str, Any]:
-    """Validate one canary manifest without constructing a provider driver."""
+def _qualification_artifact_path(
+    experiment_id: str,
+    *,
+    manifest_hash: str,
+    code_sha: str,
+    endpoint_sha: str,
+) -> Path:
+    """Return a versioned qualification path outside every live output dir."""
+    filename = (
+        f"qualification_preflight_{manifest_hash[:16]}_"
+        f"{code_sha[:16]}_{endpoint_sha[:16]}.json"
+    )
+    return _QUALIFICATION_ROOT / experiment_id / filename
+
+
+def preflight_canary(
+    manifest_path: str | Path,
+    *,
+    mode: Literal["qualification", "live"] = "qualification",
+) -> dict[str, Any]:
+    """Validate one canary manifest without constructing a provider driver.
+
+    Qualification preflights are immutable evidence in a namespace outside the
+    live trial directory. Live preflights are immutable, create-only evidence
+    in ``live_preflight.json`` and ignore (but never modify) the historical
+    ``canary_preflight.json`` artifact.
+    """
+    if mode not in {"qualification", "live"}:
+        raise CanaryPreflightError(f"unknown preflight mode: {mode}")
     path = _resolve_path(manifest_path)
     manifest = json.loads(path.read_text(encoding="utf-8"))
     experiment_id = _verify_manifest(path, manifest)
@@ -287,13 +324,39 @@ def preflight_canary(manifest_path: str | Path) -> dict[str, Any]:
         raise CanaryPreflightError("manifest output_dir is required")
     output_dir = _resolve_path(output_value)
     manifest_hash = str(manifest["manifest_hash"])
-    output_report = _validate_output_dir(output_dir, manifest_hash=manifest_hash)
+    code_sha = _git_head()
+    endpoint_sha = endpoint["endpoint_sha256"]
+    role = (
+        "QUALIFICATION_PREFLIGHT"
+        if mode == "qualification"
+        else "LIVE_EXECUTION_PREFLIGHT"
+    )
+    output_report = (
+        {
+            "path": str(output_dir),
+            "status": "NOT_TOUCHED",
+            "namespace": "LIVE_EXECUTION_OUTPUT",
+        }
+        if mode == "qualification"
+        else _validate_live_output_dir(output_dir)
+    )
+    artifact_path = (
+        _qualification_artifact_path(
+            experiment_id,
+            manifest_hash=manifest_hash,
+            code_sha=code_sha,
+            endpoint_sha=endpoint_sha,
+        )
+        if mode == "qualification"
+        else output_dir / _LIVE_PREFLIGHT_NAME
+    )
     report = {
-        "schema_version": "phase5-canary-preflight-001",
+        "schema_version": "phase5-canary-preflight-002",
+        "preflight_role": role,
         "experiment_id": experiment_id,
         "experiment_role": "INFRA_CANARY",
         "base_exact_head": manifest["base_exact_head"],
-        "code_sha": _git_head(),
+        "code_sha": code_sha,
         "manifest_path": str(path),
         "manifest_hash": manifest_hash,
         "task": {
@@ -315,11 +378,16 @@ def preflight_canary(manifest_path: str | Path) -> dict[str, Any]:
         },
         "root_budget": budget,
         "output": output_report,
+        "preflight_artifact": {
+            "path": str(artifact_path),
+            "immutable": True,
+            "namespace": role,
+        },
         "provider_requests": 0,
         "provider_executed": "NO",
         "preflight_status": "PASS",
     }
-    _write_preflight_artifact(output_dir, report)
+    _write_immutable_artifact(artifact_path, report)
     return report
 
 
@@ -386,14 +454,22 @@ def run_canary(
     *,
     experiment_id: str | None = None,
     preflight_only: bool = False,
+    live_preflight_only: bool = False,
 ) -> dict[str, Any]:
-    """Run one manifest-bound canary, or only its provider-free preflight."""
-    preflight = preflight_canary(manifest_path)
+    """Run one manifest-bound canary, or only a provider-free preflight."""
+    if preflight_only and live_preflight_only:
+        raise CanaryPreflightError(
+            "--preflight-only and --live-preflight-only are mutually exclusive"
+        )
+    mode: Literal["qualification", "live"] = (
+        "qualification" if preflight_only else "live"
+    )
+    preflight = preflight_canary(manifest_path, mode=mode)
     if experiment_id is not None and experiment_id != preflight["experiment_id"]:
         raise CanaryPreflightError(
             f"CLI experiment id mismatch: {experiment_id} != {preflight['experiment_id']}"
         )
-    if preflight_only:
+    if preflight_only or live_preflight_only:
         return preflight
 
     path = _resolve_path(manifest_path)
@@ -413,6 +489,11 @@ def run_canary(
     task_json = json.loads(task_path.read_text(encoding="utf-8"))
     output_dir = _resolve_path(manifest["output_dir"])
     endpoint = preflight["provider"]["endpoint_identity"]["normalized_endpoint"]
+    current_endpoint = resolve_endpoint_identity(lock)
+    if current_endpoint != preflight["provider"]["endpoint_identity"]:
+        raise CanaryPreflightError(
+            "resolved provider endpoint differs from LIVE_EXECUTION_PREFLIGHT"
+        )
 
     results: list[dict[str, Any]] = []
     for arm_name in preflight["arms"]:
@@ -488,13 +569,23 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--manifest", required=True, type=Path)
     parser.add_argument("--id", help="Optional assertion; must equal manifest experiment_id")
-    parser.add_argument("--preflight-only", action="store_true")
+    parser.add_argument(
+        "--preflight-only",
+        action="store_true",
+        help="Write provider-free qualification evidence outside the live output namespace",
+    )
+    parser.add_argument(
+        "--live-preflight-only",
+        action="store_true",
+        help="Write immutable live-execution preflight without executing trials",
+    )
     args = parser.parse_args()
     try:
         report = run_canary(
             args.manifest,
             experiment_id=args.id,
             preflight_only=args.preflight_only,
+            live_preflight_only=args.live_preflight_only,
         )
     except (
         CanaryPreflightError,
