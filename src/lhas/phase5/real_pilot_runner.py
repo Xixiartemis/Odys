@@ -32,6 +32,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import random
 import uuid
 from datetime import datetime, timezone
@@ -58,6 +59,8 @@ from .control_arms import (
 )
 from .trial_executor import execute_trial, TrialResult
 from .runtime_validator import VALIDATOR_ID, VALIDATOR_VERSION, PublicEvidenceCompletionValidator
+
+logger = logging.getLogger(__name__)
 
 
 def _canonical_json(value: Any) -> bytes:
@@ -640,6 +643,11 @@ class RealPilotRunner:
                     )
 
                 except Exception as e:
+                    logger.exception(
+                        "Phase5 pilot trial failed: trial_id=%s arm=%s",
+                        trial_id,
+                        arm.value,
+                    )
                     arm_results[arm.value] = {"error": str(e), "arm": arm.value}
                     errors.append({"trial_id": trial_id, "error": str(e)})
 
