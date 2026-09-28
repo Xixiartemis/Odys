@@ -197,21 +197,35 @@ class TestT6_NoHiddenMetadata:
         assert fields.isdisjoint(forbidden)
 
     def test_dto_extra_forbidden(self):
-        """Extra fields must be rejected."""
+        """Forbidden extra fields (oracle/hidden) must be rejected with ValueError."""
         v = PublicEvidenceCompletionValidator()
-        # Extra field in runtime_evidence should be silently ignored
+        import pytest
+        with pytest.raises(ValueError, match="forbidden extra fields"):
+            v.validate(
+                candidate_id="c9",
+                evidence_refs=[],
+                runtime_evidence={
+                    "candidate_answer": "test",
+                    "perturbation_status": "PERTURBED",  # forbidden
+                    "oracle": {"secret": "data"},  # forbidden
+                    "public_tool_results": [{"status": "success"}],
+                    "evidence_refs": ["e1"],
+                },
+            )
+
+    def test_dto_non_oracle_extra_allowed(self):
+        """Non-oracle extra fields are silently filtered."""
+        v = PublicEvidenceCompletionValidator()
         fb = v.validate(
-            candidate_id="c9",
+            candidate_id="c10",
             evidence_refs=[],
             runtime_evidence={
                 "candidate_answer": "test",
-                "perturbation_status": "PERTURBED",  # should be ignored
-                "oracle": {"secret": "data"},  # should be ignored
+                "unknown_field": "value",  # not forbidden, silently filtered
                 "public_tool_results": [{"status": "success"}],
                 "evidence_refs": ["e1"],
             },
         )
-        # Validator should still work (extra fields filtered)
         assert fb.execution_status is ValidatorExecutionStatus.SUCCESS
 
 
@@ -297,7 +311,10 @@ class TestT10_A2Reject:
 # ══════════════════════════════════════════════════════════════════
 
 class TestT11_A3RejectRecovery:
-    def test_a3_reject_delegates_to_phase4(self):
+    def test_a3_reject_triggers_recovery_loop(self):
+        # A3: validation REJECT -> internal recovery loop -> TERMINATED.
+        # Driver has only one action, so recovery loops until retry limit.
+        # The rejected candidate is NOT returned to the caller.
         driver = ScriptedModelDriver([
             ScriptedAction(type="final_answer", content="wrong"),
         ])
@@ -305,9 +322,11 @@ class TestT11_A3RejectRecovery:
         core.initialize("test", [{"name": "tool"}])
         core.set_runtime_validator(PublicEvidenceCompletionValidator())
         action = core.next_model_action()
-        # A3: validation reject → pending recovery set
-        assert len(core.get_validator_events()) == 1
-        assert core._pending_recovery is not None
+        assert len(core.get_validator_events()) >= 1
+        assert "TERMINATED" in (action.content or ""), (
+            f"Expected TERMINATED, got: {action.content}"
+        )
+        assert len(core.get_recovery_decisions()) >= 1
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -315,7 +334,8 @@ class TestT11_A3RejectRecovery:
 # ══════════════════════════════════════════════════════════════════
 
 class TestT12_A4SameValidation:
-    def test_a4_reject_delegates_to_phase4(self):
+    def test_a4_reject_triggers_recovery_loop(self):
+        # A4: same recovery loop behavior as A3.
         driver = ScriptedModelDriver([
             ScriptedAction(type="final_answer", content="wrong"),
         ])
@@ -323,8 +343,9 @@ class TestT12_A4SameValidation:
         core.initialize("test", [{"name": "tool"}])
         core.set_runtime_validator(PublicEvidenceCompletionValidator())
         action = core.next_model_action()
-        assert len(core.get_validator_events()) == 1
-        assert core._pending_recovery is not None
+        assert len(core.get_validator_events()) >= 1
+        assert "TERMINATED" in (action.content or "")
+        assert len(core.get_recovery_decisions()) >= 1
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -332,7 +353,8 @@ class TestT12_A4SameValidation:
 # ══════════════════════════════════════════════════════════════════
 
 class TestT13_A5SameRecovery:
-    def test_a5_reject_delegates_to_phase4(self):
+    def test_a5_reject_triggers_recovery_loop(self):
+        # A5: same recovery loop as A3 (budget gate is pass-through).
         driver = ScriptedModelDriver([
             ScriptedAction(type="final_answer", content="wrong"),
         ])
@@ -340,8 +362,9 @@ class TestT13_A5SameRecovery:
         core.initialize("test", [{"name": "tool"}])
         core.set_runtime_validator(PublicEvidenceCompletionValidator())
         action = core.next_model_action()
-        assert len(core.get_validator_events()) == 1
-        assert core._pending_recovery is not None
+        assert len(core.get_validator_events()) >= 1
+        assert "TERMINATED" in (action.content or "")
+        assert len(core.get_recovery_decisions()) >= 1
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -349,7 +372,10 @@ class TestT13_A5SameRecovery:
 # ══════════════════════════════════════════════════════════════════
 
 class TestT14_ValidatorException:
-    def test_validator_exception_recorded(self):
+    def test_validator_exception_raises_fail_closed(self):
+        # Section D: Validator exception MUST fail-closed.
+        # RuntimeValidatorExecutionError is raised (not swallowed).
+        from lhas.phase5.types import RuntimeValidatorExecutionError
         class BrokenValidator:
             validator_id = "broken"
             def validate(self, **kw):
@@ -361,8 +387,10 @@ class TestT14_ValidatorException:
         core = Phase5AgentCore(driver, strategy=ValidatorOnlyStrategy())
         core.initialize("test", [{"name": "tool"}])
         core.set_runtime_validator(BrokenValidator())
-        action = core.next_model_action()
-        # Should not crash — error recorded
+        import pytest
+        with pytest.raises(RuntimeValidatorExecutionError, match="validator crashed"):
+            core.next_model_action()
+        # Event is still recorded before raising
         assert len(core.get_validator_events()) == 1
         assert core.get_validator_events()[0]["decision"] == "INFRA_ERROR"
 

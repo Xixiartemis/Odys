@@ -1,29 +1,30 @@
-"""Real Pilot Runner — executes real model trials through the unified backend.
+"""Real Pilot Runner — executes real model trials through the canonical TrialExecutor.
 
-``RealPilotRunner`` is the **single execution path** for Phase 5 real
-pilot experiments.  It uses ``ToolMazeRuntimeBackend.execute()`` as
-the sole execution point — never ``AgentExecutionHarness`` or synthetic
-execution.
+``RealPilotRunner`` delegates ALL trial execution to the shared
+``lhas.phase5.trial_executor.execute_trial()`` function — the same
+canonical path used by ``CanaryRunner``.
 
 Design contract
 ───────────────
 * Loads a frozen pilot manifest with experiment_id, task_ids, arm
   definitions, model config, and budgets.
-* For each task × arm: runs through the official ExecutionEngine via
-  ToolMazeRuntimeBackend.execute() with the appropriate PolicyStrategy.
+* For each task × arm: calls ``execute_trial()`` — the single
+  canonical execution path shared with CanaryRunner.
 * Writes all artifacts per trial (raw, benchmark, derived, classification).
 * Stratified sampling: ``select_20_tasks()`` picks one task from each
   C1-C4 × P0-P4 cell for the 20-task pilot.
 * Pilot manifest has ``experiment_role=PIPELINE_PILOT``.
 * A fresh ModelDriver is created per trial via ``model_driver_factory``
   to prevent state leakage between trials.
-* Budget exhaustion is classified as ``VALID_TASK_OUTCOME`` (the task
-  ran and exhausted its budget — that is a valid experimental outcome),
-  not ``INVALID_INFRA``.
+* Budget exhaustion is classified by TrialExecutor as ``VALID``
+  (the task ran and exhausted its budget — that is a valid
+  experimental outcome), not ``INVALID_INFRA``.
 
-This runner does NOT call AgentExecutionHarness or any synthetic
-execution path.  It is the real-model execution counterpart to the
-dry-run PilotRunner in pilot_runner.py.
+CANONICAL_EXPERIMENT_EXECUTOR=lhas.phase5.trial_executor.execute_trial
+
+This runner does NOT independently create Phase5AgentCore, ExecutionEngine,
+PolicyStrategy, EvidenceLedger, or observers — those are TrialExecutor
+responsibilities.
 """
 
 from __future__ import annotations
@@ -49,13 +50,10 @@ from .types import (
     TrialStatus,
 )
 from .toolmaze_adapter import ToolMazeAdapter
-from .runtime_backend import ToolMazeRuntimeBackend
-from .model_driver import BudgetExhausted
 from .artifacts import ArtifactWriter
 from .firewall import OfflineGraderFirewall
 from .provenance import ProvenanceFreeze, arm_definitions_snapshot
 from .control_arms import (
-    _STRATEGY_MAP,
     ExperimentPairValidator,
 )
 from .trial_executor import execute_trial, TrialResult
@@ -204,10 +202,10 @@ def build_pilot_manifest(
 # ── RealPilotRunner ──────────────────────────────────────────────────
 
 class RealPilotRunner:
-    """Runs real model pilot experiments through the unified backend.
+    """Runs real model pilot experiments through the canonical TrialExecutor.
 
-    Uses ``ToolMazeRuntimeBackend.execute()`` as the single execution
-    path.  Never calls ``AgentExecutionHarness`` or synthetic execution.
+    Delegates ALL trial execution to ``lhas.phase5.trial_executor.execute_trial()``
+    — the same canonical path used by ``CanaryRunner``.
 
     A fresh ``ModelDriver`` is created per trial via the injected
     ``model_driver_factory`` callable to prevent state leakage.
@@ -385,9 +383,9 @@ class RealPilotRunner:
     ) -> dict[str, Any]:
         """Run the full pilot experiment.
 
-        For each task × arm: runs through the official ExecutionEngine
-        via ``ToolMazeRuntimeBackend.execute()`` with the appropriate
-        ``PolicyStrategy``.  Writes all artifacts per trial.
+        For each task × arm: calls ``execute_trial()`` — the single
+        canonical execution path shared with ``CanaryRunner``.
+        Writes all artifacts per trial.
 
         A fresh ModelDriver is created per trial via the injected
         ``model_driver_factory`` to prevent state leakage.

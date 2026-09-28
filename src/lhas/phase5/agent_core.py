@@ -11,13 +11,15 @@ and converts to official ToolMaze types at the boundary.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 from .control_arms import PolicyStrategy, RecoveryActionKind, RecoveryDecision
 from .model_driver import ModelAction, DriverTokenUsage, ModelDriver
-from .types import PolicyExecutionError
+from .types import PolicyExecutionError, RuntimeValidatorExecutionError
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +28,31 @@ _TERMINAL_RECOVERY_ACTIONS = frozenset({
     RecoveryActionKind.STOP,
     RecoveryActionKind.ESCALATE,
 })
+
+
+@dataclass(frozen=True)
+class PublicToolObservation:
+    """Structured public tool observation — no oracle, no hidden data.
+
+    This is the canonical storage format for tool results used by the
+    runtime validator.  Conversation history may continue storing JSON
+    text for model compatibility.
+    """
+    step: int
+    tool_name: str
+    result: Dict[str, Any]
+    tool_call_id: Optional[str] = None
+    arguments_digest: Optional[str] = None
+    result_digest: Optional[str] = None
+
+    def __post_init__(self):
+        if self.result_digest is None:
+            object.__setattr__(
+                self, "result_digest",
+                hashlib.sha256(
+                    json.dumps(self.result, sort_keys=True, default=str).encode()
+                ).hexdigest()[:16],
+            )
 
 
 class Phase5AgentCore:
@@ -68,6 +95,9 @@ class Phase5AgentCore:
         # ── Step counter ──
         self._step_count: int = 0
 
+        # ── Structured public tool observations (Section A) ──
+        self._public_tool_observations: List[PublicToolObservation] = []
+
         # ── Optional integration points ──
         self._shadow_observer: Any = None
         self._evidence_ledger: Any = None
@@ -81,6 +111,9 @@ class Phase5AgentCore:
         self._escalation_reason: str = ""
         self._last_tool_call_id: Optional[str] = None
         self._last_tool_call: Optional[Dict[str, Any]] = None  # For A1 retry
+
+        # ── Recovery budget gate (Section F) ──
+        self._recovery_budget_gate: Any = None  # RecoveryBudgetGate or PassThrough
 
     # ── Injection points ─────────────────────────────────────────────
 
@@ -96,9 +129,21 @@ class Phase5AgentCore:
         """Inject production runtime validator (RuntimeValidatorProtocol)."""
         self._runtime_validator = validator
 
+    def set_recovery_budget_gate(self, gate: Any) -> None:
+        """Inject the recovery budget gate (Section F).
+
+        RecoveryBudgetGate for A3/A4, PassThroughRecoveryBudgetGate for A5.
+        Every non-NONE recovery decision must pass through this gate.
+        """
+        self._recovery_budget_gate = gate
+
     def get_validator_events(self) -> List[Dict[str, Any]]:
         """Return recorded validator events."""
         return list(self._validator_events)
+
+    def get_public_tool_observations(self) -> List[PublicToolObservation]:
+        """Return structured public tool observations."""
+        return list(self._public_tool_observations)
 
     # ── Async/sync bridge ────────────────────────────────────────────
 
@@ -138,6 +183,7 @@ class Phase5AgentCore:
         self._recovery_decisions.clear()
         self._escalation_flag = False
         self._escalation_reason = ""
+        self._public_tool_observations.clear()
 
         self._conversation_history.append({
             "role": "user",
@@ -147,7 +193,18 @@ class Phase5AgentCore:
     def next_model_action(self, user_message: Optional[str] = None) -> ModelAction:
         """Execute one reasoning step, returning Odys ModelAction.
 
-        Handles recovery decisions, terminal actions, and context injection.
+        Implements the bounded internal action-selection loop (Section E):
+
+        1. Apply pending recovery (if any)
+        2. Get action from model driver
+        3. If not final_answer → return immediately
+        4. If validation disabled → return final_answer
+        5. Validate candidate
+        6. If ACCEPT → return
+        7. If A2 (no recovery hook) → return VALIDATION_BLOCKED
+        8. If A3/A4/A5 → attempt recovery, loop back
+
+        All internal continuation bounded by root budget.
         """
         self._step_count += 1
 
@@ -164,107 +221,121 @@ class Phase5AgentCore:
                 content=f"TERMINATED: {self._escalation_reason}",
             )
 
-        # ── Check pending recovery decision ──
-        if self._pending_recovery is not None:
-            decision = self._pending_recovery
-            self._pending_recovery = None
+        # ── Internal action-selection loop (Section E) ──
+        # Bound loop iterations to prevent infinite loops
+        _MAX_VALIDATION_RETRIES = 5
+        _validation_retry_count = 0
 
-            if decision.action is RecoveryActionKind.ESCALATE:
-                self._escalation_flag = True
-                self._escalation_reason = decision.reason or "Policy strategy requested escalation"
-                return ModelAction(
-                    type="final_answer",
-                    content=f"TERMINATED: {self._escalation_reason}",
-                )
+        while True:
+            # ── Check pending recovery decision ──
+            if self._pending_recovery is not None:
+                decision = self._pending_recovery
+                self._pending_recovery = None
 
-            if decision.action is RecoveryActionKind.STOP:
-                reason = decision.reason or "Policy strategy requested stop"
-                self._escalation_flag = True
-                self._escalation_reason = reason
-                return ModelAction(
-                    type="final_answer",
-                    content=f"TERMINATED: {reason}",
-                )
-
-            if decision.action is RecoveryActionKind.RETRY:
-                # A1: same tool, same arguments — replay last tool call
-                if self._last_tool_call is not None:
-                    replay = ModelAction(
-                        type="tool_call",
-                        tool_name=self._last_tool_call["tool_name"],
-                        arguments=self._last_tool_call["arguments"],
-                        thought=f"[RETRY] {decision.reason}",
-                        tool_call_id=self._last_tool_call.get("tool_call_id"),
+                if decision.action is RecoveryActionKind.ESCALATE:
+                    self._escalation_flag = True
+                    self._escalation_reason = decision.reason or "Policy strategy requested escalation"
+                    return ModelAction(
+                        type="final_answer",
+                        content=f"TERMINATED: {self._escalation_reason}",
                     )
-                    # Record in conversation history
-                    action_msg: Dict[str, Any] = {
-                        "role": "assistant",
-                        "type": "tool_call",
-                        "content": replay.thought or "",
-                        "tool_call": {
-                            "name": replay.tool_name,
-                            "arguments": replay.arguments or {},
-                        },
-                    }
-                    if replay.tool_call_id:
-                        action_msg["tool_call"]["id"] = replay.tool_call_id
-                    self._conversation_history.append(action_msg)
-                    return replay
-                # No last tool call to replay — fall through to model
 
-            if decision.action is RecoveryActionKind.RETRY_WITH_CONTEXT:
-                failure_context = self._build_failure_context(decision)
-                self._conversation_history.append({
-                    "role": "system",
-                    "content": failure_context,
-                })
+                if decision.action is RecoveryActionKind.STOP:
+                    reason = decision.reason or "Policy strategy requested stop"
+                    self._escalation_flag = True
+                    self._escalation_reason = reason
+                    return ModelAction(
+                        type="final_answer",
+                        content=f"TERMINATED: {reason}",
+                    )
 
-        # ── Delegate to model driver ──
-        action = self._model_driver.next_action(
-            messages=list(self._conversation_history),
-            tool_definitions=self._tool_definitions,
-        )
+                if decision.action is RecoveryActionKind.RETRY:
+                    # A1: same tool, same arguments — replay last tool call
+                    if self._last_tool_call is not None:
+                        replay = ModelAction(
+                            type="tool_call",
+                            tool_name=self._last_tool_call["tool_name"],
+                            arguments=self._last_tool_call["arguments"],
+                            thought=f"[RETRY] {decision.reason}",
+                            tool_call_id=self._last_tool_call.get("tool_call_id"),
+                        )
+                        # Record in conversation history
+                        action_msg: Dict[str, Any] = {
+                            "role": "assistant",
+                            "type": "tool_call",
+                            "content": replay.thought or "",
+                            "tool_call": {
+                                "name": replay.tool_name,
+                                "arguments": replay.arguments or {},
+                            },
+                        }
+                        if replay.tool_call_id:
+                            action_msg["tool_call"]["id"] = replay.tool_call_id
+                        self._conversation_history.append(action_msg)
+                        return replay
+                    # No last tool call to replay — fall through to model
 
-        # Record in conversation history
-        action_msg: Dict[str, Any] = {
-            "role": "assistant",
-            "type": action.type,
-            "content": action.content or action.thought or "",
-        }
-        if action.type == "tool_call":
-            action_msg["tool_call"] = {
-                "name": action.tool_name,
-                "arguments": action.arguments or {},
+                if decision.action is RecoveryActionKind.RETRY_WITH_CONTEXT:
+                    failure_context = self._build_failure_context(decision)
+                    self._conversation_history.append({
+                        "role": "system",
+                        "content": failure_context,
+                    })
+
+            # ── Delegate to model driver ──
+            action = self._model_driver.next_action(
+                messages=list(self._conversation_history),
+                tool_definitions=self._tool_definitions,
+            )
+
+            # Record in conversation history
+            action_msg: Dict[str, Any] = {
+                "role": "assistant",
+                "type": action.type,
+                "content": action.content or action.thought or "",
             }
-            if action.tool_call_id:
-                action_msg["tool_call"]["id"] = action.tool_call_id
-                self._last_tool_call_id = action.tool_call_id
-            # Track for A1 same-tool-same-args retry
-            self._last_tool_call = {
-                "tool_name": action.tool_name,
-                "arguments": action.arguments or {},
-                "tool_call_id": action.tool_call_id,
-            }
-        if action.thought:
-            action_msg.setdefault("metadata", {})["thought"] = action.thought
-        self._conversation_history.append(action_msg)
+            if action.type == "tool_call":
+                action_msg["tool_call"] = {
+                    "name": action.tool_name,
+                    "arguments": action.arguments or {},
+                }
+                if action.tool_call_id:
+                    action_msg["tool_call"]["id"] = action.tool_call_id
+                    self._last_tool_call_id = action.tool_call_id
+                # Track for A1 same-tool-same-args retry
+                self._last_tool_call = {
+                    "tool_name": action.tool_name,
+                    "arguments": action.arguments or {},
+                    "tool_call_id": action.tool_call_id,
+                }
+            if action.thought:
+                action_msg.setdefault("metadata", {})["thought"] = action.thought
+            self._conversation_history.append(action_msg)
 
-        # ── Validation gate (Section 5/7) ─────────────────────────
-        # When model produces final_answer and strategy requires validation,
-        # validate BEFORE returning to the caller.
-        if (action.type == "final_answer"
-                and self._strategy.should_validate()
-                and self._runtime_validator is not None):
+            # ── Non-final actions return immediately ──
+            if action.type != "final_answer":
+                return action
+
+            # ── Validation gate (Section 5/7) ──
+            if (not self._strategy.should_validate()
+                    or self._runtime_validator is None):
+                return action
+
+            # ── Build validation evidence from structured observations ──
             from .runtime_validator import PublicValidationEvidence
             evidence = PublicValidationEvidence(
                 candidate_answer=action.content or "",
                 conversation_history=list(self._conversation_history),
                 tool_definitions=list(self._tool_definitions),
-                evidence_refs=list(self._evidence_ledger.export_evidence_ids()) if self._evidence_ledger and hasattr(self._evidence_ledger, 'export_evidence_ids') else [],
+                evidence_refs=self._get_evidence_refs(),
                 has_pending_recovery=self._pending_recovery is not None,
                 observed_state_digest="",
-                public_tool_results=[m.get("content", {}) for m in self._conversation_history if m.get("role") == "tool"],
+                public_tool_results=[
+                    obs.result for obs in self._public_tool_observations
+                ],
             )
+
+            # ── Run validator (Section D: fail-closed) ──
             try:
                 feedback = self._runtime_validator.validate(
                     candidate_id=f"candidate-{self._step_count}",
@@ -275,39 +346,14 @@ class Phase5AgentCore:
                 self._validator_events.append({
                     "step": self._step_count,
                     "validator_id": feedback.validator_id,
+                    "validator_config_hash": getattr(self._runtime_validator, 'config_hash', lambda: 'unknown')(),
                     "decision": feedback.decision.value,
                     "failure_type": feedback.failure_type,
                     "candidate_answer_preview": (action.content or "")[:200],
                 })
-
-                # A2: REJECT/INDETERMINATE → terminate with validation-blocked state
-                # A3/A4/A5: delegate to on_validation_result strategy hook
-                if feedback.decision.value in ("REJECT", "INDETERMINATE"):
-                    # Check if strategy has on_validation_result hook
-                    hook = getattr(self._strategy, 'on_validation_result', None)
-                    if hook is not None:
-                        recovery_decision = self._run_async(hook(
-                            feedback=feedback,
-                            candidate=action,
-                            observer=self._shadow_observer,
-                        ))
-                        if recovery_decision and hasattr(recovery_decision, 'action'):
-                            if recovery_decision.action is not RecoveryActionKind.NONE:
-                                self._pending_recovery = recovery_decision
-                                self._recovery_decisions.append({
-                                    "step": self._step_count,
-                                    "action": recovery_decision.action.value,
-                                    "reason": recovery_decision.reason,
-                                    "signal": "VALIDATION_REJECT",
-                                })
-                    else:
-                        # A2: no hook → validation-blocked termination
-                        action = ModelAction(
-                            type="final_answer",
-                            content=f"[VALIDATION_BLOCKED] {feedback.failure_type}: {action.content}",
-                        )
             except Exception as exc:
-                # Validator exception → INVALID_INFRA (Section 12)
+                # Validator exception → FAIL CLOSED (Section D)
+                # Record event, then RAISE RuntimeValidatorExecutionError
                 self._validator_events.append({
                     "step": self._step_count,
                     "validator_id": "unknown",
@@ -315,12 +361,95 @@ class Phase5AgentCore:
                     "failure_type": str(type(exc).__name__),
                     "error": str(exc)[:200],
                 })
+                raise RuntimeValidatorExecutionError(
+                    f"Runtime validator infrastructure failure at step {self._step_count}: "
+                    f"{type(exc).__name__}: {exc}"
+                ) from exc
 
-        return action
+            # ── ACCEPT → return final answer ──
+            if feedback.decision.value == "ACCEPT":
+                return action
+
+            # ── REJECT / INDETERMINATE → check recovery capability ──
+            # A2: no on_validation_result hook → validation-blocked termination
+            hook = getattr(self._strategy, 'on_validation_result', None)
+            if hook is None:
+                return ModelAction(
+                    type="final_answer",
+                    content=f"[VALIDATION_BLOCKED] {feedback.failure_type}: {action.content}",
+                )
+
+            # ── A3/A4/A5: delegate to strategy for recovery decision ──
+            _validation_retry_count += 1
+            if _validation_retry_count > _MAX_VALIDATION_RETRIES:
+                self._escalation_flag = True
+                self._escalation_reason = (
+                    f"Validation retry limit exceeded ({_MAX_VALIDATION_RETRIES})"
+                )
+                return ModelAction(
+                    type="final_answer",
+                    content=f"TERMINATED: {self._escalation_reason}",
+                )
+
+            try:
+                recovery_decision = self._run_async(hook(
+                    feedback=feedback,
+                    candidate=action,
+                    observer=self._shadow_observer,
+                ))
+            except Exception as exc:
+                raise PolicyExecutionError(
+                    f"on_validation_result failed at step {self._step_count}"
+                ) from exc
+
+            if recovery_decision is None or recovery_decision.action is RecoveryActionKind.NONE:
+                # Strategy decided no recovery — return blocked answer
+                return ModelAction(
+                    type="final_answer",
+                    content=f"[VALIDATION_BLOCKED] {feedback.failure_type}: {action.content}",
+                )
+
+            # ── Section F: authorize recovery through budget gate ──
+            if self._recovery_budget_gate is not None:
+                from .recovery_budget import BudgetDecision
+                budget_decision = self._recovery_budget_gate.authorize(
+                    step=self._step_count,
+                    candidate_action=recovery_decision.action.value,
+                )
+                if budget_decision is BudgetDecision.ESCALATE:
+                    self._escalation_flag = True
+                    self._escalation_reason = (
+                        f"Recovery budget exhausted at step {self._step_count}"
+                    )
+                    return ModelAction(
+                        type="final_answer",
+                        content=f"TERMINATED: {self._escalation_reason}",
+                    )
+                # ALLOW → continue with recovery
+
+            # Record recovery decision
+            self._pending_recovery = recovery_decision
+            self._recovery_decisions.append({
+                "step": self._step_count,
+                "action": recovery_decision.action.value,
+                "reason": recovery_decision.reason,
+                "signal": "VALIDATION_REJECT",
+            })
+
+            # Do NOT return the rejected candidate — loop back for recovery
+            logger.info(
+                "Validation REJECT at step %d — recovery action: %s, looping back",
+                self._step_count, recovery_decision.action.value,
+            )
 
     def receive_tool_result(self, tool_name: str, result: Dict[str, Any]) -> None:
-        """Process a tool result: record, observe, consult strategy."""
-        # 1. Conversation history — include tool_call_id if available
+        """Process a tool result: record, observe, consult strategy.
+
+        Section A: Stores structured PublicToolObservation for the runtime
+        validator.  Conversation history continues storing JSON text for
+        model compatibility.
+        """
+        # 1. Conversation history — JSON text for model compatibility
         tool_msg: Dict[str, Any] = {
             "role": "tool",
             "name": tool_name,
@@ -330,10 +459,25 @@ class Phase5AgentCore:
             tool_msg["tool_call_id"] = self._last_tool_call_id
         self._conversation_history.append(tool_msg)
 
-        # 2. Notify model driver (failure detection hooks)
+        # 2. Store structured public tool observation (Section A)
+        obs = PublicToolObservation(
+            step=self._step_count,
+            tool_name=tool_name,
+            result=result if isinstance(result, dict) else {"raw": str(result)},
+            tool_call_id=self._last_tool_call_id,
+            arguments_digest=hashlib.sha256(
+                json.dumps(
+                    self._last_tool_call.get("arguments", {}) if self._last_tool_call else {},
+                    sort_keys=True, default=str,
+                ).encode()
+            ).hexdigest()[:16] if self._last_tool_call else None,
+        )
+        self._public_tool_observations.append(obs)
+
+        # 3. Notify model driver (failure detection hooks)
         self._model_driver.record_tool_result(tool_name, result)
 
-        # 3. Record in evidence ledger
+        # 4. Record in evidence ledger
         if self._evidence_ledger is not None:
             try:
                 from .substrate.evidence import EvidenceEventType
@@ -343,7 +487,7 @@ class Phase5AgentCore:
                     event_type=EvidenceEventType.TOOL_OBSERVED,
                     payload={
                         "tool_name": tool_name,
-                        "result_keys": sorted(result.keys()),
+                        "result_keys": sorted(result.keys()) if isinstance(result, dict) else [],
                         "step": self._step_count,
                     },
                 )
@@ -356,7 +500,7 @@ class Phase5AgentCore:
                     f"Evidence ledger append failed at step {self._step_count}"
                 ) from exc
 
-        # 4. Notify shadow observer
+        # 5. Notify shadow observer
         shadow_record = None
         if self._shadow_observer is not None:
             try:
@@ -372,7 +516,7 @@ class Phase5AgentCore:
             except Exception as exc:
                 logger.warning("Shadow observer failed at step %d: %s", self._step_count, exc)
 
-        # 5. Consult policy strategy for recovery
+        # 6. Consult policy strategy for recovery (Section F: authorize)
         if self._strategy is not None:
             try:
                 shadow_signal = None
@@ -388,16 +532,18 @@ class Phase5AgentCore:
                 )
 
                 if decision.action is not RecoveryActionKind.NONE:
-                    self._pending_recovery = decision
-                    self._recovery_decisions.append({
-                        "step": self._step_count,
-                        "tool_name": tool_name,
-                        "action": decision.action.value,
-                        "reason": decision.reason,
-                        "signal": decision.signal,
-                        "shadow_signal": shadow_signal,
-                        "evidence": dict(decision.evidence) if decision.evidence else {},
-                    })
+                    # Section F: authorize through recovery budget gate
+                    authorized = self._authorize_recovery(decision)
+                    if authorized:
+                        self._recovery_decisions.append({
+                            "step": self._step_count,
+                            "tool_name": tool_name,
+                            "action": decision.action.value,
+                            "reason": decision.reason,
+                            "signal": decision.signal,
+                            "shadow_signal": shadow_signal,
+                            "evidence": dict(decision.evidence) if decision.evidence else {},
+                        })
 
             except PolicyExecutionError:
                 raise
@@ -405,6 +551,40 @@ class Phase5AgentCore:
                 raise PolicyExecutionError(
                     f"Policy strategy on_step_result failed at step {self._step_count}"
                 ) from exc
+
+    def _authorize_recovery(self, decision: RecoveryDecision) -> bool:
+        """Authorize a recovery decision through the budget gate (Section F).
+
+        Returns True if authorized and set as pending recovery.
+        Returns False if denied (ESCALATE → terminal).
+        """
+        if self._recovery_budget_gate is not None:
+            from .recovery_budget import BudgetDecision
+            budget_decision = self._recovery_budget_gate.authorize(
+                step=self._step_count,
+                candidate_action=decision.action.value,
+            )
+            if budget_decision is BudgetDecision.ESCALATE:
+                self._escalation_flag = True
+                self._escalation_reason = (
+                    f"Recovery budget exhausted at step {self._step_count}"
+                )
+                return False
+        self._pending_recovery = decision
+        return True
+
+    def _get_evidence_refs(self) -> List[str]:
+        """Get evidence refs from the actual EvidenceLedger (Section C).
+
+        Uses all_events() which is the canonical export method.
+        """
+        if self._evidence_ledger is None:
+            return []
+        try:
+            events = self._evidence_ledger.all_events()
+            return [e.evidence_id for e in events]
+        except AttributeError:
+            return []
 
     def get_token_usage(self) -> DriverTokenUsage:
         """Get token usage as Odys-owned DriverTokenUsage."""
@@ -443,6 +623,7 @@ class Phase5AgentCore:
         self._escalation_reason = ""
         self._last_tool_call_id = None
         self._last_tool_call = None
+        self._public_tool_observations.clear()
         self._model_driver.reset()
 
     # ── Private helpers ──────────────────────────────────────────────

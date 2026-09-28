@@ -10,6 +10,10 @@ Deterministic v1 rules:
 - V1: empty/whitespace candidate → REJECT (EMPTY_COMPLETION)
 - V2: unpaired tool call → REJECT (UNRESOLVED_TOOL_CALL)
 - V3: unresolved explicit public failure → REJECT (UNRESOLVED_PUBLIC_FAILURE)
+  Resolution rule (v1): a failure is resolved when a later positive result
+  exists for ANY tool (not necessarily the same tool). This models valid
+  alternative-path recovery where the agent recovers through a different
+  tool or approach.
 - V4: pending recovery → REJECT (PENDING_RECOVERY)
 - V5: no positive public evidence → INDETERMINATE (INSUFFICIENT_PUBLIC_EVIDENCE)
 - V6: all checks pass → ACCEPT
@@ -42,9 +46,17 @@ class PublicFailureType(str, Enum):
     INSUFFICIENT_PUBLIC_EVIDENCE = "INSUFFICIENT_PUBLIC_EVIDENCE"
 
 
+# Known extra fields that must be rejected by the input firewall.
+_FORBIDDEN_EXTRA_FIELDS = frozenset({
+    "is_perturbed", "perturbation_status", "expected_result",
+    "oracle", "oracle_solution", "ground_truth", "native_judge",
+    "hidden_task_metadata", "perturbation_point",
+})
+
+
 @dataclass
 class PublicValidationEvidence:
-    """Input DTO for runtime validation. Extra fields forbidden.
+    """Input DTO for runtime validation. Extra fields forbidden (Section J).
 
     Contains ONLY public runtime information — no oracle, no hidden data.
     """
@@ -57,7 +69,9 @@ class PublicValidationEvidence:
     public_tool_results: List[Dict[str, Any]] = field(default_factory=list)
 
     def __post_init__(self):
-        # Forbid extra fields — strict input firewall
+        # Section J: Enforce strict input firewall
+        # This is checked at construction via the caller, but we also
+        # validate in the validator's validate() method.
         pass
 
 
@@ -78,13 +92,18 @@ def _has_positive_evidence(evidence: PublicValidationEvidence) -> bool:
     Model text alone does NOT count.
     """
     for result in evidence.public_tool_results:
-        status = str(result.get("status", "")).lower()
-        if status in {"success", "ok", "completed", "done"}:
+        if _is_explicit_success(result):
             return True
     # Check evidence refs
     if evidence.evidence_refs:
         return True
     return False
+
+
+def _is_explicit_success(result: Dict[str, Any]) -> bool:
+    """Check if a public tool result indicates explicit success."""
+    status = str(result.get("status", "")).lower()
+    return status in {"success", "ok", "completed", "done"}
 
 
 class PublicEvidenceCompletionValidator:
@@ -117,13 +136,23 @@ class PublicEvidenceCompletionValidator:
 
         runtime_evidence must be a PublicValidationEvidence dict.
         """
-        # Parse evidence
+        # Parse evidence with input firewall (Section J)
         if runtime_evidence is None:
             evidence = PublicValidationEvidence(candidate_answer="")
         else:
+            # Section J: reject forbidden extra fields
+            known_fields = set(PublicValidationEvidence.__dataclass_fields__)
+            extra_fields = set(runtime_evidence.keys()) - known_fields
+            forbidden_extras = extra_fields & _FORBIDDEN_EXTRA_FIELDS
+            if forbidden_extras:
+                raise ValueError(
+                    f"PublicValidationEvidence received forbidden extra fields: "
+                    f"{forbidden_extras}. These fields expose hidden/oracle data "
+                    f"and must not enter the runtime validator."
+                )
             evidence = PublicValidationEvidence(**{
                 k: v for k, v in runtime_evidence.items()
-                if k in PublicValidationEvidence.__dataclass_fields__
+                if k in known_fields
             })
 
         # Run deterministic rules
@@ -140,11 +169,12 @@ class PublicEvidenceCompletionValidator:
             failure_type=failure_type.value if failure_type else None,
         )
 
-        # Record event
+        # Record event with config hash for identity verification (Section K)
         self._events.append({
             "candidate_id": candidate_id,
             "validator_id": VALIDATOR_ID,
             "validator_version": VALIDATOR_VERSION,
+            "validator_config_hash": self.config_hash(),
             "execution_status": "SUCCESS",
             "decision": decision.value,
             "failure_type": failure_type.value if failure_type else None,
@@ -177,12 +207,23 @@ class PublicEvidenceCompletionValidator:
                     if not has_result:
                         return ValidatorDecision.REJECT, PublicFailureType.UNRESOLVED_TOOL_CALL
 
-        # V3: unresolved explicit public failure
+        # V3: unresolved explicit public failure (Section B)
+        # v1 resolution rule: a failure is resolved when a later positive
+        # result exists for ANY tool (alternative-path recovery).
+        #
+        # Walk through results. A failure is unresolved only if no success
+        # appears AFTER it in the sequence.
         has_unresolved_failure = False
-        for result in evidence.public_tool_results:
+        for i, result in enumerate(evidence.public_tool_results):
             if _is_explicit_failure(result):
-                # Check if a later successful result exists for the same tool
-                has_unresolved_failure = True
+                # Check if any LATER success resolves this failure
+                has_later_success = any(
+                    _is_explicit_success(r)
+                    for r in evidence.public_tool_results[i + 1:]
+                )
+                if not has_later_success:
+                    has_unresolved_failure = True
+
         if has_unresolved_failure:
             return ValidatorDecision.REJECT, PublicFailureType.UNRESOLVED_PUBLIC_FAILURE
 

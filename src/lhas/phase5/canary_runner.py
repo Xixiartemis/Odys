@@ -18,7 +18,6 @@ if str(_REPO) not in sys.path:
 
 from lhas.phase5.control_arms import ControlArm
 from lhas.phase5.live_driver import LiveModelDriver
-from lhas.phase5.model_driver import BudgetedModelDriver
 from lhas.phase5.trial_executor import execute_trial, TrialResult
 from lhas.phase5.types import BudgetConfig
 
@@ -107,21 +106,21 @@ def run_canary(experiment_id: str = "phase5-real-canary-004") -> dict:
         arm = ControlArm(arm_name)
         logger.info("\n--- ARM: %s ---", arm_name)
 
-        # Fresh driver per trial
+        # Fresh driver per trial (Section H: TrialExecutor owns root budget)
         driver = LiveModelDriver(
             model_id=gen_cfg.get("model_id", "mimo-v2.5"),
             temperature=gen_cfg.get("temperature", 0.0),
             max_output_tokens=gen_cfg.get("max_output_tokens", 4096),
             thinking_enabled=gen_cfg.get("thinking_enabled", True),
         )
-        budgeted_driver = BudgetedModelDriver(driver, max_model_calls=budget.max_model_calls)
 
         # Execute through shared TrialExecutor
+        # TrialExecutor wraps with BudgetedModelDriver (single canonical owner)
         trial_result = execute_trial(
             arm=arm,
             task_json=task_json,
             tool_definitions=tool_definitions,
-            model_driver=budgeted_driver,
+            model_driver=driver,
             budget=budget,
             experiment_id=experiment_id,
             task_id=task_id,

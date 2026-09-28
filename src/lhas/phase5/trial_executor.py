@@ -9,6 +9,7 @@ It ensures:
 - A5 recovery budget gating is wired
 - Official ExecutionEngine is the sole execution engine
 - All artifacts are persisted
+- Root budget is enforced HERE (not caller-dependent)
 
 This is the SINGLE canonical execution path.
 """
@@ -28,7 +29,7 @@ from .control_arms import ControlArm, _STRATEGY_MAP
 from .live_driver import ProviderExecutionError
 from .model_driver import BudgetedModelDriver, BudgetExhausted, ModelDriver
 from .trace_parser import build_derived_view
-from .types import BudgetConfig, PolicyExecutionError
+from .types import BudgetConfig, PolicyExecutionError, RuntimeValidatorExecutionError
 
 logger = logging.getLogger(__name__)
 
@@ -110,9 +111,25 @@ def execute_trial(
 
     This is the ONLY function that runs a live trial.
     Both canary and pilot MUST call this function.
+
+    Root budget enforcement (Section H):
+    - Accepts a RAW ModelDriver (not pre-wrapped BudgetedModelDriver)
+    - Wraps it with BudgetedModelDriver HERE (single canonical owner)
+    - Enforces max_model_calls, max_turns
+    - Enforces token_budget and deadline_seconds when configured
     """
     trial_id = f"{experiment_id}_{task_id}_{arm.value}"
     result = TrialResult(trial_id=trial_id, task_id=task_id, arm=arm.value)
+
+    # ── Section H: Canonical root-budget wrapping ──
+    # If the caller already wrapped with BudgetedModelDriver, use it.
+    # Otherwise, wrap here. This ensures a single canonical owner.
+    if isinstance(model_driver, BudgetedModelDriver):
+        budgeted_driver = model_driver
+    else:
+        budgeted_driver = BudgetedModelDriver(
+            model_driver, max_model_calls=budget.max_model_calls
+        )
 
     # 1. Create strategy
     strategy_cls = _STRATEGY_MAP[arm]
@@ -146,7 +163,7 @@ def execute_trial(
     observer = strategy.create_observer()
 
     # 4. Create core with strategy
-    core = Phase5AgentCore(model_driver, strategy=strategy)
+    core = Phase5AgentCore(budgeted_driver, strategy=strategy)
 
     # 5. Wire observer (canonical)
     if observer is not None:
@@ -164,6 +181,10 @@ def execute_trial(
     from .runtime_validator import PublicEvidenceCompletionValidator
     validator = PublicEvidenceCompletionValidator()
     core.set_runtime_validator(validator)
+
+    # 6c. Wire recovery budget gate (Section F)
+    if budget_gate is not None:
+        core.set_recovery_budget_gate(budget_gate)
 
     # 7. Create ToolMaze adapter
     try:
@@ -193,6 +214,22 @@ def execute_trial(
     except BudgetExhausted as exc:
         result.termination_reason = "budget_exhausted"
         result.error_diagnostics = _classify_exception(exc)
+    except RuntimeValidatorExecutionError as exc:
+        # Section D: Validator infrastructure failure → INVALID_INFRA
+        result.termination_reason = "runtime_validator_error"
+        result.validity = "INVALID_INFRA"
+        result.error_diagnostics = _classify_exception(exc)
+        result.wall_time = time.time() - start_time
+        # Still try to collect partial artifacts
+        result.recovery_decisions = core.get_recovery_decisions()
+        result.validator_events = core.get_validator_events()
+        result.provider_usage = {
+            "model_calls_used": budgeted_driver.calls_used if hasattr(budgeted_driver, 'calls_used') else 0,
+            "input_tokens": budgeted_driver.get_token_usage().input_tokens,
+            "output_tokens": budgeted_driver.get_token_usage().output_tokens,
+            "wall_time_seconds": round(result.wall_time, 1),
+        }
+        return result
     except ProviderExecutionError as exc:
         result.termination_reason = "provider_transport_failure"
         result.error_diagnostics = _classify_exception(exc)
@@ -212,17 +249,18 @@ def execute_trial(
 
     # K: persist actual observer/evidence data
     result.shadow_records = observer.get_records() if observer is not None and hasattr(observer, 'get_records') else []
-    result.evidence_events = ledger.export_events() if ledger is not None and hasattr(ledger, 'export_events') else []
+    result.evidence_events = ledger.all_events() if ledger is not None else []
 
     # K: persist actual validator events
-    result.validator_events = validator.get_events() if validator is not None else []
+    result.validator_events = core.get_validator_events()
 
-    # 9. Provider usage
+    # 9. Provider usage — use the raw driver for token accounting
+    raw_driver = model_driver  # original unwrapped driver
     result.provider_usage = {
-        "model_calls_used": model_driver.calls_used if hasattr(model_driver, 'calls_used') else 0,
-        "input_tokens": model_driver.get_token_usage().input_tokens,
-        "output_tokens": model_driver.get_token_usage().output_tokens,
-        "provider_request_count": getattr(model_driver, 'provider_request_count', 0),
+        "model_calls_used": budgeted_driver.calls_used if hasattr(budgeted_driver, 'calls_used') else 0,
+        "input_tokens": raw_driver.get_token_usage().input_tokens,
+        "output_tokens": raw_driver.get_token_usage().output_tokens,
+        "provider_request_count": getattr(raw_driver, 'provider_request_count', 0),
         "wall_time_seconds": round(result.wall_time, 1),
         "official_token_usage": token_usage_dict,
     }
@@ -237,6 +275,8 @@ def execute_trial(
     elif result.termination_reason == "provider_transport_failure":
         result.validity = "INVALID_INFRA"
     elif result.termination_reason == "policy_error":
+        result.validity = "INVALID_INFRA"
+    elif result.termination_reason == "runtime_validator_error":
         result.validity = "INVALID_INFRA"
     elif result.termination_reason == "infrastructure_error":
         result.validity = "INVALID_INFRA"

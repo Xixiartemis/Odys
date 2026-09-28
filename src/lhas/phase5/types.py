@@ -279,3 +279,13 @@ class PolicyExecutionError(Exception):
     surfaced as a clear, catchable error.
     """
     pass
+
+
+class RuntimeValidatorExecutionError(Exception):
+    """Raised when the runtime validator encounters an infrastructure error.
+
+    Validator infrastructure failures MUST fail-closed: this exception
+    propagates to TrialExecutor which classifies the trial as INVALID_INFRA.
+    A validator crash must NEVER be silently converted to a VALID outcome.
+    """
+    pass
