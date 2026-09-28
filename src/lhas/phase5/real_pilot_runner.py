@@ -569,8 +569,17 @@ class RealPilotRunner:
 
                     # Build pairing invariants from TrialResult
                     runtime_task = self._adapter.build_runtime_task(desc)
+                    # Test doubles and legacy adapters may return a mock or a
+                    # partial runtime object.  Pairing hashes must remain
+                    # structured JSON; never let a mock leak into provenance.
+                    environment_snapshot = getattr(runtime_task, "environment_snapshot", {})
+                    if not isinstance(environment_snapshot, dict):
+                        environment_snapshot = {}
                     runtime_task = runtime_task.model_copy(
-                        update={"visible_tools": trial_result.runtime_tool_schema}
+                        update={
+                            "visible_tools": trial_result.runtime_tool_schema,
+                            "environment_snapshot": environment_snapshot,
+                        }
                     )
                     invariants = ExperimentPairValidator.compute_trial_invariants(
                         experiment_id=self._experiment_id,
