@@ -16,6 +16,7 @@ dependencies = [
 dev = [
     "pytest>=8,<9",
     "pytest-asyncio>=0.21",
+    "pyyaml>=6,<7",
 ]
 live = [
     "pypdf>=5,<6",
