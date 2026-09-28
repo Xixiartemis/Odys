@@ -70,7 +70,10 @@ def _hydrate_dataset(data_root: Path) -> None:
     with tempfile.TemporaryDirectory(prefix="odys-toolmaze-dataset-") as temporary:
         checkout = Path(temporary) / "dataset"
         _run([
-            "git", "clone", "--filter=blob:none", "--no-checkout",
+            # Hugging Face's promisor/Xet endpoint is not compatible with
+            # GitHub-hosted runners' partial-clone negotiation.  Keep the
+            # checkout sparse, but fetch a normal pinned pack.
+            "git", "clone", "--no-checkout",
             DATASET_REPOSITORY, str(checkout),
         ])
         _run(["git", "-C", str(checkout), "sparse-checkout", "init", "--cone"])
