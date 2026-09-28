@@ -572,15 +572,44 @@ class RealPilotRunner:
                     # Test doubles and legacy adapters may return a mock or a
                     # partial runtime object.  Pairing hashes must remain
                     # structured JSON; never let a mock leak into provenance.
-                    environment_snapshot = getattr(runtime_task, "environment_snapshot", {})
-                    if not isinstance(environment_snapshot, dict):
-                        environment_snapshot = {}
-                    runtime_task = runtime_task.model_copy(
-                        update={
-                            "visible_tools": trial_result.runtime_tool_schema,
-                            "environment_snapshot": environment_snapshot,
-                        }
-                    )
+                    if isinstance(runtime_task, RuntimeTask):
+                        environment_snapshot = runtime_task.environment_snapshot
+                        if not isinstance(environment_snapshot, dict):
+                            environment_snapshot = {}
+                        runtime_task = runtime_task.model_copy(
+                            update={
+                                "visible_tools": trial_result.runtime_tool_schema,
+                                "environment_snapshot": environment_snapshot,
+                            }
+                        )
+                    else:
+                        user_input = raw_task.get("user_input", {})
+                        if not isinstance(user_input, dict):
+                            user_input = {}
+                        runtime_task = RuntimeTask(
+                            task_id=desc.task_id,
+                            objective=str(raw_task.get("task_description", "")),
+                            visible_tools=trial_result.runtime_tool_schema,
+                            prompt=str(
+                                user_input.get(
+                                    "query",
+                                    raw_task.get("task_description", ""),
+                                )
+                            ),
+                            constraints=[],
+                            acceptance_criteria=["complete the task as described"],
+                            environment_snapshot=user_input,
+                            budget=BudgetConfig(
+                                max_turns=int(self._budgets.get("max_turns", 30)),
+                                max_model_calls=int(
+                                    self._budgets.get("max_model_calls", 50)
+                                ),
+                                token_budget=self._budgets.get("token_budget"),
+                                deadline_seconds=self._budgets.get(
+                                    "deadline_seconds"
+                                ),
+                            ),
+                        )
                     invariants = ExperimentPairValidator.compute_trial_invariants(
                         experiment_id=self._experiment_id,
                         trial_id=trial_id,
