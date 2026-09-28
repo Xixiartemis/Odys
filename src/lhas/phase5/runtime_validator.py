@@ -10,10 +10,8 @@ Deterministic v1 rules:
 - V1: empty/whitespace candidate → REJECT (EMPTY_COMPLETION)
 - V2: unpaired tool call → REJECT (UNRESOLVED_TOOL_CALL)
 - V3: unresolved explicit public failure → REJECT (UNRESOLVED_PUBLIC_FAILURE)
-  Resolution rule (v1): a failure is resolved when a later positive result
-  exists for ANY tool (not necessarily the same tool). This models valid
-  alternative-path recovery where the agent recovers through a different
-  tool or approach.
+  Resolution is based on public lineage: a later success resolves a failure
+  from the same tool, or an explicitly declared replacement relationship.
 - V4: pending recovery → REJECT (PENDING_RECOVERY)
 - V5: no positive public evidence → INDETERMINATE (INSUFFICIENT_PUBLIC_EVIDENCE)
 - V6: all checks pass → ACCEPT
@@ -75,14 +73,33 @@ class PublicValidationEvidence:
         pass
 
 
+def _public_result_payload(result: Dict[str, Any]) -> Dict[str, Any]:
+    """Return the public result payload, including nested ``result`` DTOs.
+
+    The canonical agent path flattens public fields for compatibility, but the
+    validator also accepts the structured form written to evidence artifacts.
+    Keeping this normalization here prevents the two representations from
+    acquiring different semantics.
+    """
+    nested = result.get("result")
+    return nested if isinstance(nested, dict) else result
+
+
+def _public_field(result: Dict[str, Any], field: str, default: Any = None) -> Any:
+    if field in result:
+        return result[field]
+    payload = _public_result_payload(result)
+    return payload.get(field, default)
+
+
 def _is_explicit_failure(result: Dict[str, Any]) -> bool:
     """Check if a public tool result indicates explicit failure.
 
     Uses ONLY public fields from the result dict passed to
     Phase5AgentCore.receive_tool_result().
     """
-    status = str(result.get("status", "")).lower()
-    return status in {"error", "failure", "failed"}
+    status = str(_public_field(result, "status", "")).lower()
+    return status in {"error", "failure", "failed"} or bool(_public_field(result, "error"))
 
 
 def _has_positive_evidence(evidence: PublicValidationEvidence) -> bool:
@@ -94,15 +111,16 @@ def _has_positive_evidence(evidence: PublicValidationEvidence) -> bool:
     for result in evidence.public_tool_results:
         if _is_explicit_success(result):
             return True
-    # Check evidence refs
-    if evidence.evidence_refs:
-        return True
+        event_type = str(_public_field(result, "event_type", "")).upper()
+        effect_status = str(_public_field(result, "effect_status", "")).upper()
+        if event_type == "SIDE_EFFECT_CONFIRMED" or effect_status == "SIDE_EFFECT_CONFIRMED":
+            return True
     return False
 
 
 def _is_explicit_success(result: Dict[str, Any]) -> bool:
     """Check if a public tool result indicates explicit success."""
-    status = str(result.get("status", "")).lower()
+    status = str(_public_field(result, "status", "")).lower()
     return status in {"success", "ok", "completed", "done"}
 
 
@@ -140,20 +158,16 @@ class PublicEvidenceCompletionValidator:
         if runtime_evidence is None:
             evidence = PublicValidationEvidence(candidate_answer="")
         else:
-            # Section J: reject forbidden extra fields
+            # Section J: reject *all* extra fields. Filtering unknown fields
+            # would hide wiring errors and is not a strict DTO boundary.
             known_fields = set(PublicValidationEvidence.__dataclass_fields__)
             extra_fields = set(runtime_evidence.keys()) - known_fields
-            forbidden_extras = extra_fields & _FORBIDDEN_EXTRA_FIELDS
-            if forbidden_extras:
+            if extra_fields:
                 raise ValueError(
-                    f"PublicValidationEvidence received forbidden extra fields: "
-                    f"{forbidden_extras}. These fields expose hidden/oracle data "
-                    f"and must not enter the runtime validator."
+                    f"PublicValidationEvidence received forbidden extra fields / unknown fields: "
+                    f"{sorted(extra_fields)}. DTO input is strict extra=forbid."
                 )
-            evidence = PublicValidationEvidence(**{
-                k: v for k, v in runtime_evidence.items()
-                if k in known_fields
-            })
+            evidence = PublicValidationEvidence(**runtime_evidence)
 
         # Run deterministic rules
         decision, failure_type = self._apply_rules(evidence)
@@ -207,22 +221,34 @@ class PublicEvidenceCompletionValidator:
                     if not has_result:
                         return ValidatorDecision.REJECT, PublicFailureType.UNRESOLVED_TOOL_CALL
 
-        # V3: unresolved explicit public failure (Section B)
-        # v1 resolution rule: a failure is resolved when a later positive
-        # result exists for ANY tool (alternative-path recovery).
-        #
-        # Walk through results. A failure is unresolved only if no success
-        # appears AFTER it in the sequence.
+        # V3: resolve failures only through public lineage. A same-tool
+        # success is sufficient; a different tool must explicitly declare
+        # that it replaces the failed call.
         has_unresolved_failure = False
         for i, result in enumerate(evidence.public_tool_results):
-            if _is_explicit_failure(result):
-                # Check if any LATER success resolves this failure
-                has_later_success = any(
-                    _is_explicit_success(r)
-                    for r in evidence.public_tool_results[i + 1:]
+            if not _is_explicit_failure(result):
+                continue
+            failed_tool = _public_field(result, "tool_name")
+            failed_call = _public_field(result, "tool_call_id")
+            resolved = False
+            for later in evidence.public_tool_results[i + 1:]:
+                if not _is_explicit_success(later):
+                    continue
+                later_tool = _public_field(later, "tool_name")
+                later_retry_of = _public_field(later, "retry_of_call_id")
+                same_tool = bool(failed_tool) and later_tool == failed_tool
+                explicit_replacement = (
+                    failed_call is not None and
+                    later_retry_of == failed_call
                 )
-                if not has_later_success:
-                    has_unresolved_failure = True
+                # Legacy result-only observations have no tool identity. They
+                # remain same-lineage when both observations omit it.
+                identity_omitted = not failed_tool and not later_tool
+                if same_tool or explicit_replacement or identity_omitted:
+                    resolved = True
+                    break
+            if not resolved:
+                has_unresolved_failure = True
 
         if has_unresolved_failure:
             return ValidatorDecision.REJECT, PublicFailureType.UNRESOLVED_PUBLIC_FAILURE

@@ -289,3 +289,11 @@ class RuntimeValidatorExecutionError(Exception):
     A validator crash must NEVER be silently converted to a VALID outcome.
     """
     pass
+
+
+class ProgressObserverExecutionError(RuntimeError):
+    """A treatment-critical progress observer failed."""
+
+
+class EvidenceLedgerExecutionError(RuntimeError):
+    """A treatment-critical evidence ledger failed or was not wired."""

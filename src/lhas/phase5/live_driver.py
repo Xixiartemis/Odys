@@ -63,23 +63,31 @@ class LiveModelDriver:
     def __init__(
         self,
         *,
+        provider: str = "mimo",
         model_id: Optional[str] = None,
         base_url: Optional[str] = None,
         api_key: Optional[str] = None,
         temperature: float = 0.0,
+        top_p: float = 1.0,
         max_output_tokens: int = 4096,
         thinking_enabled: bool = True,
         request_timeout: int = 120,
         max_retries: int = 3,
+        supports_tool_choice: bool = False,
+        supports_parallel_tool_calls: bool = False,
     ):
+        self._provider = provider
         self._model_id = model_id or os.getenv("ODYS_AGENT_MODEL", "mimo-v2.5")
         self._base_url = base_url or os.getenv("ODYS_AGENT_BASE_URL")
         self._api_key = api_key or os.getenv("ODYS_AGENT_API_KEY")
         self._temperature = temperature
+        self._top_p = top_p
         self._max_output_tokens = max_output_tokens
         self._thinking_enabled = thinking_enabled
         self._request_timeout = request_timeout
         self._max_retries = max_retries
+        self._supports_tool_choice = supports_tool_choice
+        self._supports_parallel_tool_calls = supports_parallel_tool_calls
 
         if not self._api_key:
             raise ValueError("ODYS_AGENT_API_KEY not set")
@@ -136,11 +144,13 @@ class LiveModelDriver:
             "model": self._model_id,
             "messages": messages,
             "temperature": self._temperature,
+            "top_p": self._top_p,
             "max_tokens": self._max_output_tokens,
         }
         if tools:
             kwargs["tools"] = tools
-            kwargs["tool_choice"] = "auto"
+            if self._supports_tool_choice:
+                kwargs["tool_choice"] = "auto"
         if self._thinking_enabled:
             kwargs["extra_body"] = {"thinking": {"type": "enabled"}}
 
@@ -170,6 +180,11 @@ class LiveModelDriver:
             self._output_tokens += response.usage.completion_tokens or 0
 
         if message.tool_calls:
+            if len(message.tool_calls) > 1 and not self._supports_parallel_tool_calls:
+                raise ProviderExecutionError(
+                    "Provider emitted parallel tool calls but the frozen provider lock disables them",
+                    failure_class="UNSUPPORTED_PARALLEL_TOOL_CALLS",
+                )
             tc = message.tool_calls[0]
             try:
                 args = json.loads(tc.function.arguments) if tc.function.arguments else {}
@@ -212,3 +227,23 @@ class LiveModelDriver:
     @property
     def provider_request_count(self) -> int:
         return self._http_attempt_count
+
+    @property
+    def logical_provider_call_count(self) -> int:
+        return self._request_count
+
+    @property
+    def resolved_config(self) -> Dict[str, Any]:
+        """Resolved request configuration without secrets."""
+        return {
+            "provider": self._provider,
+            "model_id": self._model_id,
+            "temperature": self._temperature,
+            "top_p": self._top_p,
+            "max_output_tokens": self._max_output_tokens,
+            "request_timeout": self._request_timeout,
+            "max_retries": self._max_retries,
+            "thinking_enabled": self._thinking_enabled,
+            "supports_tool_choice": self._supports_tool_choice,
+            "supports_parallel_tool_calls": self._supports_parallel_tool_calls,
+        }

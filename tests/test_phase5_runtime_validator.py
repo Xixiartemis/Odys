@@ -213,20 +213,20 @@ class TestT6_NoHiddenMetadata:
                 },
             )
 
-    def test_dto_non_oracle_extra_allowed(self):
-        """Non-oracle extra fields are silently filtered."""
+    def test_dto_non_oracle_extra_rejected(self):
+        """Every unknown DTO field is rejected by the strict boundary."""
         v = PublicEvidenceCompletionValidator()
-        fb = v.validate(
-            candidate_id="c10",
-            evidence_refs=[],
-            runtime_evidence={
-                "candidate_answer": "test",
-                "unknown_field": "value",  # not forbidden, silently filtered
-                "public_tool_results": [{"status": "success"}],
-                "evidence_refs": ["e1"],
-            },
-        )
-        assert fb.execution_status is ValidatorExecutionStatus.SUCCESS
+        with pytest.raises(ValueError, match="forbidden extra fields"):
+            v.validate(
+                candidate_id="c10",
+                evidence_refs=[],
+                runtime_evidence={
+                    "candidate_answer": "test",
+                    "unknown_field": "value",
+                    "public_tool_results": [{"status": "success"}],
+                    "evidence_refs": ["e1"],
+                },
+            )
 
 
 # ══════════════════════════════════════════════════════════════════

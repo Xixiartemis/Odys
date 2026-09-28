@@ -98,8 +98,15 @@ def create_toolmaze_agent_adapter(core: Phase5AgentCore):
                 tool_calls=action.tool_calls,
             )
 
-        def receive_tool_result(self, tool_name: str, result: Dict[str, Any]) -> None:
-            self._core.receive_tool_result(tool_name, result)
+        def receive_tool_result(
+            self,
+            tool_name: str,
+            result: Dict[str, Any],
+            tool_call_index: int = 0,
+        ) -> None:
+            self._core.receive_tool_result(
+                tool_name, result, tool_call_index=tool_call_index
+            )
 
         def get_total_tokens(self) -> int:
             return self._core.get_total_tokens()

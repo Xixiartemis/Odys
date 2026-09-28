@@ -33,6 +33,11 @@ from .types import (
 from .shadow_observer import ShadowProgressObserver
 
 
+def _public_failure(result: dict[str, Any]) -> bool:
+    status = str(result.get("status", "")).lower()
+    return status in {"error", "failure", "failed"} or bool(result.get("error"))
+
+
 # ── Canonical JSON helper ──────────────────────────────────────────
 
 def _canonical_json(value: Any) -> bytes:
@@ -413,7 +418,7 @@ class RetryOnlyStrategy:
 
     async def on_step_result(self, *, step, result, observer):
         status = result.get("status", "")
-        if status in {"error", "failure", "FAILURE"} and self._retries < self.MAX_RETRIES:
+        if _public_failure(result) and self._retries < self.MAX_RETRIES:
             self._retries += 1
             return RecoveryDecision(
                 action=RecoveryActionKind.RETRY,
@@ -480,7 +485,10 @@ class OdysFullStrategy:
         from lhas.recovery import DefaultRecoveryPolicy
         self._recovery_policy = DefaultRecoveryPolicy()
         self._attempt_number = 0
-        self._max_attempts: int = 3
+        # This is a root-derived Phase4 policy parameter, not an additional
+        # intervention treatment budget. The external RecoveryBudgetGate is
+        # the only A3/A4 intervention ceiling.
+        self._max_attempts: int = 15
         self._recovery_history: list[Any] = []  # list[RecoveryAction]
 
         # Cached Phase4 domain object references (lazy import)
@@ -506,11 +514,7 @@ class OdysFullStrategy:
 
     def configure(self, *, task, generation_config):
         self._attempt_number = 0
-        self._max_attempts = getattr(task, "max_attempts", 3) if hasattr(task, "max_attempts") else 3
-        # Derive max_attempts from budget if the RuntimeTask doesn't carry it.
-        # Use min of max_turns and a recovery ceiling of 3 (matches Phase4 default).
-        if hasattr(task, "budget"):
-            self._max_attempts = min(task.budget.max_turns, 3)
+        self._max_attempts = task.budget.max_turns if hasattr(task, "budget") else 15
         self._recovery_history.clear()
         return {
             "recovery": True,
@@ -519,6 +523,10 @@ class OdysFullStrategy:
             "recovery_budget_policy": True,
             "recovery_policy_class": type(self._recovery_policy).__name__,
             "recovery_policy_module": "lhas.recovery",
+            "phase4_policy_config_hash": hashlib.sha256(_canonical_json({
+                "policy": type(self._recovery_policy).__name__,
+                "max_attempts": self._max_attempts,
+            })).hexdigest(),
         }
 
     def create_observer(self):
@@ -541,7 +549,7 @@ class OdysFullStrategy:
                     )
 
         # Direct tool error → delegate to Phase4 recovery
-        if status in {"error", "failure", "FAILURE"}:
+        if _public_failure(result):
             return await self._delegate_to_recovery(
                 step=step, result=result,
                 signal="TOOL_ERROR", reason=f"tool status={status}",
@@ -760,6 +768,8 @@ _INVARIANT_FIELDS: list[str] = [
     "benchmark_name",
     "benchmark_revision",
     "dataset_digest",
+    "evaluator_digest",
+    "full_benchmark_sha",
     # Task identity
     "task_id",
     "native_condition",
@@ -775,8 +785,10 @@ _INVARIANT_FIELDS: list[str] = [
     "model_id",
     "provider",
     "temperature",
+    "top_p",
     "seed",
     "max_tokens",
+    "provider_config_hash",
     # Prompt
     "system_prompt",
     # Root budget
@@ -922,6 +934,8 @@ class ExperimentPairValidator:
             "benchmark_name": identity.benchmark_name.value,
             "benchmark_revision": identity.benchmark_revision,
             "dataset_digest": identity.dataset_digest,
+            "evaluator_digest": identity.evaluator_digest,
+            "full_benchmark_sha": getattr(adapter, "full_benchmark_sha", identity.commit_sha),
             # Task identity
             "task_id": task.task_id,
             "native_condition": f"{task.task_id}/{perturbation_mode}",
@@ -946,8 +960,12 @@ class ExperimentPairValidator:
             "model_id": generation_config.model_id,
             "provider": generation_config.provider,
             "temperature": generation_config.temperature,
+            "top_p": generation_config.top_p,
             "seed": generation_config.seed,
             "max_tokens": generation_config.max_output_tokens,
+            "provider_config_hash": hashlib.sha256(
+                _canonical_json(generation_config.model_dump(mode="json"))
+            ).hexdigest(),
             # Prompt
             "system_prompt": system_prompt,
             # Root budget

@@ -513,16 +513,16 @@ class TestValidatorInputFirewall:
                 runtime_evidence={"candidate_answer": "test", "is_perturbed": True},
             )
 
-    def test_non_oracle_extra_allowed(self):
-        """Non-oracle extra fields are silently filtered."""
+    def test_non_oracle_extra_rejected(self):
+        """Every unknown DTO field is rejected by the strict boundary."""
         validator = _make_validator()
-        fb = validator.validate(
-            candidate_id="c5", evidence_refs=[],
-            runtime_evidence={
-                "candidate_answer": "test",
-                "random_field": "value",
-                "public_tool_results": [{"status": "success"}],
-                "evidence_refs": ["e1"],
-            },
-        )
-        assert fb.decision.value == "ACCEPT"
+        with pytest.raises(ValueError, match="forbidden extra fields"):
+            validator.validate(
+                candidate_id="c5", evidence_refs=[],
+                runtime_evidence={
+                    "candidate_answer": "test",
+                    "random_field": "value",
+                    "public_tool_results": [{"status": "success"}],
+                    "evidence_refs": ["e1"],
+                },
+            )

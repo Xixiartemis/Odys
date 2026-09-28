@@ -48,6 +48,7 @@ class ModelAction:
     thought: Optional[str] = None
     tool_calls: Optional[List["ModelToolCall"]] = None
     tool_call_id: Optional[str] = None  # For correlating tool results
+    retry_of_call_id: Optional[str] = None
 
 
 @dataclass
@@ -55,6 +56,7 @@ class ModelToolCall:
     """Odys-owned equivalent of ToolMaze's ``ToolCall``."""
     tool_name: str
     arguments: Dict[str, Any] = field(default_factory=dict)
+    tool_call_id: Optional[str] = None
 
 
 @dataclass
@@ -306,10 +308,20 @@ class BudgetedModelDriver:
     terminates the trial cleanly.
     """
 
-    def __init__(self, inner: ModelDriver, *, max_model_calls: int):
+    def __init__(
+        self,
+        inner: ModelDriver,
+        *,
+        max_model_calls: int,
+        max_turns: Optional[int] = None,
+        token_budget: Optional[int] = None,
+    ):
         self._inner = inner
         self._max_model_calls = max_model_calls
+        self._max_turns = max_turns if max_turns is not None else max_model_calls
+        self._token_budget = token_budget
         self._calls_used: int = 0
+        self._turns_used: int = 0
 
     def next_action(
         self,
@@ -323,8 +335,18 @@ class BudgetedModelDriver:
                 f"Model call budget exhausted: "
                 f"{self._calls_used}/{self._max_model_calls} calls used"
             )
+        if self._turns_used >= self._max_turns:
+            raise BudgetExhausted(
+                f"Turn budget exhausted: {self._turns_used}/{self._max_turns} turns used"
+            )
         self._calls_used += 1
-        return self._inner.next_action(messages, tool_definitions, generation_config)
+        self._turns_used += 1
+        action = self._inner.next_action(messages, tool_definitions, generation_config)
+        if self._token_budget is not None and self.get_total_tokens() > self._token_budget:
+            raise BudgetExhausted(
+                f"Token budget exhausted: {self.get_total_tokens()}/{self._token_budget} tokens used"
+            )
+        return action
 
     def get_token_usage(self) -> DriverTokenUsage:
         return self._inner.get_token_usage()
@@ -341,6 +363,7 @@ class BudgetedModelDriver:
 
     def reset(self) -> None:
         self._calls_used = 0
+        self._turns_used = 0
         self._inner.reset()
 
     @property
@@ -352,3 +375,15 @@ class BudgetedModelDriver:
     def calls_remaining(self) -> int:
         """Number of model calls remaining before budget exhaustion."""
         return max(0, self._max_model_calls - self._calls_used)
+
+    @property
+    def turns_used(self) -> int:
+        return self._turns_used
+
+    @property
+    def max_turns(self) -> int:
+        return self._max_turns
+
+    @property
+    def token_budget(self) -> Optional[int]:
+        return self._token_budget

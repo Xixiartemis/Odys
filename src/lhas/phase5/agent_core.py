@@ -19,7 +19,12 @@ from typing import Any, Dict, List, Optional
 
 from .control_arms import PolicyStrategy, RecoveryActionKind, RecoveryDecision
 from .model_driver import ModelAction, DriverTokenUsage, ModelDriver
-from .types import PolicyExecutionError, RuntimeValidatorExecutionError
+from .types import (
+    EvidenceLedgerExecutionError,
+    PolicyExecutionError,
+    ProgressObserverExecutionError,
+    RuntimeValidatorExecutionError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +47,7 @@ class PublicToolObservation:
     tool_name: str
     result: Dict[str, Any]
     tool_call_id: Optional[str] = None
+    retry_of_call_id: Optional[str] = None
     arguments_digest: Optional[str] = None
     result_digest: Optional[str] = None
 
@@ -111,6 +117,9 @@ class Phase5AgentCore:
         self._escalation_reason: str = ""
         self._last_tool_call_id: Optional[str] = None
         self._last_tool_call: Optional[Dict[str, Any]] = None  # For A1 retry
+        self._invocation_sequence: int = 0
+        self._candidate_sequence: int = 0
+        self._invocation_ids: set[str] = set()
 
         # ── Recovery budget gate (Section F) ──
         self._recovery_budget_gate: Any = None  # RecoveryBudgetGate or PassThrough
@@ -222,10 +231,6 @@ class Phase5AgentCore:
             )
 
         # ── Internal action-selection loop (Section E) ──
-        # Bound loop iterations to prevent infinite loops
-        _MAX_VALIDATION_RETRIES = 5
-        _validation_retry_count = 0
-
         while True:
             # ── Check pending recovery decision ──
             if self._pending_recovery is not None:
@@ -252,12 +257,18 @@ class Phase5AgentCore:
                 if decision.action is RecoveryActionKind.RETRY:
                     # A1: same tool, same arguments — replay last tool call
                     if self._last_tool_call is not None:
+                        previous_id = self._last_tool_call.get("tool_call_id")
+                        conversation_recorded = self._last_tool_call.get(
+                            "conversation_recorded", True
+                        )
+                        retry_id = self._new_invocation_id()
                         replay = ModelAction(
                             type="tool_call",
                             tool_name=self._last_tool_call["tool_name"],
                             arguments=self._last_tool_call["arguments"],
                             thought=f"[RETRY] {decision.reason}",
-                            tool_call_id=self._last_tool_call.get("tool_call_id"),
+                            tool_call_id=retry_id,
+                            retry_of_call_id=previous_id,
                         )
                         # Record in conversation history
                         action_msg: Dict[str, Any] = {
@@ -269,9 +280,19 @@ class Phase5AgentCore:
                                 "arguments": replay.arguments or {},
                             },
                         }
-                        if replay.tool_call_id:
+                        if replay.tool_call_id and conversation_recorded:
                             action_msg["tool_call"]["id"] = replay.tool_call_id
+                        if replay.retry_of_call_id:
+                            action_msg["tool_call"]["retry_of_call_id"] = replay.retry_of_call_id
                         self._conversation_history.append(action_msg)
+                        self._last_tool_call_id = retry_id
+                        self._last_tool_call = {
+                            "tool_name": replay.tool_name,
+                            "arguments": replay.arguments or {},
+                            "tool_call_id": retry_id,
+                            "retry_of_call_id": previous_id,
+                            "conversation_recorded": conversation_recorded,
+                        }
                         return replay
                     # No last tool call to replay — fall through to model
 
@@ -295,18 +316,24 @@ class Phase5AgentCore:
                 "content": action.content or action.thought or "",
             }
             if action.type == "tool_call":
+                provider_call_id = action.tool_call_id
+                action = self._normalize_invocation(action)
                 action_msg["tool_call"] = {
                     "name": action.tool_name,
                     "arguments": action.arguments or {},
                 }
+                conversation_recorded = bool(provider_call_id)
                 if action.tool_call_id:
-                    action_msg["tool_call"]["id"] = action.tool_call_id
+                    if conversation_recorded:
+                        action_msg["tool_call"]["id"] = action.tool_call_id
                     self._last_tool_call_id = action.tool_call_id
                 # Track for A1 same-tool-same-args retry
                 self._last_tool_call = {
                     "tool_name": action.tool_name,
                     "arguments": action.arguments or {},
                     "tool_call_id": action.tool_call_id,
+                    "retry_of_call_id": action.retry_of_call_id,
+                    "conversation_recorded": conversation_recorded,
                 }
             if action.thought:
                 action_msg.setdefault("metadata", {})["thought"] = action.thought
@@ -331,14 +358,22 @@ class Phase5AgentCore:
                 has_pending_recovery=self._pending_recovery is not None,
                 observed_state_digest="",
                 public_tool_results=[
-                    obs.result for obs in self._public_tool_observations
+                    {
+                        "tool_name": obs.tool_name,
+                        "tool_call_id": obs.tool_call_id,
+                        "retry_of_call_id": obs.retry_of_call_id,
+                        "arguments_digest": obs.arguments_digest,
+                        "result": obs.result,
+                        **obs.result,
+                    }
+                    for obs in self._public_tool_observations
                 ],
             )
 
             # ── Run validator (Section D: fail-closed) ──
             try:
                 feedback = self._runtime_validator.validate(
-                    candidate_id=f"candidate-{self._step_count}",
+                    candidate_id=self._next_candidate_id(),
                     evidence_refs=evidence.evidence_refs,
                     observed_state_digest="",
                     runtime_evidence=evidence.__dict__,
@@ -380,17 +415,6 @@ class Phase5AgentCore:
                 )
 
             # ── A3/A4/A5: delegate to strategy for recovery decision ──
-            _validation_retry_count += 1
-            if _validation_retry_count > _MAX_VALIDATION_RETRIES:
-                self._escalation_flag = True
-                self._escalation_reason = (
-                    f"Validation retry limit exceeded ({_MAX_VALIDATION_RETRIES})"
-                )
-                return ModelAction(
-                    type="final_answer",
-                    content=f"TERMINATED: {self._escalation_reason}",
-                )
-
             try:
                 recovery_decision = self._run_async(hook(
                     feedback=feedback,
@@ -442,7 +466,12 @@ class Phase5AgentCore:
                 self._step_count, recovery_decision.action.value,
             )
 
-    def receive_tool_result(self, tool_name: str, result: Dict[str, Any]) -> None:
+    def receive_tool_result(
+        self,
+        tool_name: str,
+        result: Dict[str, Any],
+        tool_call_index: int = 0,
+    ) -> None:
         """Process a tool result: record, observe, consult strategy.
 
         Section A: Stores structured PublicToolObservation for the runtime
@@ -455,8 +484,12 @@ class Phase5AgentCore:
             "name": tool_name,
             "content": json.dumps(result, default=str, ensure_ascii=False) if isinstance(result, dict) else str(result),
         }
-        if self._last_tool_call_id:
-            tool_msg["tool_call_id"] = self._last_tool_call_id
+        call_id = self._last_tool_call_id
+        conversation_recorded = (self._last_tool_call or {}).get(
+            "conversation_recorded", True
+        )
+        if call_id and conversation_recorded:
+            tool_msg["tool_call_id"] = call_id
         self._conversation_history.append(tool_msg)
 
         # 2. Store structured public tool observation (Section A)
@@ -464,7 +497,8 @@ class Phase5AgentCore:
             step=self._step_count,
             tool_name=tool_name,
             result=result if isinstance(result, dict) else {"raw": str(result)},
-            tool_call_id=self._last_tool_call_id,
+            tool_call_id=call_id,
+            retry_of_call_id=(self._last_tool_call or {}).get("retry_of_call_id"),
             arguments_digest=hashlib.sha256(
                 json.dumps(
                     self._last_tool_call.get("arguments", {}) if self._last_tool_call else {},
@@ -487,16 +521,15 @@ class Phase5AgentCore:
                     event_type=EvidenceEventType.TOOL_OBSERVED,
                     payload={
                         "tool_name": tool_name,
+                        "tool_call_id": call_id,
+                        "retry_of_call_id": (self._last_tool_call or {}).get("retry_of_call_id"),
+                        "arguments_digest": obs.arguments_digest,
                         "result_keys": sorted(result.keys()) if isinstance(result, dict) else [],
                         "step": self._step_count,
                     },
                 )
-            except ImportError as exc:
-                logger.debug("Evidence event type import failed (non-critical): %s", exc)
-            except AttributeError as exc:
-                logger.debug("Evidence ledger attribute error (non-critical): %s", exc)
             except Exception as exc:
-                raise PolicyExecutionError(
+                raise EvidenceLedgerExecutionError(
                     f"Evidence ledger append failed at step {self._step_count}"
                 ) from exc
 
@@ -504,17 +537,20 @@ class Phase5AgentCore:
         shadow_record = None
         if self._shadow_observer is not None:
             try:
-                action_identity = f"{tool_name}@step-{self._step_count}"
+                action_identity = self._stable_action_identity(
+                    tool_name,
+                    (self._last_tool_call or {}).get("arguments", {}),
+                )
                 shadow_record = self._shadow_observer.observe(
                     task_id=self._task_description[:64],
                     step=self._step_count,
                     action_identity=action_identity,
                     tool_result=result,
                 )
-            except AttributeError as exc:
-                logger.warning("Shadow observer attribute error (non-critical): %s", exc)
             except Exception as exc:
-                logger.warning("Shadow observer failed at step %d: %s", self._step_count, exc)
+                raise ProgressObserverExecutionError(
+                    f"Shadow observer failed at step {self._step_count}"
+                ) from exc
 
         # 6. Consult policy strategy for recovery (Section F: authorize)
         if self._strategy is not None:
@@ -579,12 +615,15 @@ class Phase5AgentCore:
         Uses all_events() which is the canonical export method.
         """
         if self._evidence_ledger is None:
+            # Canonical TrialExecutor rejects missing ledgers before runtime;
+            # the core keeps a harmless empty reference for standalone policy
+            # unit tests and non-canonical callers.
             return []
         try:
             events = self._evidence_ledger.all_events()
             return [e.evidence_id for e in events]
-        except AttributeError:
-            return []
+        except Exception as exc:
+            raise EvidenceLedgerExecutionError("EvidenceLedger export failed") from exc
 
     def get_token_usage(self) -> DriverTokenUsage:
         """Get token usage as Odys-owned DriverTokenUsage."""
@@ -623,6 +662,9 @@ class Phase5AgentCore:
         self._escalation_reason = ""
         self._last_tool_call_id = None
         self._last_tool_call = None
+        self._invocation_sequence = 0
+        self._candidate_sequence = 0
+        self._invocation_ids.clear()
         self._public_tool_observations.clear()
         self._model_driver.reset()
 
@@ -647,3 +689,40 @@ class Phase5AgentCore:
             "different arguments, or a different strategy to accomplish the task."
         )
         return "\n".join(parts)
+
+    def _new_invocation_id(self) -> str:
+        self._invocation_sequence += 1
+        invocation_id = f"odys-invocation-{self._invocation_sequence}"
+        self._invocation_ids.add(invocation_id)
+        return invocation_id
+
+    def _normalize_invocation(self, action: ModelAction) -> ModelAction:
+        """Ensure every execution has a unique public invocation id."""
+        requested = action.tool_call_id
+        call_id = requested if requested and requested not in self._invocation_ids else None
+        if call_id is None:
+            call_id = self._new_invocation_id()
+        else:
+            self._invocation_ids.add(call_id)
+        self._last_tool_call_id = call_id
+        return ModelAction(
+            type=action.type,
+            tool_name=action.tool_name,
+            arguments=action.arguments,
+            content=action.content,
+            thought=action.thought,
+            tool_calls=action.tool_calls,
+            tool_call_id=call_id,
+            retry_of_call_id=action.retry_of_call_id,
+        )
+
+    def _next_candidate_id(self) -> str:
+        self._candidate_sequence += 1
+        return f"candidate-{self._step_count}-{self._candidate_sequence}"
+
+    @staticmethod
+    def _stable_action_identity(tool_name: str, arguments: Any) -> str:
+        digest = hashlib.sha256(
+            json.dumps(arguments or {}, sort_keys=True, ensure_ascii=False, separators=(",", ":"), default=str).encode()
+        ).hexdigest()
+        return f"{tool_name}:{digest}"
