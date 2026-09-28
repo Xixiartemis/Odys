@@ -59,6 +59,10 @@ from .control_arms import (
 )
 from .trial_executor import execute_trial, TrialResult
 from .runtime_validator import VALIDATOR_ID, VALIDATOR_VERSION, PublicEvidenceCompletionValidator
+from .provider_lock import (
+    provider_config_hash,
+    validate_resolved_config,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -345,14 +349,7 @@ class RealPilotRunner:
         )
         lock_path = Path("experiments/phase5/manifests/provider-lock.json")
         self._provider_lock = json.loads(lock_path.read_text(encoding="utf-8")) if lock_path.exists() else {}
-        self._provider_config_hash = hashlib.sha256(_canonical_json({
-            key: self._provider_lock.get(key)
-            for key in (
-                "provider", "exact_model_id", "temperature", "top_p",
-                "max_output_tokens", "request_timeout_seconds",
-                "provider_retry_policy", "thinking_enabled", "supports_tool_choice",
-            )
-        })).hexdigest()
+        self._provider_config_hash = provider_config_hash(self._provider_lock)
 
         # FIX: accept both 'budgets' and 'root_budget' keys
         if "budgets" in self._manifest:
@@ -464,24 +461,7 @@ class RealPilotRunner:
         actual = getattr(driver, "resolved_config", None)
         if not isinstance(actual, dict):
             raise ValueError("live driver must expose resolved_config for provider-lock parity")
-        expected = {
-            "provider": self._provider_lock.get("provider"),
-            "model_id": self._provider_lock.get("exact_model_id"),
-            "temperature": self._provider_lock.get("temperature"),
-            "top_p": self._provider_lock.get("top_p"),
-            "max_output_tokens": self._provider_lock.get("max_output_tokens"),
-            "request_timeout": self._provider_lock.get("request_timeout_seconds"),
-            "max_retries": 3,
-            "thinking_enabled": self._provider_lock.get("thinking_enabled"),
-            "supports_tool_choice": self._provider_lock.get("supports_tool_choice"),
-        }
-        mismatches = {
-            key: (actual.get(key), value)
-            for key, value in expected.items()
-            if actual.get(key) != value
-        }
-        if mismatches:
-            raise ValueError(f"provider-lock mismatch: {mismatches}")
+        validate_resolved_config(actual, self._provider_lock)
 
     # -- Main execution ------------------------------------------------
 

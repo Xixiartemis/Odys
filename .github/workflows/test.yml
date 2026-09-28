@@ -15,6 +15,19 @@ jobs:
         with:
           enable-cache: true
       - run: uv sync --extra dev --extra live --extra agent
+      - name: Preflight frozen live canary manifests
+        env:
+          ODYS_AGENT_BASE_URL: https://token-plan-cn.xiaomimimo.com/v1
+        run: >-
+          uv run python -m lhas.phase5.canary_runner
+          --manifest experiments/phase5/manifests/phase5-real-canary-004.json
+          --preflight-only &&
+          uv run python -m lhas.phase5.canary_runner
+          --manifest experiments/phase5/manifests/phase5-real-canary-005.json
+          --preflight-only &&
+          uv run python -m lhas.phase5.canary_runner
+          --manifest experiments/phase5/manifests/phase5-real-canary-006.json
+          --preflight-only
       - run: uv run pytest
 
   final-live-infrastructure-windows:
