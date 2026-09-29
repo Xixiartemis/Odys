@@ -118,26 +118,38 @@ def serialize_messages(messages: Sequence[Mapping[str, Any]]) -> list[dict[str, 
             reasoning = transport.get("reasoning_content") if isinstance(transport, Mapping) else None
             if reasoning is not None:
                 output["reasoning_content"] = reasoning
-            call = message.get("tool_call")
-            if call is not None:
-                if not isinstance(call, Mapping):
-                    raise ProviderProtocolError("assistant tool_call record is malformed")
-                provider_id = call.get("provider_tool_call_id") or call.get("id")
-                if not isinstance(provider_id, str) or not provider_id:
-                    raise ProviderProtocolError("assistant provider tool_call_id is missing")
-                name = call.get("name")
-                if not isinstance(name, str) or not name:
-                    raise ProviderProtocolError("assistant tool function name is missing")
-                output["tool_calls"] = [
-                    {
-                        "id": provider_id,
-                        "type": "function",
-                        "function": {
-                            "name": name,
-                            "arguments": _serialize_arguments(call.get("arguments", {})),
-                        },
-                    }
-                ]
+            calls = message.get("tool_calls")
+            if calls is None:
+                call = message.get("tool_call")
+                calls = [] if call is None else [call]
+            if not isinstance(calls, list):
+                raise ProviderProtocolError("assistant tool_calls record is malformed")
+            if calls:
+                wire_calls: list[dict[str, Any]] = []
+                seen_ids: set[str] = set()
+                for call in calls:
+                    if not isinstance(call, Mapping):
+                        raise ProviderProtocolError("assistant tool_call record is malformed")
+                    provider_id = call.get("provider_tool_call_id") or call.get("id")
+                    if not isinstance(provider_id, str) or not provider_id:
+                        raise ProviderProtocolError("assistant provider tool_call_id is missing")
+                    if provider_id in seen_ids:
+                        raise ProviderProtocolError("duplicate assistant provider tool_call_id")
+                    seen_ids.add(provider_id)
+                    name = call.get("name")
+                    if not isinstance(name, str) or not name:
+                        raise ProviderProtocolError("assistant tool function name is missing")
+                    wire_calls.append(
+                        {
+                            "id": provider_id,
+                            "type": "function",
+                            "function": {
+                                "name": name,
+                                "arguments": _serialize_arguments(call.get("arguments", {})),
+                            },
+                        }
+                    )
+                output["tool_calls"] = wire_calls
             serialized.append(output)
             continue
         if role == "tool":

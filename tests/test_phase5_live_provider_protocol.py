@@ -11,7 +11,11 @@ import pytest
 from lhas.phase5.control_arms import ControlArm
 from lhas.phase5.live_driver import LiveModelDriver, ProviderExecutionError
 from lhas.phase5.provider_wire import canonical_tool_schemas, serialize_messages, tool_schema_hash
-from lhas.phase5.trial_executor import _classify_exception, execute_trial
+from lhas.phase5.trial_executor import (
+    _classify_exception,
+    _provider_failure_termination_reason,
+    execute_trial,
+)
 from lhas.phase5.types import BudgetConfig
 
 
@@ -211,7 +215,7 @@ def test_live_driver_rejects_invalid_provider_contract(response, match):
         driver.next_action([{"role": "user", "content": "task"}], tools)
 
 
-def test_live_driver_rejects_missing_reasoning_and_parallel_calls():
+def test_live_driver_rejects_missing_reasoning_but_preserves_multi_tool_batch():
     _, tools = _engine_tools()
     missing_reasoning = {
         "model": "mimo-v2.5",
@@ -229,8 +233,25 @@ def test_live_driver_rejects_missing_reasoning_and_parallel_calls():
         ]}}],
         "usage": {"prompt_tokens": 1, "completion_tokens": 1},
     }
-    with pytest.raises(ProviderExecutionError, match="parallel"):
-        _driver(_FakeClient([parallel])).next_action([{"role": "user", "content": "task"}], tools)
+    action = _driver(_FakeClient([parallel])).next_action(
+        [{"role": "user", "content": "task"}], tools
+    )
+    assert [call.tool_name for call in action.tool_calls] == ["x", "y"]
+    assert [call.provider_tool_call_id for call in action.tool_calls] == ["a", "b"]
+
+
+@pytest.mark.parametrize(
+    "failure_class,expected",
+    [
+        ("PROVIDER_PROTOCOL_FAILURE", "provider_protocol_failure"),
+        ("CONNECTION_RESET", "provider_transport_failure"),
+    ],
+)
+def test_provider_failure_classification_preserves_protocol_transport_split(
+    failure_class, expected
+):
+    error = ProviderExecutionError("classified failure", failure_class=failure_class)
+    assert _provider_failure_termination_reason(error) == expected
 
 
 def test_fake_openai_e2e_uses_canonical_execute_trial_without_provider_requests():

@@ -50,21 +50,24 @@ def _setup_core(driver, strategy, validator=None):
 
 def _feed_tool_result(core, tool_name, result, step=None):
     """Simulate a tool result being fed to the core."""
-    core._step_count = step if step is not None else core._step_count + 1
-    # Update last_tool_call_id for the observation
-    core._last_tool_call_id = f"call_{core._step_count}"
-    core._last_tool_call = {
-        "tool_name": tool_name,
-        "arguments": {},
-        "tool_call_id": core._last_tool_call_id,
-    }
-    # Append assistant tool_call to history
-    core._conversation_history.append({
-        "role": "assistant",
-        "type": "tool_call",
-        "content": "",
-        "tool_call": {"name": tool_name, "arguments": {}, "id": core._last_tool_call_id},
-    })
+    # Direct-result tests without a preceding model action retain the legacy
+    # fixture setup.  Once a model action has created a canonical active
+    # batch, let the core resolve its own provider/Odys identities; mutating
+    # those fields here would create an artificial unpaired tool call.
+    if core._active_tool_call_batch is None:
+        core._step_count = step if step is not None else core._step_count + 1
+        core._last_tool_call_id = f"call_{core._step_count}"
+        core._last_tool_call = {
+            "tool_name": tool_name,
+            "arguments": {},
+            "tool_call_id": core._last_tool_call_id,
+        }
+        core._conversation_history.append({
+            "role": "assistant",
+            "type": "tool_call",
+            "content": "",
+            "tool_call": {"name": tool_name, "arguments": {}, "id": core._last_tool_call_id},
+        })
     core.receive_tool_result(tool_name, result)
 
 

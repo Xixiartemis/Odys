@@ -546,6 +546,12 @@ def preflight_canary(
             sampling_parameters_sent=generation_values["sampling_parameters_sent"],
             supports_tool_choice=generation_values["supports_tool_choice"],
             supports_parallel_tool_calls=generation_values["supports_parallel_tool_calls"],
+            request_parallel_tool_calls_hint=generation_values.get(
+                "request_parallel_tool_calls_hint", False
+            ),
+            provider_may_return_multiple_tool_calls=generation_values.get(
+                "provider_may_return_multiple_tool_calls", True
+            ),
         )
         client = driver.construct_client()
         client_base_url = str(getattr(client, "base_url", endpoint["normalized_endpoint"])).rstrip("/")
@@ -770,6 +776,12 @@ def run_canary(
             sampling_parameters_sent=generation["sampling_parameters_sent"],
             supports_tool_choice=generation["supports_tool_choice"],
             supports_parallel_tool_calls=generation.get("supports_parallel_tool_calls", False),
+            request_parallel_tool_calls_hint=generation.get(
+                "request_parallel_tool_calls_hint", False
+            ),
+            provider_may_return_multiple_tool_calls=generation.get(
+                "provider_may_return_multiple_tool_calls", True
+            ),
         )
         validate_resolved_config(driver.resolved_config, lock)
         trial_result = execute_trial(

@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 from .control_arms import PolicyStrategy, RecoveryActionKind, RecoveryDecision
-from .model_driver import ModelAction, DriverTokenUsage, ModelDriver
+from .model_driver import ModelAction, ModelToolCall, DriverTokenUsage, ModelDriver
 from .types import (
     EvidenceLedgerExecutionError,
     PolicyExecutionError,
@@ -51,6 +51,8 @@ class PublicToolObservation:
     retry_of_call_id: Optional[str] = None
     arguments_digest: Optional[str] = None
     result_digest: Optional[str] = None
+    tool_call_index: int = 0
+    tool_call_batch_size: int = 1
 
     def __post_init__(self):
         if self.result_digest is None:
@@ -119,6 +121,8 @@ class Phase5AgentCore:
         self._last_tool_call_id: Optional[str] = None
         self._last_provider_tool_call_id: Optional[str] = None
         self._last_tool_call: Optional[Dict[str, Any]] = None  # For A1 retry
+        self._active_tool_call_batch: Optional[Dict[str, Any]] = None
+        self._pending_recovery_call: Optional[Dict[str, Any]] = None
         self._invocation_sequence: int = 0
         self._candidate_sequence: int = 0
         self._invocation_ids: set[str] = set()
@@ -195,6 +199,8 @@ class Phase5AgentCore:
         self._escalation_flag = False
         self._escalation_reason = ""
         self._public_tool_observations.clear()
+        self._active_tool_call_batch = None
+        self._pending_recovery_call = None
 
         self._conversation_history.append({
             "role": "user",
@@ -242,6 +248,8 @@ class Phase5AgentCore:
             if self._pending_recovery is not None:
                 decision = self._pending_recovery
                 self._pending_recovery = None
+                recovery_call = self._pending_recovery_call
+                self._pending_recovery_call = None
 
                 if decision.action is RecoveryActionKind.ESCALATE:
                     self._escalation_flag = True
@@ -262,16 +270,17 @@ class Phase5AgentCore:
 
                 if decision.action is RecoveryActionKind.RETRY:
                     # A1: same tool, same arguments — replay last tool call
-                    if self._last_tool_call is not None:
-                        previous_id = self._last_tool_call.get("tool_call_id")
-                        conversation_recorded = self._last_tool_call.get(
+                    retry_source = recovery_call or self._last_tool_call
+                    if retry_source is not None:
+                        previous_id = retry_source.get("tool_call_id")
+                        conversation_recorded = retry_source.get(
                             "conversation_recorded", True
                         )
                         retry_id = self._new_invocation_id()
                         replay = ModelAction(
                             type="tool_call",
-                            tool_name=self._last_tool_call["tool_name"],
-                            arguments=self._last_tool_call["arguments"],
+                            tool_name=retry_source["tool_name"],
+                            arguments=retry_source["arguments"],
                             thought=f"[RETRY] {decision.reason}",
                             tool_call_id=retry_id,
                             provider_tool_call_id=f"odys-retry-provider-{self._invocation_sequence}",
@@ -315,6 +324,13 @@ class Phase5AgentCore:
                     })
 
             # ── Delegate to model driver ──
+            if self._active_tool_call_batch is not None:
+                pending = self._active_tool_call_batch
+                if len(pending["processed_indices"]) < len(pending["calls"]):
+                    raise RuntimeError(
+                        "cannot request the next provider response before all tool results in the active batch are recorded"
+                    )
+                self._active_tool_call_batch = None
             action = self._model_driver.next_action(
                 messages=list(self._conversation_history),
                 tool_definitions=self._tool_definitions,
@@ -327,29 +343,27 @@ class Phase5AgentCore:
                 "content": action.content or action.thought or "",
             }
             if action.type == "tool_call":
-                provider_call_id = action.provider_tool_call_id
-                action = self._normalize_invocation(action)
-                action_msg["tool_call"] = {
-                    "name": action.tool_name,
-                    "arguments": action.arguments or {},
-                    "invocation_id": action.tool_call_id,
+                action, batch_calls = self._normalize_tool_call_batch(action)
+                action_msg["tool_calls"] = [
+                    {
+                        "name": call["tool_name"],
+                        "arguments": call["arguments"],
+                        "invocation_id": call["tool_call_id"],
+                        **({"id": call["provider_tool_call_id"], "provider_tool_call_id": call["provider_tool_call_id"]}
+                           if call.get("provider_tool_call_id") else {}),
+                    }
+                    for call in batch_calls
+                ]
+                if len(batch_calls) == 1:
+                    action_msg["tool_call"] = action_msg["tool_calls"][0]
+                self._active_tool_call_batch = {
+                    "calls": batch_calls,
+                    "processed_indices": set(),
+                    "batch_size": len(batch_calls),
                 }
-                conversation_recorded = bool(provider_call_id)
-                if provider_call_id:
-                    action_msg["tool_call"]["id"] = provider_call_id
-                    action_msg["tool_call"]["provider_tool_call_id"] = provider_call_id
-                    self._last_provider_tool_call_id = provider_call_id
-                if action.tool_call_id:
-                    self._last_tool_call_id = action.tool_call_id
-                # Track for A1 same-tool-same-args retry
-                self._last_tool_call = {
-                    "tool_name": action.tool_name,
-                    "arguments": action.arguments or {},
-                    "tool_call_id": action.tool_call_id,
-                    "provider_tool_call_id": provider_call_id,
-                    "retry_of_call_id": action.retry_of_call_id,
-                    "conversation_recorded": conversation_recorded,
-                }
+                self._last_tool_call = batch_calls[0]
+                self._last_tool_call_id = batch_calls[0]["tool_call_id"]
+                self._last_provider_tool_call_id = batch_calls[0].get("provider_tool_call_id")
             if action.provider_reasoning_content is not None:
                 action_msg["_provider_transport"] = {
                     "reasoning_content": action.provider_reasoning_content,
@@ -363,7 +377,8 @@ class Phase5AgentCore:
                 return action
 
             # ── Validation gate (Section 5/7) ──
-            if (not self._strategy.should_validate()
+            if (self._strategy is None
+                    or not self._strategy.should_validate()
                     or self._runtime_validator is None):
                 return action
 
@@ -503,9 +518,30 @@ class Phase5AgentCore:
             "name": tool_name,
             "content": json.dumps(result, default=str, ensure_ascii=False) if isinstance(result, dict) else str(result),
         }
-        call_id = self._last_tool_call_id
-        provider_call_id = self._last_provider_tool_call_id
-        conversation_recorded = (self._last_tool_call or {}).get(
+        batch = self._active_tool_call_batch
+        if batch is not None:
+            if not isinstance(tool_call_index, int) or not 0 <= tool_call_index < len(batch["calls"]):
+                raise RuntimeError(f"tool_call_index out of range for active batch: {tool_call_index}")
+            if tool_call_index in batch["processed_indices"]:
+                raise RuntimeError(f"tool result already recorded for tool_call_index={tool_call_index}")
+            call_record = batch["calls"][tool_call_index]
+            if tool_name != call_record["tool_name"]:
+                raise RuntimeError(
+                    f"tool result name mismatch at tool_call_index={tool_call_index}: {tool_name} != {call_record['tool_name']}"
+                )
+            batch["processed_indices"].add(tool_call_index)
+        else:
+            call_record = self._last_tool_call or {
+                "tool_name": tool_name,
+                "arguments": {},
+                "tool_call_id": self._last_tool_call_id,
+                "provider_tool_call_id": self._last_provider_tool_call_id,
+                "conversation_recorded": True,
+            }
+        self._last_tool_call = call_record
+        call_id = call_record.get("tool_call_id")
+        provider_call_id = call_record.get("provider_tool_call_id")
+        conversation_recorded = call_record.get(
             "conversation_recorded", True
         )
         # Keep the Odys invocation identity for validator/public lineage and
@@ -525,13 +561,15 @@ class Phase5AgentCore:
             result=result if isinstance(result, dict) else {"raw": str(result)},
             tool_call_id=call_id,
             provider_tool_call_id=provider_call_id,
-            retry_of_call_id=(self._last_tool_call or {}).get("retry_of_call_id"),
+            retry_of_call_id=call_record.get("retry_of_call_id"),
             arguments_digest=hashlib.sha256(
                 json.dumps(
-                    self._last_tool_call.get("arguments", {}) if self._last_tool_call else {},
+                    call_record.get("arguments", {}),
                     sort_keys=True, default=str,
                 ).encode()
-            ).hexdigest()[:16] if self._last_tool_call else None,
+            ).hexdigest()[:16],
+            tool_call_index=tool_call_index,
+            tool_call_batch_size=(batch or {}).get("batch_size", 1),
         )
         self._public_tool_observations.append(obs)
 
@@ -551,10 +589,12 @@ class Phase5AgentCore:
                         "tool_call_id": call_id,
                         "provider_tool_call_id": provider_call_id,
                         "invocation_id": call_id,
-                        "retry_of_call_id": (self._last_tool_call or {}).get("retry_of_call_id"),
+                        "retry_of_call_id": call_record.get("retry_of_call_id"),
                         "arguments_digest": obs.arguments_digest,
                         "result_keys": sorted(result.keys()) if isinstance(result, dict) else [],
                         "step": self._step_count,
+                        "tool_call_index": tool_call_index,
+                        "tool_call_batch_size": (batch or {}).get("batch_size", 1),
                     },
                 )
             except Exception as exc:
@@ -568,7 +608,7 @@ class Phase5AgentCore:
             try:
                 action_identity = self._stable_action_identity(
                     tool_name,
-                    (self._last_tool_call or {}).get("arguments", {}),
+                    call_record.get("arguments", {}),
                 )
                 shadow_record = self._shadow_observer.observe(
                     task_id=self._task_description[:64],
@@ -598,7 +638,7 @@ class Phase5AgentCore:
 
                 if decision.action is not RecoveryActionKind.NONE:
                     # Section F: authorize through recovery budget gate
-                    authorized = self._authorize_recovery(decision)
+                    authorized = self._authorize_recovery(decision, call_record=call_record)
                     if authorized:
                         self._recovery_decisions.append({
                             "step": self._step_count,
@@ -609,6 +649,16 @@ class Phase5AgentCore:
                             "shadow_signal": shadow_signal,
                             "evidence": dict(decision.evidence) if decision.evidence else {},
                         })
+                    elif self._pending_recovery is not None:
+                        self._recovery_decisions.append({
+                            "step": self._step_count,
+                            "tool_name": tool_name,
+                            "action": decision.action.value,
+                            "reason": decision.reason,
+                            "signal": decision.signal,
+                            "suppressed": True,
+                            "batch_rule": "FIRST_NON_NONE_RECOVERY_DECISION_WINS_WITHIN_BATCH",
+                        })
 
             except PolicyExecutionError:
                 raise
@@ -617,12 +667,27 @@ class Phase5AgentCore:
                     f"Policy strategy on_step_result failed at step {self._step_count}"
                 ) from exc
 
-    def _authorize_recovery(self, decision: RecoveryDecision) -> bool:
+        if batch is not None and len(batch["processed_indices"]) == len(batch["calls"]):
+            # Keep the batch record available during the final result's policy
+            # callback, then make the next model request the only transition.
+            pass
+
+    def _authorize_recovery(
+        self,
+        decision: RecoveryDecision,
+        *,
+        call_record: Optional[Dict[str, Any]] = None,
+    ) -> bool:
         """Authorize a recovery decision through the budget gate (Section F).
 
         Returns True if authorized and set as pending recovery.
         Returns False if denied (ESCALATE → terminal).
         """
+        # Deterministic batch rule: the first non-NONE decision owns the
+        # pending recovery slot. Later results remain observable but cannot
+        # replace it or consume another recovery-budget unit.
+        if self._pending_recovery is not None:
+            return False
         if self._recovery_budget_gate is not None:
             from .recovery_budget import BudgetDecision
             budget_decision = self._recovery_budget_gate.authorize(
@@ -636,6 +701,7 @@ class Phase5AgentCore:
                 )
                 return False
         self._pending_recovery = decision
+        self._pending_recovery_call = call_record
         return True
 
     def _get_evidence_refs(self) -> List[str]:
@@ -692,6 +758,8 @@ class Phase5AgentCore:
         self._last_tool_call_id = None
         self._last_provider_tool_call_id = None
         self._last_tool_call = None
+        self._active_tool_call_batch = None
+        self._pending_recovery_call = None
         self._invocation_sequence = 0
         self._candidate_sequence = 0
         self._invocation_ids.clear()
@@ -747,6 +815,81 @@ class Phase5AgentCore:
             provider_reasoning_content=action.provider_reasoning_content,
             retry_of_call_id=action.retry_of_call_id,
         )
+
+    def _normalize_tool_call_batch(
+        self, action: ModelAction
+    ) -> tuple[ModelAction, List[Dict[str, Any]]]:
+        """Allocate one Odys identity for every call in one provider response."""
+        raw_calls = action.tool_calls
+        if not raw_calls:
+            raw_calls = [
+                type("_SingleCall", (), {
+                    "tool_name": action.tool_name,
+                    "arguments": action.arguments or {},
+                    "tool_call_id": action.tool_call_id,
+                    "provider_tool_call_id": action.provider_tool_call_id,
+                })()
+            ]
+        batch_calls: List[Dict[str, Any]] = []
+        seen_provider_ids: set[str] = set()
+        for index, raw_call in enumerate(raw_calls):
+            if isinstance(raw_call, dict):
+                tool_name = raw_call.get("tool_name")
+                arguments = raw_call.get("arguments", {})
+                requested_id = raw_call.get("tool_call_id")
+                provider_id = raw_call.get("provider_tool_call_id")
+            else:
+                tool_name = getattr(raw_call, "tool_name", None)
+                arguments = getattr(raw_call, "arguments", {})
+                requested_id = getattr(raw_call, "tool_call_id", None)
+                provider_id = getattr(raw_call, "provider_tool_call_id", None)
+            if index == 0 and provider_id is None:
+                provider_id = action.provider_tool_call_id
+            if not isinstance(tool_name, str) or not tool_name:
+                raise RuntimeError("tool-call batch contains an invalid tool name")
+            if not isinstance(arguments, dict):
+                raise RuntimeError("tool-call batch arguments must be objects")
+            if provider_id is not None:
+                if not isinstance(provider_id, str) or not provider_id:
+                    raise RuntimeError("tool-call batch provider id is invalid")
+                if provider_id in seen_provider_ids:
+                    raise RuntimeError("duplicate provider tool_call_id in tool-call batch")
+                seen_provider_ids.add(provider_id)
+            invocation_id = requested_id if requested_id and requested_id not in self._invocation_ids else None
+            if invocation_id is None:
+                invocation_id = self._new_invocation_id()
+            else:
+                self._invocation_ids.add(invocation_id)
+            batch_calls.append({
+                "tool_name": tool_name,
+                "arguments": dict(arguments),
+                "tool_call_id": invocation_id,
+                "provider_tool_call_id": provider_id,
+                "retry_of_call_id": getattr(raw_call, "retry_of_call_id", None),
+                "conversation_recorded": bool(provider_id),
+            })
+        first = batch_calls[0]
+        normalized_calls = [
+            ModelToolCall(
+                tool_name=call["tool_name"],
+                arguments=call["arguments"],
+                tool_call_id=call["tool_call_id"],
+                provider_tool_call_id=call.get("provider_tool_call_id"),
+            )
+            for call in batch_calls
+        ]
+        return ModelAction(
+            type="tool_call",
+            tool_name=first["tool_name"],
+            arguments=first["arguments"],
+            content=action.content,
+            thought=action.thought,
+            tool_calls=normalized_calls,
+            tool_call_id=first["tool_call_id"],
+            provider_tool_call_id=first.get("provider_tool_call_id"),
+            provider_reasoning_content=action.provider_reasoning_content,
+            retry_of_call_id=action.retry_of_call_id,
+        ), batch_calls
 
     def _next_candidate_id(self) -> str:
         self._candidate_sequence += 1

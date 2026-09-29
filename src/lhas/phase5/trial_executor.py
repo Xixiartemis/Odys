@@ -118,6 +118,14 @@ def _classify_exception(exc: Exception) -> Dict[str, Any]:
     }
 
 
+def _provider_failure_termination_reason(exc: ProviderExecutionError) -> str:
+    """Map provider failures to the immutable research validity taxonomy."""
+    failure_class = str(getattr(exc, "failure_class", ""))
+    if failure_class.startswith("PROVIDER_PROTOCOL"):
+        return "provider_protocol_failure"
+    return "provider_transport_failure"
+
+
 def execute_trial(
     *,
     arm: ControlArm,
@@ -293,8 +301,11 @@ def execute_trial(
         result.error_diagnostics = _classify_exception(exc)
         runtime_exception = exc
     except ProviderExecutionError as exc:
-        result.termination_reason = "provider_transport_failure"
+        result.termination_reason = _provider_failure_termination_reason(exc)
         result.error_diagnostics = _classify_exception(exc)
+        result.error_diagnostics["provider_failure_class"] = getattr(
+            exc, "failure_class", None
+        )
         runtime_exception = exc
     except PolicyExecutionError as exc:
         result.termination_reason = "policy_error"
@@ -332,6 +343,8 @@ def execute_trial(
             "provider_tool_call_id": o.provider_tool_call_id,
             "retry_of_call_id": o.retry_of_call_id,
             "arguments_digest": o.arguments_digest,
+            "tool_call_index": o.tool_call_index,
+            "tool_call_batch_size": o.tool_call_batch_size,
             "result": o.result,
         }
         for o in core.get_public_tool_observations()
@@ -371,7 +384,10 @@ def execute_trial(
         "MODEL_CALL_BUDGET_EXHAUSTED",
     ) and grader_error is None:
         result.validity = "VALID"
-    elif result.termination_reason == "provider_transport_failure":
+    elif result.termination_reason in (
+        "provider_transport_failure",
+        "provider_protocol_failure",
+    ):
         result.validity = "INVALID_INFRA"
     elif result.termination_reason == "policy_error":
         result.validity = "INVALID_INFRA"

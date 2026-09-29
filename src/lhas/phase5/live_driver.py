@@ -70,6 +70,8 @@ class LiveModelDriver:
         sampling_parameters_sent: bool = False,
         supports_tool_choice: bool = False,
         supports_parallel_tool_calls: bool = False,
+        request_parallel_tool_calls_hint: bool = False,
+        provider_may_return_multiple_tool_calls: bool = True,
         client_factory: Optional[Callable[..., Any]] = None,
     ):
         self._provider = provider
@@ -85,6 +87,8 @@ class LiveModelDriver:
         self._sampling_parameters_sent = sampling_parameters_sent
         self._supports_tool_choice = supports_tool_choice
         self._supports_parallel_tool_calls = supports_parallel_tool_calls
+        self._request_parallel_tool_calls_hint = request_parallel_tool_calls_hint
+        self._provider_may_return_multiple_tool_calls = provider_may_return_multiple_tool_calls
         self._client_factory = client_factory or OpenAI
         if not self._api_key:
             raise ValueError("ODYS_AGENT_API_KEY not set")
@@ -123,7 +127,7 @@ class LiveModelDriver:
             "model": self._model_id,
             "messages": serialize_messages(messages),
             "max_completion_tokens": self._max_completion_tokens,
-            "parallel_tool_calls": False,
+            "parallel_tool_calls": self._request_parallel_tool_calls_hint,
         }
         if tool_definitions:
             kwargs["tools"] = canonical_tool_schemas(tool_definitions)
@@ -176,34 +180,45 @@ class LiveModelDriver:
         tool_calls = _value(message, "tool_calls") or []
         if not isinstance(tool_calls, list):
             raise ProviderExecutionError("provider tool_calls envelope is malformed", failure_class="PROVIDER_PROTOCOL_FAILURE")
-        if len(tool_calls) > 1:
-            raise ProviderExecutionError("provider returned parallel tool calls while disabled", failure_class="UNSUPPORTED_PARALLEL_TOOL_CALLS")
         reasoning = _value(message, "reasoning_content")
         self._last_reasoning_content = reasoning
         if tool_calls:
             if not isinstance(reasoning, str):
                 raise ProviderExecutionError("reasoning_content missing from MiMo tool response", failure_class="PROVIDER_PROTOCOL_FAILURE")
-            tool_call = tool_calls[0]
-            provider_id = _value(tool_call, "id")
-            function = _value(tool_call, "function")
-            name = _value(function, "name")
-            arguments = _value(function, "arguments")
-            if not isinstance(provider_id, str) or not provider_id:
-                raise ProviderExecutionError("provider tool_call_id is missing", failure_class="PROVIDER_PROTOCOL_FAILURE")
-            if not isinstance(name, str) or not name or not isinstance(arguments, str):
-                raise ProviderExecutionError("provider function tool call is malformed", failure_class="PROVIDER_PROTOCOL_FAILURE")
-            try:
-                parsed_arguments = json.loads(arguments)
-            except json.JSONDecodeError as exc:
-                raise ProviderExecutionError("provider tool arguments are not valid JSON", failure_class="PROVIDER_PROTOCOL_FAILURE") from exc
-            if not isinstance(parsed_arguments, dict):
-                raise ProviderExecutionError("provider tool arguments must be a JSON object", failure_class="PROVIDER_PROTOCOL_FAILURE")
+            parsed_calls: list[ModelToolCall] = []
+            provider_ids: set[str] = set()
+            for tool_call in tool_calls:
+                provider_id = _value(tool_call, "id")
+                function = _value(tool_call, "function")
+                name = _value(function, "name")
+                arguments = _value(function, "arguments")
+                if not isinstance(provider_id, str) or not provider_id:
+                    raise ProviderExecutionError("provider tool_call_id is missing", failure_class="PROVIDER_PROTOCOL_FAILURE")
+                if provider_id in provider_ids:
+                    raise ProviderExecutionError("duplicate provider tool_call_id", failure_class="PROVIDER_PROTOCOL_FAILURE")
+                provider_ids.add(provider_id)
+                if not isinstance(name, str) or not name or not isinstance(arguments, str):
+                    raise ProviderExecutionError("provider function tool call is malformed", failure_class="PROVIDER_PROTOCOL_FAILURE")
+                try:
+                    parsed_arguments = json.loads(arguments)
+                except json.JSONDecodeError as exc:
+                    raise ProviderExecutionError("provider tool arguments are not valid JSON", failure_class="PROVIDER_PROTOCOL_FAILURE") from exc
+                if not isinstance(parsed_arguments, dict):
+                    raise ProviderExecutionError("provider tool arguments must be a JSON object", failure_class="PROVIDER_PROTOCOL_FAILURE")
+                parsed_calls.append(
+                    ModelToolCall(
+                        tool_name=name,
+                        arguments=parsed_arguments,
+                        provider_tool_call_id=provider_id,
+                    )
+                )
+            first_call = parsed_calls[0]
             return ModelAction(
                 type="tool_call",
-                tool_name=name,
-                arguments=parsed_arguments,
-                tool_calls=[ModelToolCall(tool_name=name, arguments=parsed_arguments, provider_tool_call_id=provider_id)],
-                provider_tool_call_id=provider_id,
+                tool_name=first_call.tool_name,
+                arguments=first_call.arguments,
+                tool_calls=parsed_calls,
+                provider_tool_call_id=first_call.provider_tool_call_id,
                 provider_reasoning_content=reasoning,
             )
         return ModelAction(
@@ -254,4 +269,6 @@ class LiveModelDriver:
             "sdk_max_retries": self._sdk_max_retries,
             "supports_tool_choice": self._supports_tool_choice,
             "supports_parallel_tool_calls": self._supports_parallel_tool_calls,
+            "request_parallel_tool_calls_hint": self._request_parallel_tool_calls_hint,
+            "provider_may_return_multiple_tool_calls": self._provider_may_return_multiple_tool_calls,
         }

@@ -219,8 +219,22 @@ def validate_manifest_generation_config(
     }
     if mismatches:
         raise ProviderLockError(f"manifest/provider-lock mismatch: {mismatches}")
+    actual["request_parallel_tool_calls_hint"] = generation_config.get(
+        "request_parallel_tool_calls_hint", False
+    )
+    actual["provider_may_return_multiple_tool_calls"] = generation_config.get(
+        "provider_may_return_multiple_tool_calls",
+        lock.get("provider_may_return_multiple_tool_calls", True),
+    )
     return {
         "valid": True,
+        "request_parallel_tool_calls_hint": generation_config.get(
+            "request_parallel_tool_calls_hint", False
+        ),
+        "provider_may_return_multiple_tool_calls": generation_config.get(
+            "provider_may_return_multiple_tool_calls",
+            lock.get("provider_may_return_multiple_tool_calls", True),
+        ),
         "provider_config_hash": provider_config_hash(lock),
         "resolved_config": actual,
     }
