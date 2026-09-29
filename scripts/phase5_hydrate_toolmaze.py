@@ -4,10 +4,11 @@ This is intentionally provider-free.  It materializes only the benchmark
 inputs required by the Phase5 native tests (the 2,000 perturbed task JSONs)
 and clones the official runtime/evaluator at the locked Git commit.
 
-The dataset digest is the historical Phase5 digest: SHA-256 over the bytes of
-all ``perturbed_tasks/**/*.json`` files in sorted POSIX path order.  The
-individual downloads are fetched at an immutable Hugging Face dataset commit;
-the aggregate digest is the final acceptance check.
+The dataset digest is the historical Phase5 digest: SHA-256 over UTF-8 JSON
+bytes with CRLF normalized to LF, for all ``perturbed_tasks/**/*.json`` files
+in sorted POSIX path order. The individual downloads are fetched at an
+immutable Hugging Face dataset commit; the aggregate digest is the final
+acceptance check.
 """
 
 from __future__ import annotations
@@ -91,6 +92,12 @@ def _hydrate_dataset(data_root: Path) -> None:
         destination = data_root / "perturbed_tasks"
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copytree(source, destination, dirs_exist_ok=True)
+        # The historical Phase5 digest is line-ending independent across
+        # Windows/Linux runners: canonicalize downloaded JSON to UTF-8 LF
+        # bytes before hashing and before any runtime consumes it.
+        for path in destination.rglob("*.json"):
+            normalized = path.read_bytes().replace(b"\r\n", b"\n")
+            path.write_bytes(normalized)
 
 
 def _dataset_digest(data_root: Path) -> tuple[int, str]:
@@ -100,7 +107,7 @@ def _dataset_digest(data_root: Path) -> tuple[int, str]:
     )
     digest = hashlib.sha256()
     for path in files:
-        digest.update(path.read_bytes())
+        digest.update(path.read_bytes().replace(b"\r\n", b"\n"))
     return len(files), digest.hexdigest()
 
 
