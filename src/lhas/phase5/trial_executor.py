@@ -1,0 +1,446 @@
+"""TrialExecutor — shared execution path for canary and pilot.
+
+Every trial (canary or pilot) MUST go through this executor.
+It ensures:
+- strategy.configure() is called
+- create_observer() is called (canonical observer lifecycle)
+- EvidenceLedger is wired
+- A2 validator is wired
+- A5 recovery budget gating is wired
+- Official ExecutionEngine is the sole execution engine
+- All artifacts are persisted
+- Root budget is enforced HERE (not caller-dependent)
+
+This is the SINGLE canonical execution path.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import sys
+import time
+from pathlib import Path
+from typing import Any, Dict, Optional
+
+from .agent_core import Phase5AgentCore
+from .agent_adapter import create_toolmaze_agent_adapter, ToolMazeDependencyUnavailable
+from .control_arms import ControlArm, _STRATEGY_MAP
+from .live_driver import ProviderExecutionError
+from .model_driver import BudgetedModelDriver, BudgetExhausted, ModelDriver
+from .provider_wire import canonical_tool_schemas, tool_schema_hash
+from .trace_parser import build_derived_view
+from .types import (
+    BudgetConfig,
+    EvidenceLedgerExecutionError,
+    PolicyExecutionError,
+    ProgressObserverExecutionError,
+    RuntimeValidatorExecutionError,
+)
+from .firewall import FirewallViolation, OfflineGraderFirewall
+
+logger = logging.getLogger(__name__)
+
+_REPO = Path(__file__).resolve().parents[3] / "experiments" / "phase5" / "benchmarks" / "toolmaze"
+
+
+class TrialResult:
+    """Immutable result of a single trial execution."""
+
+    def __init__(self, *, trial_id: str, task_id: str, arm: str):
+        self.trial_id = trial_id
+        self.task_id = task_id
+        self.arm = arm
+        self.termination_reason: str = "pending"
+        self.validity: str = "pending"
+        self.official_trace: Dict[str, Any] = {}
+        self.derived_view: Dict[str, Any] = {}
+        self.recovery_decisions: list = []
+        self.shadow_records: list = []  # K: actual observer records
+        self.evidence_events: list = []  # K: actual ledger events
+        self.recovery_budget_ledger: list = []  # E: budget gate ledger
+        self.validator_events: list = []  # Section 14: validator events
+        self.public_tool_observations: list = []
+        self.provider_usage: Dict[str, Any] = {}
+        self.grader_result: Dict[str, Any] = {}
+        self.error_diagnostics: Optional[Dict[str, Any]] = None
+        self.strategy_config: Dict[str, Any] = {}
+        self.wall_time: float = 0.0
+        self.firewall_report: Dict[str, Any] = {}
+        self.runtime_tool_schema: list[dict[str, Any]] = []
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "trial_id": self.trial_id,
+            "task_id": self.task_id,
+            "arm": self.arm,
+            "termination_reason": self.termination_reason,
+            "validity": self.validity,
+            "tool_call_count": self.derived_view.get("tool_call_count", 0),
+            "round_count": self.derived_view.get("round_count", 0),
+            "has_final_answer": self.derived_view.get("has_final_answer", False),
+            "grader_pass": self.grader_result.get("judgement", {}).get("pass") if self.grader_result.get("judgement") else None,
+            "tsr": self.grader_result.get("metrics_summary", {}).get("tsr") if self.grader_result.get("metrics_summary") else None,
+            "provider_usage": self.provider_usage,
+            "recovery_decisions": self.recovery_decisions,
+            "shadow_records_count": len(self.shadow_records),
+            "evidence_events_count": len(self.evidence_events),
+            "validator_events_count": len(self.validator_events),
+            "public_tool_observations": self.public_tool_observations,
+            "strategy_config": self.strategy_config,
+            "error_diagnostics": self.error_diagnostics,
+            "wall_time_seconds": round(self.wall_time, 1),
+            "firewall_report": self.firewall_report,
+            "runtime_tool_schema_hash": tool_schema_hash(self.runtime_tool_schema),
+        }
+
+
+def _redact_text(value: Any) -> str:
+    text = str(value)
+    secret = __import__("os").environ.get("ODYS_AGENT_API_KEY")
+    if secret:
+        text = text.replace(secret, "[REDACTED]")
+    return text
+
+
+def _classify_exception(exc: Exception) -> Dict[str, Any]:
+    chain = []
+    current = exc
+    while current is not None:
+        chain.append({"type": type(current).__name__, "message": _redact_text(current)[:500]})
+        current = current.__cause__
+    return {
+        "exception_type": type(exc).__name__,
+        "exception_message": _redact_text(exc)[:500],
+        "cause_type": type(exc.__cause__).__name__ if exc.__cause__ else None,
+        "cause_message": _redact_text(exc.__cause__)[:500] if exc.__cause__ else None,
+        "full_chain": chain,
+    }
+
+
+def _provider_failure_termination_reason(exc: ProviderExecutionError) -> str:
+    """Map provider failures to the immutable research validity taxonomy."""
+    failure_class = str(getattr(exc, "failure_class", ""))
+    if failure_class.startswith("PROVIDER_PROTOCOL"):
+        return "provider_protocol_failure"
+    return "provider_transport_failure"
+
+
+def execute_trial(
+    *,
+    arm: ControlArm,
+    task_json: Dict[str, Any],
+    tool_definitions: Optional[list] = None,
+    model_driver: ModelDriver,
+    budget: BudgetConfig,
+    experiment_id: str,
+    task_id: str,
+    max_rounds: Optional[int] = None,
+) -> TrialResult:
+    """Execute a single trial through the canonical path.
+
+    This is the ONLY function that runs a live trial.
+    Both canary and pilot MUST call this function.
+
+    Root budget enforcement (Section H):
+    - Accepts a RAW ModelDriver (not pre-wrapped BudgetedModelDriver)
+    - Wraps it with BudgetedModelDriver HERE (single canonical owner)
+    - Enforces max_model_calls, max_turns
+    - Enforces token_budget and deadline_seconds when configured
+    """
+    trial_id = f"{experiment_id}_{task_id}_{arm.value}"
+    result = TrialResult(trial_id=trial_id, task_id=task_id, arm=arm.value)
+
+    # ── Canonical root-budget wrapping ──
+    # A pre-wrapped driver would create an unobservable second authority.
+    if isinstance(model_driver, BudgetedModelDriver):
+        raise TypeError("TrialExecutor accepts a raw ModelDriver only")
+    if max_rounds is not None and max_rounds != budget.max_turns:
+        raise ValueError(
+            f"max_rounds override {max_rounds} disagrees with root max_turns {budget.max_turns}"
+        )
+    budgeted_driver = BudgetedModelDriver(
+        model_driver,
+        max_model_calls=budget.max_model_calls,
+        max_turns=budget.max_turns,
+        token_budget=budget.token_budget,
+    )
+
+    # 1. Create strategy
+    strategy_cls = _STRATEGY_MAP[arm]
+    strategy = strategy_cls()
+
+    # 2. Build core + official engine first. The engine's schema is the sole
+    # runtime-visible tool schema for both strategy.configure() and run().
+    from .types import RuntimeTask, GenerationConfig
+    gen_cfg = GenerationConfig(
+        model_id=getattr(model_driver, '_model_id', 'unknown'),
+        provider=getattr(model_driver, '_provider', 'unknown'),
+    )
+    # 3. Create recovery budget gate — E: A3/A4 active, A5 pass-through
+    from .recovery_budget import RecoveryBudgetGate, PassThroughRecoveryBudgetGate
+    if arm == ControlArm.A5_ODYS_MINUS_RECOVERY_BUDGET_POLICY:
+        budget_gate = PassThroughRecoveryBudgetGate()
+    elif strategy.recovery_budget_enabled():
+        budget_gate = RecoveryBudgetGate(max_recovery_attempts=3)
+    else:
+        budget_gate = None
+
+    # 4. Create observer — canonical lifecycle (A3/A4 create observer, A0/A1/A2 don't)
+    observer = strategy.create_observer()
+
+    # 5. Create core with strategy
+    core = Phase5AgentCore(budgeted_driver, strategy=strategy)
+
+    # 6. Wire observer (canonical)
+    if observer is not None:
+        core.set_shadow_observer(observer)
+
+    # 7. Wire evidence ledger (canonical)
+    try:
+        from .substrate.evidence import EvidenceLedger
+        ledger = EvidenceLedger(run_id=f"trial-{trial_id}")
+        core.set_evidence_ledger(ledger)
+    except Exception as exc:
+        if strategy.should_validate():
+            result.termination_reason = "evidence_ledger_error"
+            result.validity = "INVALID_INFRA"
+            result.error_diagnostics = _classify_exception(
+                EvidenceLedgerExecutionError("EvidenceLedger wiring failed")
+            )
+            return result
+        ledger = None
+    if strategy.should_validate() and ledger is None:
+        result.termination_reason = "evidence_ledger_missing"
+        result.validity = "INVALID_INFRA"
+        result.error_diagnostics = _classify_exception(
+            EvidenceLedgerExecutionError("validator-enabled execution has no EvidenceLedger")
+        )
+        return result
+
+    # 8. Wire runtime validator (canonical)
+    from .runtime_validator import PublicEvidenceCompletionValidator
+    validator = PublicEvidenceCompletionValidator()
+    core.set_runtime_validator(validator)
+
+    # 9. Wire recovery budget gate (Section F)
+    if budget_gate is not None:
+        core.set_recovery_budget_gate(budget_gate)
+
+    # 10. Create ToolMaze adapter
+    try:
+        adapter = create_toolmaze_agent_adapter(core)
+    except ToolMazeDependencyUnavailable as exc:
+        result.termination_reason = "toolmaze_unavailable"
+        result.validity = "INVALID_INFRA"
+        result.error_diagnostics = _classify_exception(exc)
+        return result
+
+    # 11. Construct official engine and derive its canonical schema.
+    from evaluation.core.sandbox import ExecutionEngine
+    engine = ExecutionEngine(
+        task_json=task_json,
+        agent=adapter,
+        tools_dir=str(_REPO / "tools"),
+    )
+
+    official_tool_definitions = list(engine.tool_definitions)
+    # The provider wire schema is the single canonical runtime/pairing
+    # representation.  Keep official ToolMaze definitions at the adapter
+    # boundary, but never hash or persist provider schemas via repr/default=str.
+    result.runtime_tool_schema = canonical_tool_schemas(official_tool_definitions)
+    rt = RuntimeTask(
+        task_id=task_id,
+        objective=task_json.get("task_description", ""),
+        visible_tools=official_tool_definitions,
+        prompt=task_json.get("task_description", ""),
+        budget=budget,
+    )
+    result.strategy_config = strategy.configure(task=rt, generation_config=gen_cfg)
+
+    start_time = time.time()
+    token_usage_dict = {}
+    firewall = OfflineGraderFirewall()
+    runtime_exception: Optional[Exception] = None
+    try:
+        firewall.begin_runtime()
+        try:
+            trace_logger, token_usage = engine.run(max_rounds=budget.max_turns)
+        finally:
+            firewall.end_runtime()
+        # L: include actual token usage in official trace
+        result.official_trace = trace_logger.to_dict(token_usage=token_usage) if hasattr(trace_logger, 'to_dict') else {}
+        token_usage_dict = token_usage if isinstance(token_usage, dict) else {}
+        result.termination_reason = "completed"
+    except BudgetExhausted as exc:
+        total_tokens = budgeted_driver.get_total_tokens()
+        if budget.token_budget is not None and total_tokens >= budget.token_budget:
+            result.termination_reason = "TOKEN_BUDGET_EXHAUSTED"
+        elif budgeted_driver.turns_used >= budget.max_turns:
+            result.termination_reason = "TURN_BUDGET_EXHAUSTED"
+        else:
+            result.termination_reason = "MODEL_CALL_BUDGET_EXHAUSTED"
+        result.error_diagnostics = _classify_exception(exc)
+        runtime_exception = exc
+        trace_logger = getattr(engine, "logger", getattr(engine, "_trace_logger", None))
+        token_usage = budgeted_driver.get_token_usage().to_dict()
+        result.official_trace = (
+            trace_logger.to_dict(token_usage=token_usage)
+            if trace_logger is not None and hasattr(trace_logger, "to_dict")
+            else {}
+        )
+    except RuntimeValidatorExecutionError as exc:
+        # Section D: Validator infrastructure failure → INVALID_INFRA
+        result.termination_reason = "runtime_validator_error"
+        result.validity = "INVALID_INFRA"
+        result.error_diagnostics = _classify_exception(exc)
+        runtime_exception = exc
+    except (ProgressObserverExecutionError, EvidenceLedgerExecutionError) as exc:
+        result.termination_reason = "treatment_component_error"
+        result.validity = "INVALID_INFRA"
+        result.error_diagnostics = _classify_exception(exc)
+        runtime_exception = exc
+    except ProviderExecutionError as exc:
+        result.termination_reason = _provider_failure_termination_reason(exc)
+        result.error_diagnostics = _classify_exception(exc)
+        result.error_diagnostics["provider_failure_class"] = getattr(
+            exc, "failure_class", None
+        )
+        runtime_exception = exc
+    except PolicyExecutionError as exc:
+        result.termination_reason = "policy_error"
+        result.error_diagnostics = _classify_exception(exc)
+        runtime_exception = exc
+    except Exception as exc:
+        result.termination_reason = "infrastructure_error"
+        result.error_diagnostics = _classify_exception(exc)
+        runtime_exception = exc
+
+    result.wall_time = time.time() - start_time
+    result.derived_view = build_derived_view(result.official_trace)
+    result.recovery_decisions = core.get_recovery_decisions()
+
+    # K: persist recovery budget gate ledger
+    result.recovery_budget_ledger = budget_gate.ledger if budget_gate is not None else []
+
+    # K: persist actual observer/evidence data
+    result.shadow_records = [
+        r.model_dump(mode="json") if hasattr(r, "model_dump") else r
+        for r in (observer.get_records() if observer is not None and hasattr(observer, "get_records") else [])
+    ]
+    result.evidence_events = [
+        e.model_dump(mode="json") if hasattr(e, "model_dump") else e
+        for e in (ledger.all_events() if ledger is not None else [])
+    ]
+
+    # K: persist actual validator events
+    result.validator_events = core.get_validator_events()
+    result.public_tool_observations = [
+        {
+            "step": o.step,
+            "tool_name": o.tool_name,
+            "tool_call_id": o.tool_call_id,
+            "provider_tool_call_id": o.provider_tool_call_id,
+            "retry_of_call_id": o.retry_of_call_id,
+            "arguments_digest": o.arguments_digest,
+            "tool_call_index": o.tool_call_index,
+            "tool_call_batch_size": o.tool_call_batch_size,
+            "result": o.result,
+        }
+        for o in core.get_public_tool_observations()
+    ]
+
+    # 9. Provider usage — use the raw driver for token accounting
+    raw_driver = model_driver  # original unwrapped driver
+    result.provider_usage = {
+        "model_calls_used": budgeted_driver.calls_used if hasattr(budgeted_driver, 'calls_used') else 0,
+        "input_tokens": raw_driver.get_token_usage().input_tokens,
+        "output_tokens": raw_driver.get_token_usage().output_tokens,
+        "provider_request_count": getattr(raw_driver, 'provider_request_count', 0),
+        "logical_provider_call_count": getattr(raw_driver, 'logical_provider_call_count', getattr(raw_driver, 'provider_request_count', 0)),
+        "sdk_http_attempt_count": getattr(raw_driver, 'provider_request_count', 0),
+        "wall_time_seconds": round(result.wall_time, 1),
+        "official_token_usage": token_usage_dict,
+    }
+
+    # 12. Evaluation begins only after end_runtime().
+    try:
+        firewall.check_offline_access("offline_native_evaluate")
+        if runtime_exception is None or isinstance(runtime_exception, BudgetExhausted):
+            result.grader_result = _run_offline_grader(
+                task_json, result.official_trace, firewall=firewall
+            )
+    except FirewallViolation as exc:
+        result.termination_reason = "firewall_violation"
+        result.validity = "INVALID_INFRA"
+        result.error_diagnostics = _classify_exception(exc)
+
+    result.firewall_report = firewall.generate_audit_report().model_dump(mode="json")
+
+    # J: Classify validity — budget exhaustion is VALID scientific outcome
+    grader_error = result.grader_result.get("error")
+    if result.termination_reason in (
+        "completed", "TOKEN_BUDGET_EXHAUSTED", "TURN_BUDGET_EXHAUSTED",
+        "MODEL_CALL_BUDGET_EXHAUSTED",
+    ) and grader_error is None:
+        result.validity = "VALID"
+    elif result.termination_reason in (
+        "provider_transport_failure",
+        "provider_protocol_failure",
+    ):
+        result.validity = "INVALID_INFRA"
+    elif result.termination_reason == "policy_error":
+        result.validity = "INVALID_INFRA"
+    elif result.termination_reason == "runtime_validator_error":
+        result.validity = "INVALID_INFRA"
+    elif result.termination_reason == "infrastructure_error":
+        result.validity = "INVALID_INFRA"
+    elif grader_error is not None:
+        result.validity = "INVALID_INFRA"
+    else:
+        result.validity = "VALID"
+
+    return result
+
+
+def _run_offline_grader(
+    task_json: dict,
+    official_trace: dict,
+    *,
+    firewall: Optional[OfflineGraderFirewall] = None,
+) -> dict:
+    """Run official ToolMaze JudgeSystem + MetricsCalculator."""
+    try:
+        from evaluation.core.judge import JudgeSystem
+        from evaluation.core.metrics import MetricsCalculator
+
+        if firewall is not None:
+            firewall.check_offline_access("official_judge")
+        judge = JudgeSystem()
+        judgement = judge.judge(task_json, official_trace)
+
+        if firewall is not None:
+            firewall.check_offline_access("official_metrics")
+        calc = MetricsCalculator()
+        calc.add_result(task_json, official_trace, judgement)
+        report = calc.generate_report()
+
+        # M: persist complete MetricsCalculator report verbatim
+        return {
+            "judgement": judgement,
+            "metrics_report": report,  # full verbatim report
+            "metrics_summary": {
+                "tsr": report.get("tsr"),
+                "prr": report.get("prr"),
+                "rc": report.get("rc"),
+            },
+            "grader_source": "FROZEN_TOOLMAZE",
+            "error": None,
+        }
+    except Exception as exc:
+        return {
+            "judgement": None,
+            "metrics": None,
+            "grader_source": "FROZEN_TOOLMAZE",
+            "error": _classify_exception(exc),
+        }

@@ -1,0 +1,59 @@
+{
+  "schema_version": "phase5-real-pilot-002",
+  "experiment_role": "PIPELINE_PILOT",
+  "experiment_id": "phase5-real-pilot-002",
+  "correction_of": "phase5-real-pilot-001",
+  "correction_reason": "v001 had ambiguous base task ids, TBD provider/model, and max_tokens was not normalized by the runner",
+  "benchmark": {
+    "name": "toolmaze",
+    "revision": "ef0798a",
+    "repository_url": "https://github.com/Zhudongsheng75/ToolMaze",
+    "commit_sha": "ef0798aa7f31ac9b33403254b1ef76e8673305fa",
+    "dataset_revision": "08b0239a98b0b07839d673f5bc0ef7d836db9296",
+    "dataset_digest": "9fcd7d7ec3c06afcee098877cca1ae8c29b87a1102be4b365a1055f824a76bc8",
+    "evaluator_digest": "412f9c3615bfd997af903f6514f716be94a774140975b82c8ff2fd16b6547833",
+    "dataset_hash_scope": "data/perturbed_tasks/**/*.json sorted by POSIX path, concatenated bytes"
+  },
+  "provenance_lineage": {
+    "pr_base_sha": "e9e1211c8eadbf5d6a025edc38d285238e2323fe",
+    "closure_parent_sha": "4c249bb8b1a141c433583a428788a43bf527bf3d",
+    "phase5_head_sha": "da62152",
+    "pr_merge_ref_sha": null
+  },
+  "selection_seed": 42,
+  "selection_strategy": "stratified_C1-C4_x_P0-P4",
+  "tasks": [
+    {"task_id":"C1_task_082_P0","complexity":"C1","perturbation_mode":"P0","file_path":"perturbed_tasks\\c1\\C1_task_082_P0.json"},
+    {"task_id":"C1_task_015_P1","complexity":"C1","perturbation_mode":"P1","file_path":"perturbed_tasks\\c1\\C1_task_015_P1.json"},
+    {"task_id":"C1_task_004_P2","complexity":"C1","perturbation_mode":"P2","file_path":"perturbed_tasks\\c1\\C1_task_004_P2.json"},
+    {"task_id":"C1_task_095_P3","complexity":"C1","perturbation_mode":"P3","file_path":"perturbed_tasks\\c1\\C1_task_095_P3.json"},
+    {"task_id":"C1_task_036_P4","complexity":"C1","perturbation_mode":"P4","file_path":"perturbed_tasks\\c1\\C1_task_036_P4.json"},
+    {"task_id":"C2_task_032_P0","complexity":"C2","perturbation_mode":"P0","file_path":"perturbed_tasks\\c2\\C2_task_032_P0.json"},
+    {"task_id":"C2_task_029_P1","complexity":"C2","perturbation_mode":"P1","file_path":"perturbed_tasks\\c2\\C2_task_029_P1.json"},
+    {"task_id":"C2_task_018_P2","complexity":"C2","perturbation_mode":"P2","file_path":"perturbed_tasks\\c2\\C2_task_018_P2.json"},
+    {"task_id":"C2_task_095_P3","complexity":"C2","perturbation_mode":"P3","file_path":"perturbed_tasks\\c2\\C2_task_095_P3.json"},
+    {"task_id":"C2_task_014_P4","complexity":"C2","perturbation_mode":"P4","file_path":"perturbed_tasks\\c2\\C2_task_014_P4.json"},
+    {"task_id":"C3_task_087_P0","complexity":"C3","perturbation_mode":"P0","file_path":"perturbed_tasks\\c3\\C3_task_087_P0.json"},
+    {"task_id":"C3_task_095_P1","complexity":"C3","perturbation_mode":"P1","file_path":"perturbed_tasks\\c3\\C3_task_095_P1.json"},
+    {"task_id":"C3_task_070_P2","complexity":"C3","perturbation_mode":"P2","file_path":"perturbed_tasks\\c3\\C3_task_070_P2.json"},
+    {"task_id":"C3_task_012_P3","complexity":"C3","perturbation_mode":"P3","file_path":"perturbed_tasks\\c3\\C3_task_012_P3.json"},
+    {"task_id":"C3_task_076_P4","complexity":"C3","perturbation_mode":"P4","file_path":"perturbed_tasks\\c3\\C3_task_076_P4.json"},
+    {"task_id":"C4_task_055_P0","complexity":"C4","perturbation_mode":"P0","file_path":"perturbed_tasks\\c4\\C4_task_055_P0.json"},
+    {"task_id":"C4_task_005_P1","complexity":"C4","perturbation_mode":"P1","file_path":"perturbed_tasks\\c4\\C4_task_005_P1.json"},
+    {"task_id":"C4_task_004_P2","complexity":"C4","perturbation_mode":"P2","file_path":"perturbed_tasks\\c4\\C4_task_004_P2.json"},
+    {"task_id":"C4_task_012_P3","complexity":"C4","perturbation_mode":"P3","file_path":"perturbed_tasks\\c4\\C4_task_012_P3.json"},
+    {"task_id":"C4_task_028_P4","complexity":"C4","perturbation_mode":"P4","file_path":"perturbed_tasks\\c4\\C4_task_028_P4.json"}
+  ],
+  "selected_task_ids": ["C1_task_004_P2","C1_task_015_P1","C1_task_036_P4","C1_task_082_P0","C1_task_095_P3","C2_task_014_P4","C2_task_018_P2","C2_task_029_P1","C2_task_032_P0","C2_task_095_P3","C3_task_012_P3","C3_task_070_P2","C3_task_076_P4","C3_task_087_P0","C3_task_095_P1","C4_task_004_P2","C4_task_005_P1","C4_task_012_P3","C4_task_028_P4","C4_task_055_P0"],
+  "arms": ["A0_BARE","A1_RETRY_ONLY","A2_VALIDATOR_ONLY","A3_ODYS_FULL","A4_ODYS_MINUS_OBSERVABLE_PROGRESS","A5_ODYS_MINUS_RECOVERY_BUDGET_POLICY"],
+  "generation_config": {
+    "model_id":"mimo-v2.5","provider":"mimo","temperature":0.0,"top_p":1.0,
+    "max_output_tokens":4096,"request_timeout":120,"max_retries":3,"thinking_enabled":true,
+    "supports_tool_choice":false,"supports_parallel_tool_calls":false
+  },
+  "root_budget": {"max_model_calls":50,"max_turns":15,"max_tokens":100000},
+  "budgets": {"max_model_calls":50,"max_turns":15,"max_tokens":100000,"token_budget":100000},
+  "output_dir":"experiments/phase5/runs/phase5-real-pilot-002",
+  "task_count":20,"arm_count":6,"total_trials":120,
+  "manifest_hash":"ed7b1bd9716622621f12e925ec16d0ee142448c429b5146cacd22837bfec6083"
+}

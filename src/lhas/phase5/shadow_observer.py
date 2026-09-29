@@ -56,7 +56,7 @@ class ShadowProgressObserver:
             "step": step,
             "action": action_identity,
             "tool_result_keys": sorted(tool_result.keys()),
-            "result_status": tool_result.get("status", "unknown"),
+            "result_status": tool_result.get("status", "error" if tool_result.get("error") else "unknown"),
         }
         self._history[task_id].append(entry)
         # Trim window
@@ -71,7 +71,7 @@ class ShadowProgressObserver:
             observable_features={
                 "action_identity": action_identity,
                 "tool_result_keys": sorted(tool_result.keys()),
-                "result_status": tool_result.get("status", "unknown"),
+                "result_status": tool_result.get("status", "error" if tool_result.get("error") else "unknown"),
                 "environment_available": environment_observation is not None,
                 "history_length": len(self._history[task_id]),
             },
@@ -95,7 +95,7 @@ class ShadowProgressObserver:
         observable features only.
         """
         history = self._history.get(task_id, [])
-        result_status = tool_result.get("status", "unknown")
+        result_status = tool_result.get("status", "error" if tool_result.get("error") else "unknown")
 
         # Check for tool error
         if result_status in {"error", "failure", "FAILURE"}:

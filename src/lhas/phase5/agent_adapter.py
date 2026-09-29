@@ -26,6 +26,7 @@ logger = logging.getLogger(__name__)
 # ── ToolMaze type cache (populated by create_toolmaze_agent_adapter) ──
 _ToolMaze_BaseAgent = None
 _ToolMaze_AgentAction = None
+_ToolMaze_ToolCall = None
 _ToolMaze_TokenUsage = None
 
 
@@ -36,7 +37,7 @@ class ToolMazeDependencyUnavailable(RuntimeError):
 
 def _import_toolmaze_types():
     """Import official ToolMaze types.  Raises ToolMazeDependencyUnavailable."""
-    global _ToolMaze_BaseAgent, _ToolMaze_AgentAction, _ToolMaze_TokenUsage
+    global _ToolMaze_BaseAgent, _ToolMaze_AgentAction, _ToolMaze_ToolCall, _ToolMaze_TokenUsage
     if _ToolMaze_BaseAgent is not None:
         return
 
@@ -51,9 +52,10 @@ def _import_toolmaze_types():
     if repo_str not in sys.path:
         sys.path.insert(0, repo_str)
     try:
-        from evaluation.agents.base_agent import BaseAgent, AgentAction, TokenUsage
+        from evaluation.agents.base_agent import BaseAgent, AgentAction, ToolCall, TokenUsage
         _ToolMaze_BaseAgent = BaseAgent
         _ToolMaze_AgentAction = AgentAction
+        _ToolMaze_ToolCall = ToolCall
         _ToolMaze_TokenUsage = TokenUsage
     except ImportError as exc:
         raise ToolMazeDependencyUnavailable(
@@ -88,6 +90,15 @@ def create_toolmaze_agent_adapter(core: Phase5AgentCore):
 
         def step(self, user_message: Optional[str] = None):
             action = self._core.next_model_action(user_message)
+            tool_calls = None
+            if action.tool_calls is not None:
+                tool_calls = [
+                    _ToolMaze_ToolCall(
+                        tool_name=call.tool_name,
+                        arguments=dict(call.arguments),
+                    )
+                    for call in action.tool_calls
+                ]
             # Convert Odys ModelAction → official ToolMaze AgentAction
             return _ToolMaze_AgentAction(
                 type=action.type,
@@ -95,11 +106,18 @@ def create_toolmaze_agent_adapter(core: Phase5AgentCore):
                 arguments=action.arguments,
                 content=action.content,
                 thought=action.thought,
-                tool_calls=action.tool_calls,
+                tool_calls=tool_calls,
             )
 
-        def receive_tool_result(self, tool_name: str, result: Dict[str, Any]) -> None:
-            self._core.receive_tool_result(tool_name, result)
+        def receive_tool_result(
+            self,
+            tool_name: str,
+            result: Dict[str, Any],
+            tool_call_index: int = 0,
+        ) -> None:
+            self._core.receive_tool_result(
+                tool_name, result, tool_call_index=tool_call_index
+            )
 
         def get_total_tokens(self) -> int:
             return self._core.get_total_tokens()

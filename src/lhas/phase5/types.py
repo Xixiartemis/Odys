@@ -279,3 +279,21 @@ class PolicyExecutionError(Exception):
     surfaced as a clear, catchable error.
     """
     pass
+
+
+class RuntimeValidatorExecutionError(Exception):
+    """Raised when the runtime validator encounters an infrastructure error.
+
+    Validator infrastructure failures MUST fail-closed: this exception
+    propagates to TrialExecutor which classifies the trial as INVALID_INFRA.
+    A validator crash must NEVER be silently converted to a VALID outcome.
+    """
+    pass
+
+
+class ProgressObserverExecutionError(RuntimeError):
+    """A treatment-critical progress observer failed."""
+
+
+class EvidenceLedgerExecutionError(RuntimeError):
+    """A treatment-critical evidence ledger failed or was not wired."""

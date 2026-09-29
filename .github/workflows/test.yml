@@ -9,20 +9,49 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Hydrate frozen ToolMaze benchmark
+        run: python scripts/phase5_hydrate_toolmaze.py
       - uses: astral-sh/setup-uv@v6
         with:
           enable-cache: true
       - run: uv sync --extra dev --extra live --extra agent
+      - name: Preflight frozen live canary manifests
+        env:
+          ODYS_AGENT_BASE_URL: https://token-plan-cn.xiaomimimo.com/v1
+        run: >-
+          uv run python -m lhas.phase5.canary_runner
+          --manifest experiments/phase5/manifests/phase5-real-canary-004-r3.json
+          --preflight-only &&
+          uv run python -m lhas.phase5.canary_runner
+          --manifest experiments/phase5/manifests/phase5-real-canary-005-r2.json
+          --preflight-only &&
+          uv run python -m lhas.phase5.canary_runner
+          --manifest experiments/phase5/manifests/phase5-real-canary-006-r2.json
+          --preflight-only
       - run: uv run pytest
 
   final-live-infrastructure-windows:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Hydrate frozen ToolMaze benchmark
+        run: python scripts/phase5_hydrate_toolmaze.py
       - uses: astral-sh/setup-uv@v6
         with:
           enable-cache: true
       - run: uv sync --extra dev --extra live --extra agent
+      - name: First-live provider-free preflight (004-r3)
+        env:
+          ODYS_AGENT_BASE_URL: https://token-plan-cn.xiaomimimo.com/v1
+          ODYS_AGENT_API_KEY: dummy-never-sent
+        run: >-
+          uv run python -m lhas.phase5.canary_runner
+          --manifest experiments/phase5/manifests/phase5-real-canary-004-r3.json
+          --live-preflight-only
+      - name: Fake OpenAI-compatible E2E (zero real requests)
+        run: >-
+          uv run pytest -q tests/test_phase5_live_provider_protocol.py
+          -k fake_openai_e2e
       - run: >-
           uv run pytest
           tests/test_phase4_live_no_progress_initial_path.py

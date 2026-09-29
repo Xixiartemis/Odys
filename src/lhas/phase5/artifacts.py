@@ -17,6 +17,9 @@ or EXCLUDED_<reason>.
 from __future__ import annotations
 
 import json
+import os
+import tempfile
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -53,17 +56,50 @@ class ArtifactWriter:
         for subdir in ["raw", "benchmark", "derived", "audits", "analysis"]:
             (self.base_dir / subdir).mkdir(parents=True, exist_ok=True)
 
+    @staticmethod
+    def _structured(value: Any) -> Any:
+        if hasattr(value, "model_dump"):
+            return value.model_dump(mode="json")
+        if hasattr(value, "__dataclass_fields__"):
+            from dataclasses import asdict
+            return asdict(value)
+        if isinstance(value, dict):
+            return {str(k): ArtifactWriter._structured(v) for k, v in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [ArtifactWriter._structured(v) for v in value]
+        return value
+
+    def _create_json(self, path: Path, value: Any) -> Path:
+        """Atomically create a JSON file; never overwrite an artifact."""
+        if path.exists():
+            raise FileExistsError(f"immutable artifact already exists: {path}")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = json.dumps(self._structured(value), indent=2, ensure_ascii=False).encode("utf-8")
+        temp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            with temp.open("xb") as handle:
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.rename(temp, path)
+        finally:
+            if temp.exists():
+                temp.unlink()
+        return path
+
+    def _complete(self, trial_dir: Path) -> None:
+        marker = trial_dir / "COMPLETE"
+        if marker.exists():
+            raise FileExistsError(f"immutable trial already complete: {trial_dir}")
+        self._create_json(marker, {"completed_at": datetime.now(timezone.utc).isoformat()})
+
     def write_manifest(self, manifest: TrialManifest) -> Path:
         """Write the top-level experiment manifest."""
         path = self.base_dir / "manifest.json"
         data = manifest.model_dump(mode="json")
         data["_schema_version"] = ARTIFACT_SCHEMA_VERSION
         data["_written_at"] = datetime.now(timezone.utc).isoformat()
-        path.write_text(
-            json.dumps(data, indent=2, ensure_ascii=False),
-            encoding="utf-8",
-        )
-        return path
+        return self._create_json(path, data)
 
     def write_raw_artifact(
         self,
@@ -88,10 +124,8 @@ class ArtifactWriter:
             "budget_ledger": budget_ledger,
         }
         path = trial_dir / "raw_artifact.json"
-        path.write_text(
-            json.dumps(artifact, indent=2, ensure_ascii=False),
-            encoding="utf-8",
-        )
+        self._create_json(path, artifact)
+        self._complete(trial_dir)
         return path
 
     def write_benchmark_result(
@@ -104,11 +138,7 @@ class ArtifactWriter:
         trial_dir.mkdir(parents=True, exist_ok=True)
 
         path = trial_dir / "native_result.json"
-        path.write_text(
-            json.dumps(native_result.model_dump(mode="json"), indent=2, ensure_ascii=False),
-            encoding="utf-8",
-        )
-        return path
+        return self._create_json(path, native_result)
 
     def write_derived_metrics(
         self,
@@ -124,11 +154,7 @@ class ArtifactWriter:
         data["_not_native_benchmark_score"] = True
 
         path = trial_dir / "derived_metrics.json"
-        path.write_text(
-            json.dumps(data, indent=2, ensure_ascii=False),
-            encoding="utf-8",
-        )
-        return path
+        return self._create_json(path, data)
 
     def write_audit(
         self,
@@ -137,11 +163,7 @@ class ArtifactWriter:
     ) -> Path:
         """Write an audit report."""
         path = self.base_dir / "audits" / f"{audit_name}.json"
-        path.write_text(
-            json.dumps(report.model_dump(mode="json"), indent=2, ensure_ascii=False),
-            encoding="utf-8",
-        )
-        return path
+        return self._create_json(path, report)
 
     def classify_trial(
         self,
@@ -160,11 +182,7 @@ class ArtifactWriter:
             "classified_at": datetime.now(timezone.utc).isoformat(),
         }
         path = trial_dir / "classification.json"
-        path.write_text(
-            json.dumps(classification, indent=2, ensure_ascii=False),
-            encoding="utf-8",
-        )
-        return path
+        return self._create_json(path, classification)
 
     def load_raw_artifact(self, trial_id: str) -> Optional[dict[str, Any]]:
         """Load a raw artifact for analysis."""

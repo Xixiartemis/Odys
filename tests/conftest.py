@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+import sys
 
 from lhas.domain.models import Project
 from lhas.executors.mock import MockConfig, MockExecutor, MockScenario
@@ -25,6 +26,32 @@ def isolated_agent_environment(monkeypatch):
         "ODYS_AGENT_SDK_TRACING",
     ):
         monkeypatch.delenv(name, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def isolate_toolmaze_imports():
+    """Keep frozen benchmark imports from leaking across test order.
+
+    ToolMaze has a top-level ``tools`` package whose loader cache is global
+    in ``sys.modules``. Tests must not make the result of a later test depend
+    on which benchmark fixture ran first.
+    """
+    saved_path = list(sys.path)
+    saved_tools = {
+        name: module
+        for name, module in sys.modules.items()
+        if name == "tools" or name.startswith("tools.")
+    }
+    yield
+    sys.path[:] = saved_path
+    for name in [
+        name for name in list(sys.modules)
+        if name == "tools" or name.startswith("tools.")
+    ]:
+        if name not in saved_tools:
+            sys.modules.pop(name, None)
+    for name, module in saved_tools.items():
+        sys.modules[name] = module
 
 
 @pytest.fixture()
