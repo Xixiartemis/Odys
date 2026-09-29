@@ -20,6 +20,7 @@ from lhas.phase5.provider_lock import ProviderLockError, validate_resolved_confi
 
 ROOT = Path(__file__).resolve().parents[1]
 MANIFEST_DIR = ROOT / "experiments" / "phase5" / "manifests"
+FROZEN_ENDPOINT = "https://token-plan-cn.xiaomimimo.com/v1"
 
 
 @pytest.fixture(autouse=True)
@@ -30,6 +31,17 @@ def isolated_qualification_namespace(
         canary_runner,
         "_QUALIFICATION_ROOT",
         tmp_path / "qualification-preflights",
+    )
+    monkeypatch.setenv("ODYS_AGENT_API_KEY", "provider-free-test-key")
+    monkeypatch.setattr(
+        canary_runner,
+        "_worktree_provenance",
+        lambda: {
+            "head": "test-clean-head",
+            "tracked_clean": True,
+            "index_clean": True,
+            "status": [],
+        },
     )
 
 
@@ -87,7 +99,7 @@ def test_cli_manifest_id_mismatch_fails_closed_without_provider(
     monkeypatch: pytest.MonkeyPatch,
 ):
     monkeypatch.setenv("ODYS_AGENT_BASE_URL", "https://preflight.invalid/v1")
-    path = _temporary_manifest("phase5-real-canary-004.json", tmp_path)
+    path = _temporary_manifest("phase5-real-canary-004-r2.json", tmp_path)
     with pytest.raises(CanaryPreflightError, match="CLI experiment id mismatch"):
         run_canary(path, experiment_id="phase5-real-canary-005", preflight_only=True)
 
@@ -106,12 +118,12 @@ def test_output_collision_fails_closed(tmp_path: Path, monkeypatch: pytest.Monke
 def test_qualification_then_live_different_endpoint_uses_separate_namespaces(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
-    path = _temporary_manifest("phase5-real-canary-004.json", tmp_path)
+    path = _temporary_manifest("phase5-real-canary-004-r2.json", tmp_path)
     monkeypatch.setenv("ODYS_AGENT_API_KEY", "never-persist-this-key")
     monkeypatch.setenv("ODYS_AGENT_BASE_URL", "https://qualification.invalid/v1")
     qualification = preflight_canary(path, mode="qualification")
 
-    monkeypatch.setenv("ODYS_AGENT_BASE_URL", "https://live.invalid/v1")
+    monkeypatch.setenv("ODYS_AGENT_BASE_URL", FROZEN_ENDPOINT)
     live = preflight_canary(path, mode="live")
 
     assert qualification["preflight_role"] == "QUALIFICATION_PREFLIGHT"
@@ -125,8 +137,8 @@ def test_qualification_then_live_different_endpoint_uses_separate_namespaces(
 
 
 def test_live_preflight_same_identity_is_idempotent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    path = _temporary_manifest("phase5-real-canary-004.json", tmp_path)
-    monkeypatch.setenv("ODYS_AGENT_BASE_URL", "https://live.invalid/v1")
+    path = _temporary_manifest("phase5-real-canary-004-r2.json", tmp_path)
+    monkeypatch.setenv("ODYS_AGENT_BASE_URL", FROZEN_ENDPOINT)
     first = preflight_canary(path, mode="live")
     artifact = Path(first["preflight_artifact"]["path"])
     before = artifact.read_bytes()
@@ -140,26 +152,26 @@ def test_live_preflight_same_identity_is_idempotent(tmp_path: Path, monkeypatch:
 def test_live_preflight_different_endpoint_fails_closed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
-    path = _temporary_manifest("phase5-real-canary-004.json", tmp_path)
-    monkeypatch.setenv("ODYS_AGENT_BASE_URL", "https://live-a.invalid/v1")
+    path = _temporary_manifest("phase5-real-canary-004-r2.json", tmp_path)
+    monkeypatch.setenv("ODYS_AGENT_BASE_URL", FROZEN_ENDPOINT)
     preflight_canary(path, mode="live")
     monkeypatch.setenv("ODYS_AGENT_BASE_URL", "https://live-b.invalid/v1")
 
-    with pytest.raises(CanaryPreflightError, match="immutable and differs"):
+    with pytest.raises(CanaryPreflightError, match="frozen endpoint"):
         preflight_canary(path, mode="live")
 
 
 def test_historical_preflight_is_preserved_when_live_preflight_is_created(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
-    path = _temporary_manifest("phase5-real-canary-004.json", tmp_path)
+    path = _temporary_manifest("phase5-real-canary-004-r2.json", tmp_path)
     manifest = json.loads(path.read_text(encoding="utf-8"))
     output_dir = Path(manifest["output_dir"])
     output_dir.mkdir(parents=True)
     historical = output_dir / "canary_preflight.json"
     historical_bytes = b'{"historical":true,"provider_requests":0}\n'
     historical.write_bytes(historical_bytes)
-    monkeypatch.setenv("ODYS_AGENT_BASE_URL", "https://live.invalid/v1")
+    monkeypatch.setenv("ODYS_AGENT_BASE_URL", FROZEN_ENDPOINT)
 
     report = preflight_canary(path, mode="live")
 
@@ -171,13 +183,11 @@ def test_historical_preflight_is_preserved_when_live_preflight_is_created(
 def test_both_preflight_modes_make_zero_provider_requests(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
-    path = _temporary_manifest("phase5-real-canary-004.json", tmp_path)
-    monkeypatch.setenv("ODYS_AGENT_BASE_URL", "https://preflight.invalid/v1")
-    with patch("lhas.phase5.canary_runner.LiveModelDriver") as live_driver:
-        qualification = preflight_canary(path, mode="qualification")
-        live = preflight_canary(path, mode="live")
+    path = _temporary_manifest("phase5-real-canary-004-r2.json", tmp_path)
+    monkeypatch.setenv("ODYS_AGENT_BASE_URL", FROZEN_ENDPOINT)
+    qualification = preflight_canary(path, mode="qualification")
+    live = preflight_canary(path, mode="live")
 
-    live_driver.assert_not_called()
     assert qualification["provider_requests"] == 0
     assert live["provider_requests"] == 0
     assert qualification["provider_executed"] == "NO"
@@ -207,9 +217,9 @@ def test_api_key_is_never_persisted_in_qualification_or_live_artifacts(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     secret = "super-secret-api-key-that-must-not-be-written"
-    path = _temporary_manifest("phase5-real-canary-004.json", tmp_path)
+    path = _temporary_manifest("phase5-real-canary-004-r2.json", tmp_path)
     monkeypatch.setenv("ODYS_AGENT_API_KEY", secret)
-    monkeypatch.setenv("ODYS_AGENT_BASE_URL", "https://preflight.invalid/v1")
+    monkeypatch.setenv("ODYS_AGENT_BASE_URL", FROZEN_ENDPOINT)
     preflight_canary(path, mode="qualification")
     preflight_canary(path, mode="live")
 

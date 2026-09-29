@@ -28,6 +28,7 @@ from .agent_adapter import create_toolmaze_agent_adapter, ToolMazeDependencyUnav
 from .control_arms import ControlArm, _STRATEGY_MAP
 from .live_driver import ProviderExecutionError
 from .model_driver import BudgetedModelDriver, BudgetExhausted, ModelDriver
+from .provider_wire import canonical_tool_schemas, tool_schema_hash
 from .trace_parser import build_derived_view
 from .types import (
     BudgetConfig,
@@ -90,23 +91,29 @@ class TrialResult:
             "error_diagnostics": self.error_diagnostics,
             "wall_time_seconds": round(self.wall_time, 1),
             "firewall_report": self.firewall_report,
-            "runtime_tool_schema_hash": __import__("hashlib").sha256(
-                json.dumps(self.runtime_tool_schema, sort_keys=True, separators=(",", ":"), default=str).encode()
-            ).hexdigest(),
+            "runtime_tool_schema_hash": tool_schema_hash(self.runtime_tool_schema),
         }
+
+
+def _redact_text(value: Any) -> str:
+    text = str(value)
+    secret = __import__("os").environ.get("ODYS_AGENT_API_KEY")
+    if secret:
+        text = text.replace(secret, "[REDACTED]")
+    return text
 
 
 def _classify_exception(exc: Exception) -> Dict[str, Any]:
     chain = []
     current = exc
     while current is not None:
-        chain.append({"type": type(current).__name__, "message": str(current)[:500]})
+        chain.append({"type": type(current).__name__, "message": _redact_text(current)[:500]})
         current = current.__cause__
     return {
         "exception_type": type(exc).__name__,
-        "exception_message": str(exc)[:500],
+        "exception_message": _redact_text(exc)[:500],
         "cause_type": type(exc.__cause__).__name__ if exc.__cause__ else None,
-        "cause_message": str(exc.__cause__)[:500] if exc.__cause__ else None,
+        "cause_message": _redact_text(exc.__cause__)[:500] if exc.__cause__ else None,
         "full_chain": chain,
     }
 
@@ -230,7 +237,10 @@ def execute_trial(
     )
 
     official_tool_definitions = list(engine.tool_definitions)
-    result.runtime_tool_schema = official_tool_definitions
+    # The provider wire schema is the single canonical runtime/pairing
+    # representation.  Keep official ToolMaze definitions at the adapter
+    # boundary, but never hash or persist provider schemas via repr/default=str.
+    result.runtime_tool_schema = canonical_tool_schemas(official_tool_definitions)
     rt = RuntimeTask(
         task_id=task_id,
         objective=task_json.get("task_description", ""),
@@ -319,6 +329,7 @@ def execute_trial(
             "step": o.step,
             "tool_name": o.tool_name,
             "tool_call_id": o.tool_call_id,
+            "provider_tool_call_id": o.provider_tool_call_id,
             "retry_of_call_id": o.retry_of_call_id,
             "arguments_digest": o.arguments_digest,
             "result": o.result,
@@ -334,7 +345,7 @@ def execute_trial(
         "output_tokens": raw_driver.get_token_usage().output_tokens,
         "provider_request_count": getattr(raw_driver, 'provider_request_count', 0),
         "logical_provider_call_count": getattr(raw_driver, 'logical_provider_call_count', getattr(raw_driver, 'provider_request_count', 0)),
-        "sdk_http_attempt_count": None,
+        "sdk_http_attempt_count": getattr(raw_driver, 'provider_request_count', 0),
         "wall_time_seconds": round(result.wall_time, 1),
         "official_token_usage": token_usage_dict,
     }

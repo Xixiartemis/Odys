@@ -215,7 +215,12 @@ class PublicEvidenceCompletionValidator:
                 if tc_id:
                     # Check if there's a matching tool result
                     has_result = any(
-                        m.get("role") == "tool" and m.get("tool_call_id") == tc_id
+                        m.get("role") == "tool"
+                        and (
+                            m.get("tool_call_id") == tc_id
+                            or m.get("provider_tool_call_id") == tc_id
+                            or m.get("invocation_id") == tc_id
+                        )
                         for m in evidence.conversation_history
                     )
                     if not has_result:

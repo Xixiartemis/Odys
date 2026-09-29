@@ -37,8 +37,13 @@ def provider_config_hash(lock: Mapping[str, Any]) -> str:
             "endpoint",
             "temperature",
             "top_p",
+            "effective_temperature",
+            "effective_top_p",
+            "sampling_parameters_sent",
             "max_output_tokens",
+            "max_completion_tokens",
             "request_timeout_seconds",
+            "sdk_max_retries",
             "provider_retry_policy",
             "thinking_enabled",
             "supports_tool_choice",
@@ -75,6 +80,7 @@ def resolve_endpoint_identity(
     lock: Mapping[str, Any],
     *,
     environ: Mapping[str, str] | None = None,
+    require_frozen_endpoint: bool = False,
 ) -> dict[str, str]:
     """Resolve endpoint provenance without reading or returning an API key."""
     source = str(lock.get("endpoint", ""))
@@ -89,6 +95,11 @@ def resolve_endpoint_identity(
         resolved = source
         source_kind = "provider-lock"
     normalized = normalize_endpoint(resolved)
+    frozen = lock.get("frozen_endpoint")
+    if require_frozen_endpoint and frozen is not None and normalized != normalize_endpoint(str(frozen)):
+        raise ProviderLockError(
+            f"resolved provider endpoint differs from frozen endpoint: {normalized} != {frozen}"
+        )
     return {
         "source": source_kind,
         "normalized_endpoint": normalized,
@@ -97,6 +108,20 @@ def resolve_endpoint_identity(
 
 
 def expected_resolved_config(lock: Mapping[str, Any]) -> dict[str, Any]:
+    if "max_completion_tokens" in lock:
+        return {
+            "provider": lock.get("provider"),
+            "model_id": lock.get("exact_model_id"),
+            "thinking_enabled": lock.get("thinking_enabled"),
+            "effective_temperature": lock.get("effective_temperature"),
+            "effective_top_p": lock.get("effective_top_p"),
+            "sampling_parameters_sent": lock.get("sampling_parameters_sent", False),
+            "max_completion_tokens": lock.get("max_completion_tokens"),
+            "request_timeout": lock.get("request_timeout_seconds"),
+            "sdk_max_retries": lock.get("sdk_max_retries", 0),
+            "supports_tool_choice": lock.get("supports_tool_choice"),
+            "supports_parallel_tool_calls": lock.get("supports_parallel_tool_calls", False),
+        }
     return {
         "provider": lock.get("provider"),
         "model_id": lock.get("exact_model_id"),
@@ -128,16 +153,7 @@ def validate_resolved_config(
         raise ProviderLockError(f"provider-lock mismatch: {mismatches}")
     return {
         "valid": True,
-        "provider": expected["provider"],
-        "model_id": expected["model_id"],
-        "temperature": expected["temperature"],
-        "top_p": expected["top_p"],
-        "max_output_tokens": expected["max_output_tokens"],
-        "request_timeout": expected["request_timeout"],
-        "max_retries": expected["max_retries"],
-        "thinking_enabled": expected["thinking_enabled"],
-        "supports_tool_choice": expected["supports_tool_choice"],
-        "supports_parallel_tool_calls": expected["supports_parallel_tool_calls"],
+        **{key: expected[key] for key in expected if key != "valid"},
     }
 
 
@@ -146,21 +162,56 @@ def validate_manifest_generation_config(
     lock: Mapping[str, Any],
 ) -> dict[str, Any]:
     """Validate manifest settings without constructing a live driver."""
-    actual = {
-        "provider": generation_config.get("provider"),
-        "model_id": generation_config.get("model_id"),
-        "temperature": generation_config.get("temperature"),
-        "top_p": generation_config.get("top_p"),
-        "max_output_tokens": generation_config.get("max_output_tokens"),
-        "request_timeout": generation_config.get("request_timeout"),
-        "max_retries": generation_config.get("max_retries"),
-        "thinking_enabled": generation_config.get("thinking_enabled"),
-        "supports_tool_choice": generation_config.get("supports_tool_choice"),
-        "supports_parallel_tool_calls": generation_config.get(
-            "supports_parallel_tool_calls", False
-        ),
-    }
-    expected = expected_resolved_config(lock)
+    if "max_completion_tokens" in generation_config or "sampling_parameters_sent" in generation_config:
+        actual = {
+            "provider": generation_config.get("provider"),
+            "model_id": generation_config.get("model_id"),
+            "thinking_enabled": generation_config.get("thinking_enabled"),
+            "effective_temperature": generation_config.get("effective_temperature"),
+            "effective_top_p": generation_config.get("effective_top_p"),
+            "sampling_parameters_sent": generation_config.get("sampling_parameters_sent", False),
+            "max_completion_tokens": generation_config.get("max_completion_tokens"),
+            "request_timeout": generation_config.get("request_timeout"),
+            "sdk_max_retries": generation_config.get("sdk_max_retries", 0),
+            "supports_tool_choice": generation_config.get("supports_tool_choice"),
+            "supports_parallel_tool_calls": generation_config.get("supports_parallel_tool_calls", False),
+        }
+    else:
+        # Historical manifests remain readable and qualification-only.  They
+        # are never accepted as the corrected live-execution identity.
+        actual = {
+            "provider": generation_config.get("provider"),
+            "model_id": generation_config.get("model_id"),
+            "temperature": generation_config.get("temperature"),
+            "top_p": generation_config.get("top_p"),
+            "max_output_tokens": generation_config.get("max_output_tokens"),
+            "request_timeout": generation_config.get("request_timeout"),
+            "max_retries": generation_config.get("max_retries"),
+            "thinking_enabled": generation_config.get("thinking_enabled"),
+            "supports_tool_choice": generation_config.get("supports_tool_choice"),
+            "supports_parallel_tool_calls": generation_config.get(
+                "supports_parallel_tool_calls", False
+            ),
+        }
+        # The lock now contains the corrected live-only MiMo settings.  Keep
+        # the legacy comparison self-contained so historical qualification
+        # manifests remain readable without inheriting live settings.
+        expected = {
+            "provider": lock.get("provider"),
+            "model_id": lock.get("exact_model_id"),
+            "temperature": lock.get("temperature"),
+            "top_p": lock.get("top_p"),
+            "max_output_tokens": lock.get("max_output_tokens"),
+            "request_timeout": lock.get("request_timeout_seconds"),
+            "max_retries": 3,
+            "thinking_enabled": lock.get("thinking_enabled"),
+            "supports_tool_choice": lock.get("supports_tool_choice"),
+            "supports_parallel_tool_calls": lock.get(
+                "supports_parallel_tool_calls", False
+            ),
+        }
+    if "max_completion_tokens" in generation_config or "sampling_parameters_sent" in generation_config:
+        expected = expected_resolved_config(lock)
     mismatches = {
         key: {"actual": actual.get(key), "expected": value}
         for key, value in expected.items()

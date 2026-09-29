@@ -47,7 +47,9 @@ class ModelAction:
     content: Optional[str] = None
     thought: Optional[str] = None
     tool_calls: Optional[List["ModelToolCall"]] = None
-    tool_call_id: Optional[str] = None  # For correlating tool results
+    tool_call_id: Optional[str] = None  # Odys invocation identity
+    provider_tool_call_id: Optional[str] = None  # Provider-native history identity
+    provider_reasoning_content: Optional[str] = None  # Transport-only round-trip
     retry_of_call_id: Optional[str] = None
 
 
@@ -57,6 +59,7 @@ class ModelToolCall:
     tool_name: str
     arguments: Dict[str, Any] = field(default_factory=dict)
     tool_call_id: Optional[str] = None
+    provider_tool_call_id: Optional[str] = None
 
 
 @dataclass

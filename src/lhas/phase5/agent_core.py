@@ -47,6 +47,7 @@ class PublicToolObservation:
     tool_name: str
     result: Dict[str, Any]
     tool_call_id: Optional[str] = None
+    provider_tool_call_id: Optional[str] = None
     retry_of_call_id: Optional[str] = None
     arguments_digest: Optional[str] = None
     result_digest: Optional[str] = None
@@ -116,6 +117,7 @@ class Phase5AgentCore:
         self._escalation_flag: bool = False
         self._escalation_reason: str = ""
         self._last_tool_call_id: Optional[str] = None
+        self._last_provider_tool_call_id: Optional[str] = None
         self._last_tool_call: Optional[Dict[str, Any]] = None  # For A1 retry
         self._invocation_sequence: int = 0
         self._candidate_sequence: int = 0
@@ -217,7 +219,11 @@ class Phase5AgentCore:
         """
         self._step_count += 1
 
-        if user_message is not None:
+        if user_message is not None and not (
+            self._conversation_history
+            and self._conversation_history[-1].get("role") == "user"
+            and self._conversation_history[-1].get("content") == user_message
+        ):
             self._conversation_history.append({
                 "role": "user",
                 "content": user_message,
@@ -268,6 +274,7 @@ class Phase5AgentCore:
                             arguments=self._last_tool_call["arguments"],
                             thought=f"[RETRY] {decision.reason}",
                             tool_call_id=retry_id,
+                            provider_tool_call_id=f"odys-retry-provider-{self._invocation_sequence}",
                             retry_of_call_id=previous_id,
                         )
                         # Record in conversation history
@@ -280,16 +287,20 @@ class Phase5AgentCore:
                                 "arguments": replay.arguments or {},
                             },
                         }
-                        if replay.tool_call_id and conversation_recorded:
-                            action_msg["tool_call"]["id"] = replay.tool_call_id
+                        if replay.provider_tool_call_id and conversation_recorded:
+                            action_msg["tool_call"]["id"] = replay.provider_tool_call_id
+                            action_msg["tool_call"]["provider_tool_call_id"] = replay.provider_tool_call_id
+                        action_msg["tool_call"]["invocation_id"] = retry_id
                         if replay.retry_of_call_id:
                             action_msg["tool_call"]["retry_of_call_id"] = replay.retry_of_call_id
                         self._conversation_history.append(action_msg)
                         self._last_tool_call_id = retry_id
+                        self._last_provider_tool_call_id = replay.provider_tool_call_id
                         self._last_tool_call = {
                             "tool_name": replay.tool_name,
                             "arguments": replay.arguments or {},
                             "tool_call_id": retry_id,
+                            "provider_tool_call_id": replay.provider_tool_call_id,
                             "retry_of_call_id": previous_id,
                             "conversation_recorded": conversation_recorded,
                         }
@@ -316,24 +327,32 @@ class Phase5AgentCore:
                 "content": action.content or action.thought or "",
             }
             if action.type == "tool_call":
-                provider_call_id = action.tool_call_id
+                provider_call_id = action.provider_tool_call_id
                 action = self._normalize_invocation(action)
                 action_msg["tool_call"] = {
                     "name": action.tool_name,
                     "arguments": action.arguments or {},
+                    "invocation_id": action.tool_call_id,
                 }
                 conversation_recorded = bool(provider_call_id)
+                if provider_call_id:
+                    action_msg["tool_call"]["id"] = provider_call_id
+                    action_msg["tool_call"]["provider_tool_call_id"] = provider_call_id
+                    self._last_provider_tool_call_id = provider_call_id
                 if action.tool_call_id:
-                    if conversation_recorded:
-                        action_msg["tool_call"]["id"] = action.tool_call_id
                     self._last_tool_call_id = action.tool_call_id
                 # Track for A1 same-tool-same-args retry
                 self._last_tool_call = {
                     "tool_name": action.tool_name,
                     "arguments": action.arguments or {},
                     "tool_call_id": action.tool_call_id,
+                    "provider_tool_call_id": provider_call_id,
                     "retry_of_call_id": action.retry_of_call_id,
                     "conversation_recorded": conversation_recorded,
+                }
+            if action.provider_reasoning_content is not None:
+                action_msg["_provider_transport"] = {
+                    "reasoning_content": action.provider_reasoning_content,
                 }
             if action.thought:
                 action_msg.setdefault("metadata", {})["thought"] = action.thought
@@ -485,11 +504,18 @@ class Phase5AgentCore:
             "content": json.dumps(result, default=str, ensure_ascii=False) if isinstance(result, dict) else str(result),
         }
         call_id = self._last_tool_call_id
+        provider_call_id = self._last_provider_tool_call_id
         conversation_recorded = (self._last_tool_call or {}).get(
             "conversation_recorded", True
         )
-        if call_id and conversation_recorded:
+        # Keep the Odys invocation identity for validator/public lineage and
+        # the provider-native identity for the OpenAI wire serializer.  The
+        # latter is selected by provider_wire.py; neither identity is lost.
+        if call_id:
             tool_msg["tool_call_id"] = call_id
+            tool_msg["invocation_id"] = call_id
+        if provider_call_id and conversation_recorded:
+            tool_msg["provider_tool_call_id"] = provider_call_id
         self._conversation_history.append(tool_msg)
 
         # 2. Store structured public tool observation (Section A)
@@ -498,6 +524,7 @@ class Phase5AgentCore:
             tool_name=tool_name,
             result=result if isinstance(result, dict) else {"raw": str(result)},
             tool_call_id=call_id,
+            provider_tool_call_id=provider_call_id,
             retry_of_call_id=(self._last_tool_call or {}).get("retry_of_call_id"),
             arguments_digest=hashlib.sha256(
                 json.dumps(
@@ -522,6 +549,8 @@ class Phase5AgentCore:
                     payload={
                         "tool_name": tool_name,
                         "tool_call_id": call_id,
+                        "provider_tool_call_id": provider_call_id,
+                        "invocation_id": call_id,
                         "retry_of_call_id": (self._last_tool_call or {}).get("retry_of_call_id"),
                         "arguments_digest": obs.arguments_digest,
                         "result_keys": sorted(result.keys()) if isinstance(result, dict) else [],
@@ -661,6 +690,7 @@ class Phase5AgentCore:
         self._escalation_flag = False
         self._escalation_reason = ""
         self._last_tool_call_id = None
+        self._last_provider_tool_call_id = None
         self._last_tool_call = None
         self._invocation_sequence = 0
         self._candidate_sequence = 0
@@ -713,6 +743,8 @@ class Phase5AgentCore:
             thought=action.thought,
             tool_calls=action.tool_calls,
             tool_call_id=call_id,
+            provider_tool_call_id=action.provider_tool_call_id,
+            provider_reasoning_content=action.provider_reasoning_content,
             retry_of_call_id=action.retry_of_call_id,
         )
 
