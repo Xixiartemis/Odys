@@ -13,7 +13,7 @@
     "commit_sha": "ef0798aa7f31ac9b33403254b1ef76e8673305fa",
     "dataset_revision": "08b0239a98b0b07839d673f5bc0ef7d836db9296",
     "dataset_digest": "9fcd7d7ec3c06afcee098877cca1ae8c29b87a1102be4b365a1055f824a76bc8",
-    "evaluator_digest": "412f9c3615bfd997af903f6514f716be94a774140975b82c8ff2fd16b6547833",
+    "evaluator_digest": "74958635c3794bdd1202ad2a35f2d31f9504221905f98b94173d8c87474be740",
     "dataset_hash_scope": "data/perturbed_tasks/**/*.json sorted by POSIX path, concatenated bytes"
   },
   "provenance_lineage": {
@@ -58,5 +58,5 @@
   "budgets": {"max_model_calls":50,"max_turns":15,"max_tokens":100000,"token_budget":100000},
   "output_dir":"experiments/phase5/runs/phase5-real-pilot-003",
   "task_count":20,"arm_count":6,"total_trials":120,
-  "manifest_hash":"6fe2bfaf8a9dd276267c55fa5aee9d1387c3c14edbdb97e09dc7d01147570cda"
+  "manifest_hash":"525cf5ffb89b4dd3569c4901023701054a898162bbaff61412e40f54a2b9db87"
 }

@@ -63,6 +63,9 @@ _FROZEN_EVALUATOR_FILES = (
     "evaluation/core/metrics.py",
     "evaluation/core/sandbox.py",
 )
+# Provenance is hashed over canonical LF bytes so the same frozen evaluator
+# identity is obtained from Windows and Linux clean checkouts.
+_FROZEN_EVALUATOR_DIGEST = "74958635c3794bdd1202ad2a35f2d31f9504221905f98b94173d8c87474be740"
 _UV_LOCK_PATH = _PROJECT_ROOT / "uv.lock"
 
 
@@ -114,7 +117,10 @@ def _hash_files(root: Path, relative_paths: tuple[str, ...]) -> str:
         path = root / Path(*relative.split("/"))
         if not path.is_file():
             raise CanaryPreflightError(f"locked provenance file is missing: {path}")
-        digest.update(path.read_bytes())
+        # Git checkout line endings vary by runner.  The frozen evaluator
+        # identity is over canonical UTF-8 LF bytes, while the exact locked
+        # file scope and nested checkout cleanliness remain unchanged.
+        digest.update(path.read_bytes().replace(b"\r\n", b"\n"))
     return digest.hexdigest()
 
 
@@ -158,7 +164,7 @@ def _toolmaze_provenance() -> dict[str, Any]:
             f"ToolMaze dataset mismatch: count={count}, digest={dataset_digest}"
         )
     evaluator_digest = _hash_files(_REPO, _FROZEN_EVALUATOR_FILES)
-    if evaluator_digest != "412f9c3615bfd997af903f6514f716be94a774140975b82c8ff2fd16b6547833":
+    if evaluator_digest != _FROZEN_EVALUATOR_DIGEST:
         raise CanaryPreflightError(
             f"ToolMaze evaluator digest mismatch: {evaluator_digest}"
         )
@@ -495,7 +501,12 @@ def preflight_canary(
     except ProviderLockError as exc:
         raise CanaryPreflightError(str(exc)) from exc
 
-    adapter = ToolMazeAdapter()
+    benchmark = manifest.get("benchmark")
+    if not isinstance(benchmark, dict):
+        raise CanaryPreflightError("manifest benchmark object is required")
+    adapter = ToolMazeAdapter(
+        evaluator_hash=str(benchmark.get("evaluator_digest", ""))
+    )
     task_info, benchmark_identity, task_path = _validate_task(manifest, adapter)
     engine_report = _selected_engine_preflight(task_path)
     sdk_report: dict[str, str] = {}
