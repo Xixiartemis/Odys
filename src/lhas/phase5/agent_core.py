@@ -130,6 +130,13 @@ class Phase5AgentCore:
         # ── Recovery budget gate (Section F) ──
         self._recovery_budget_gate: Any = None  # RecoveryBudgetGate or PassThrough
 
+        # ── Shared execution authorization gate (all arms) ──
+        self._execution_gate: Any = None
+
+        # ── Lineage: real task/trial identifiers (P2 fix) ──
+        self._lineage_task_id: Optional[str] = None
+        self._lineage_trial_id: Optional[str] = None
+
     # ── Injection points ─────────────────────────────────────────────
 
     def set_shadow_observer(self, observer: Any) -> None:
@@ -151,6 +158,102 @@ class Phase5AgentCore:
         Every non-NONE recovery decision must pass through this gate.
         """
         self._recovery_budget_gate = gate
+
+    def set_execution_control(self, gate: Any) -> None:
+        """Inject the shared execution authorization gate.
+
+        This gate is the base execution safety authority present in EVERY
+        arm.  It records control events (proposed/authorized/executed/
+        observed/blocked/recovery/escalation) and answers the retry
+        reasonableness judgment independently of the recovery budget.
+        """
+        self._execution_gate = gate
+
+    def set_execution_lineage(self, *, task_id: str, trial_id: str) -> None:
+        """Record real task/trial identifiers for lineage (P2 fix).
+
+        Evidence ledger and shadow-observer records must carry the real
+        identifiers, never a task-description prefix.
+        """
+        self._lineage_task_id = task_id
+        self._lineage_trial_id = trial_id
+
+    def _lineage_task(self) -> str:
+        """Real task identifier; falls back only for non-canonical callers."""
+        return self._lineage_task_id or self._task_description[:64]
+
+    @property
+    def has_terminal_recovery_pending(self) -> bool:
+        """True when a pending recovery decision must halt execution."""
+        if self._escalation_flag:
+            return True
+        if self._pending_recovery is not None:
+            return self._pending_recovery.action in _TERMINAL_RECOVERY_ACTIONS
+        return False
+
+    def mark_control_escalation(self, reason: str) -> None:
+        """Enter the explicit stop/escalation state (control gate)."""
+        self._escalation_flag = True
+        self._escalation_reason = reason
+        self._record_control_event(
+            "ESCALATION",
+            step=self._step_count,
+            reason=reason,
+            source="execution_control_gate",
+        )
+
+    def record_blocked_tool_call(
+        self,
+        call_record: Dict[str, Any],
+        *,
+        rule: str,
+        reason: str,
+    ) -> Dict[str, Any]:
+        """Record a synthetic response for a blocked (never-executed) call.
+
+        The synthetic response completes the model-protocol pairing for
+        the original tool-call id.  It is explicitly marked synthetic and
+        NEVER recorded as a real tool observation, evidence event, shadow
+        observation, or execution-trace entry.
+        """
+        provider_call_id = call_record.get("provider_tool_call_id")
+        conversation_recorded = call_record.get("conversation_recorded", True)
+        synthetic_payload = {
+            "synthetic_response": True,
+            "executed": False,
+            "control_decision": "BLOCKED",
+            "rule": rule,
+            "reason": reason,
+        }
+        tool_msg: Dict[str, Any] = {
+            "role": "tool",
+            "name": call_record.get("tool_name", ""),
+            "content": (
+                "[ODYS-CONTROL][SYNTHETIC RESPONSE — NOT A REAL TOOL OBSERVATION] "
+                + json.dumps(synthetic_payload, ensure_ascii=False)
+            ),
+            "_synthetic_response": True,
+            "synthetic_reason": reason,
+            "synthetic_rule": rule,
+        }
+        call_id = call_record.get("tool_call_id")
+        if call_id:
+            tool_msg["tool_call_id"] = call_id
+            tool_msg["invocation_id"] = call_id
+        if provider_call_id and conversation_recorded:
+            tool_msg["provider_tool_call_id"] = provider_call_id
+        self._conversation_history.append(tool_msg)
+
+        # Mark the batch slot resolved so the protocol can continue.
+        batch = self._active_tool_call_batch
+        index = call_record.get("tool_call_index", call_record.get("batch_index"))
+        if batch is not None and isinstance(index, int) and 0 <= index < len(batch["calls"]):
+            batch["processed_indices"].add(index)
+        return tool_msg
+
+    def _record_control_event(self, kind: str, **fields: Any) -> None:
+        if self._execution_gate is not None:
+            self._execution_gate.record_event(kind, **fields)
 
     def get_validator_events(self) -> List[Dict[str, Any]]:
         """Return recorded validator events."""
@@ -313,6 +416,11 @@ class Phase5AgentCore:
                             "retry_of_call_id": previous_id,
                             "conversation_recorded": conversation_recorded,
                         }
+                        # The active model batch is fully resolved before the
+                        # adapter asks for another action; clear it so the
+                        # retry replay's own result is recorded against the
+                        # replay call, not the completed batch.
+                        self._active_tool_call_batch = None
                         return replay
                     # No last tool call to replay — fall through to model
 
@@ -467,17 +575,51 @@ class Phase5AgentCore:
                     content=f"[VALIDATION_BLOCKED] {feedback.failure_type}: {action.content}",
                 )
 
-            # ── Section F: authorize recovery through budget gate ──
-            if self._recovery_budget_gate is not None:
-                from .recovery_budget import BudgetDecision
-                budget_decision = self._recovery_budget_gate.authorize(
+            # ── Judgment 1 (P1): retry reasonableness — independent of budget ──
+            working_decision = recovery_decision
+            retry_justified: Optional[bool] = None
+            retry_rule: Optional[str] = None
+            if (recovery_decision.action is RecoveryActionKind.RETRY
+                    and self._execution_gate is not None):
+                retry_call = self._last_tool_call or {}
+                justification = self._execution_gate.is_retry_justified(
                     step=self._step_count,
-                    candidate_action=recovery_decision.action.value,
+                    tool_name=retry_call.get("tool_name", ""),
+                    arguments=retry_call.get("arguments", {}),
                 )
-                if budget_decision is BudgetDecision.ESCALATE:
+                retry_justified = justification.authorized
+                retry_rule = justification.rule
+                if not justification.authorized:
+                    working_decision = RecoveryDecision(
+                        action=RecoveryActionKind.STOP,
+                        reason=f"no-progress retry rejected: {justification.reason}",
+                        signal=recovery_decision.signal,
+                        evidence={
+                            **(recovery_decision.evidence or {}),
+                            "retry_justification_rule": justification.rule,
+                            "retry_justified": False,
+                        },
+                    )
+
+            # ── Judgment 2: Section F — authorize recovery through budget gate ──
+            budget_decision: str = "NOT_CONSUMED"
+            if self._recovery_budget_gate is not None and retry_justified is not False:
+                from .recovery_budget import BudgetDecision
+                gate_decision = self._recovery_budget_gate.authorize(
+                    step=self._step_count,
+                    candidate_action=working_decision.action.value,
+                )
+                budget_decision = gate_decision.value
+                if gate_decision is BudgetDecision.ESCALATE:
                     self._escalation_flag = True
                     self._escalation_reason = (
                         f"Recovery budget exhausted at step {self._step_count}"
+                    )
+                    self._record_control_event(
+                        "ESCALATION",
+                        step=self._step_count,
+                        reason=self._escalation_reason,
+                        source="recovery_budget_gate",
                     )
                     return ModelAction(
                         type="final_answer",
@@ -486,11 +628,22 @@ class Phase5AgentCore:
                 # ALLOW → continue with recovery
 
             # Record recovery decision
-            self._pending_recovery = recovery_decision
+            self._record_control_event(
+                "RECOVERY",
+                step=self._step_count,
+                action=working_decision.action.value,
+                reason=working_decision.reason,
+                signal="VALIDATION_REJECT",
+                retry_justified=retry_justified,
+                retry_justification_rule=retry_rule,
+                budget_decision=budget_decision,
+                authorized=True,
+            )
+            self._pending_recovery = working_decision
             self._recovery_decisions.append({
                 "step": self._step_count,
-                "action": recovery_decision.action.value,
-                "reason": recovery_decision.reason,
+                "action": working_decision.action.value,
+                "reason": working_decision.reason,
                 "signal": "VALIDATION_REJECT",
             })
 
@@ -581,7 +734,7 @@ class Phase5AgentCore:
             try:
                 from .substrate.evidence import EvidenceEventType
                 self._evidence_ledger.append(
-                    task_id=self._task_description[:64],
+                    task_id=self._lineage_task(),
                     attempt_id=f"step-{self._step_count}",
                     event_type=EvidenceEventType.TOOL_OBSERVED,
                     payload={
@@ -589,6 +742,7 @@ class Phase5AgentCore:
                         "tool_call_id": call_id,
                         "provider_tool_call_id": provider_call_id,
                         "invocation_id": call_id,
+                        "trial_id": self._lineage_trial_id,
                         "retry_of_call_id": call_record.get("retry_of_call_id"),
                         "arguments_digest": obs.arguments_digest,
                         "result_keys": sorted(result.keys()) if isinstance(result, dict) else [],
@@ -611,7 +765,7 @@ class Phase5AgentCore:
                     call_record.get("arguments", {}),
                 )
                 shadow_record = self._shadow_observer.observe(
-                    task_id=self._task_description[:64],
+                    task_id=self._lineage_task(),
                     step=self._step_count,
                     action_identity=action_identity,
                     tool_result=result,
@@ -620,6 +774,18 @@ class Phase5AgentCore:
                 raise ProgressObserverExecutionError(
                     f"Shadow observer failed at step {self._step_count}"
                 ) from exc
+
+        # 5b. Execution control gate: record the executed result and update
+        #     deterministic control state BEFORE any recovery judgment.
+        if self._execution_gate is not None:
+            self._execution_gate.observe(
+                step=self._step_count,
+                tool_name=tool_name,
+                arguments=call_record.get("arguments", {}),
+                result=result,
+                tool_call_id=call_id,
+                provider_tool_call_id=provider_call_id,
+            )
 
         # 6. Consult policy strategy for recovery (Section F: authorize)
         if self._strategy is not None:
@@ -680,6 +846,13 @@ class Phase5AgentCore:
     ) -> bool:
         """Authorize a recovery decision through the budget gate (Section F).
 
+        Two INDEPENDENT judgments (P1):
+        1. Retry reasonableness — decided by the execution control gate
+           (no-progress analysis).  An unjustified no-progress retry is
+           converted into an explicit stop.
+        2. Recovery budget sufficiency — decided by the recovery budget
+           gate.  Only consulted when the retry is justified.
+
         Returns True if authorized and set as pending recovery.
         Returns False if denied (ESCALATE → terminal).
         """
@@ -688,19 +861,79 @@ class Phase5AgentCore:
         # replace it or consume another recovery-budget unit.
         if self._pending_recovery is not None:
             return False
-        if self._recovery_budget_gate is not None:
-            from .recovery_budget import BudgetDecision
-            budget_decision = self._recovery_budget_gate.authorize(
+
+        working = decision
+        retry_justified: Optional[bool] = None
+        retry_rule: Optional[str] = None
+        if decision.action is RecoveryActionKind.RETRY and self._execution_gate is not None:
+            retry_call = call_record or self._last_tool_call or {}
+            justification = self._execution_gate.is_retry_justified(
                 step=self._step_count,
-                candidate_action=decision.action.value,
+                tool_name=retry_call.get("tool_name", ""),
+                arguments=retry_call.get("arguments", {}),
             )
-            if budget_decision is BudgetDecision.ESCALATE:
-                self._escalation_flag = True
-                self._escalation_reason = (
-                    f"Recovery budget exhausted at step {self._step_count}"
+            retry_justified = justification.authorized
+            retry_rule = justification.rule
+            if not justification.authorized:
+                working = RecoveryDecision(
+                    action=RecoveryActionKind.STOP,
+                    reason=f"no-progress retry rejected: {justification.reason}",
+                    signal=decision.signal,
+                    evidence={
+                        **(decision.evidence or {}),
+                        "retry_justification_rule": justification.rule,
+                        "retry_justified": False,
+                    },
                 )
-                return False
-        self._pending_recovery = decision
+
+        budget_decision: str = "NOT_CONSUMED"
+        if self._recovery_budget_gate is not None:
+            # Budget judgment is skipped only when the retry judgment already
+            # rejected the action as no-progress (it never executes).
+            if retry_justified is not False:
+                from .recovery_budget import BudgetDecision
+                gate_decision = self._recovery_budget_gate.authorize(
+                    step=self._step_count,
+                    candidate_action=working.action.value,
+                )
+                budget_decision = gate_decision.value
+                if gate_decision is BudgetDecision.ESCALATE:
+                    self._escalation_flag = True
+                    self._escalation_reason = (
+                        f"Recovery budget exhausted at step {self._step_count}"
+                    )
+                    self._record_control_event(
+                        "ESCALATION",
+                        step=self._step_count,
+                        reason=self._escalation_reason,
+                        source="recovery_budget_gate",
+                    )
+                    self._record_control_event(
+                        "RECOVERY",
+                        step=self._step_count,
+                        tool_name=(call_record or {}).get("tool_name"),
+                        action=working.action.value,
+                        reason=working.reason,
+                        signal=working.signal,
+                        retry_justified=retry_justified,
+                        retry_justification_rule=retry_rule,
+                        budget_decision=budget_decision,
+                        authorized=False,
+                    )
+                    return False
+        self._record_control_event(
+            "RECOVERY",
+            step=self._step_count,
+            tool_name=(call_record or {}).get("tool_name"),
+            action=working.action.value,
+            reason=working.reason,
+            signal=working.signal,
+            retry_justified=retry_justified,
+            retry_justification_rule=retry_rule,
+            budget_decision=budget_decision,
+            authorized=True,
+        )
+        self._pending_recovery = working
         self._pending_recovery_call = call_record
         return True
 
@@ -729,6 +962,10 @@ class Phase5AgentCore:
 
     def get_conversation_history(self) -> List[Dict[str, Any]]:
         return list(self._conversation_history)
+
+    def get_last_tool_call_record(self) -> Optional[Dict[str, Any]]:
+        """Return a copy of the most recent tool-call record (if any)."""
+        return dict(self._last_tool_call) if self._last_tool_call else None
 
     def get_recovery_decisions(self) -> List[Dict[str, Any]]:
         return list(self._recovery_decisions)

@@ -687,6 +687,7 @@ def _persist_trial_artifacts(
     )
     _write_json_once(trial_dir / "recovery_budget_ledger.json", result.recovery_budget_ledger)
     _write_json_once(trial_dir / "validator_events.json", result.validator_events)
+    _write_json_once(trial_dir / "control_events.json", result.control_events)
     _write_json_once(trial_dir / "public_tool_observations.json", result.public_tool_observations)
     _write_json_once(trial_dir / "budget_ledger.json", result.provider_usage)
     _write_json_once(trial_dir / "provider_usage.json", result.provider_usage)

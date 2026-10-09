@@ -68,6 +68,7 @@ class TrialResult:
         self.wall_time: float = 0.0
         self.firewall_report: Dict[str, Any] = {}
         self.runtime_tool_schema: list[dict[str, Any]] = []
+        self.control_events: list = []  # execution-control audit events
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -92,6 +93,10 @@ class TrialResult:
             "wall_time_seconds": round(self.wall_time, 1),
             "firewall_report": self.firewall_report,
             "runtime_tool_schema_hash": tool_schema_hash(self.runtime_tool_schema),
+            "control_events_count": len(self.control_events),
+            "blocked_calls_count": sum(
+                1 for e in self.control_events if e.get("kind") == "BLOCKED"
+            ),
         }
 
 
@@ -227,14 +232,21 @@ def execute_trial(
     if budget_gate is not None:
         core.set_recovery_budget_gate(budget_gate)
 
-    # 10. Create ToolMaze adapter
+    # 10. Create the shared execution authorization gate (base safety gate,
+    #     identical for every arm) and the ToolMaze adapter.
+    from .execution_control import ExecutionAuthorizationGate
+    execution_gate = ExecutionAuthorizationGate()
+    core.set_execution_control(execution_gate)
     try:
-        adapter = create_toolmaze_agent_adapter(core)
+        adapter = create_toolmaze_agent_adapter(core, execution_gate=execution_gate)
     except ToolMazeDependencyUnavailable as exc:
         result.termination_reason = "toolmaze_unavailable"
         result.validity = "INVALID_INFRA"
         result.error_diagnostics = _classify_exception(exc)
         return result
+
+    # P2 lineage fix: real task/trial identifiers, never a description prefix.
+    core.set_execution_lineage(task_id=task_id, trial_id=trial_id)
 
     # 11. Construct official engine and derive its canonical schema.
     from evaluation.core.sandbox import ExecutionEngine
@@ -265,7 +277,12 @@ def execute_trial(
     try:
         firewall.begin_runtime()
         try:
-            trace_logger, token_usage = engine.run(max_rounds=budget.max_turns)
+            # Per-call delivery consumes one engine round per executed tool
+            # call.  The round guard therefore covers model turns plus the
+            # model-call envelope; the authoritative root budget remains
+            # BudgetedModelDriver (max_turns / max_model_calls / tokens).
+            engine_round_guard = budget.max_turns + budget.max_model_calls
+            trace_logger, token_usage = engine.run(max_rounds=engine_round_guard)
         finally:
             firewall.end_runtime()
         # L: include actual token usage in official trace
@@ -335,6 +352,7 @@ def execute_trial(
 
     # K: persist actual validator events
     result.validator_events = core.get_validator_events()
+    result.control_events = execution_gate.control_events
     result.public_tool_observations = [
         {
             "step": o.step,
