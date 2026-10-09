@@ -133,7 +133,7 @@ def _provider_failure_termination_reason(exc: ProviderExecutionError) -> str:
     return "provider_transport_failure"
 
 
-def _execution_provenance(*, engine_round_guard: int) -> Dict[str, Any]:
+def _execution_provenance(*, engine_round_guard: int, route_mode: str = "route-v1") -> Dict[str, Any]:
     """Versioned execution provenance for attribution (B2-7/B2-8)."""
     from .execution_control import EXECUTION_CONTROL_VERSION, EVENT_SCHEMA_VERSION
     from .recovery_route import ROUTE_POLICY_VERSION, route_policy_fingerprint
@@ -144,6 +144,7 @@ def _execution_provenance(*, engine_round_guard: int) -> Dict[str, Any]:
         "event_schema_version": EVENT_SCHEMA_VERSION,
         "route_policy_version": ROUTE_POLICY_VERSION,
         "route_policy_fingerprint": route_policy_fingerprint(),
+        "route_mode": route_mode,
         "engine_round_guard": engine_round_guard,
         "engine_round_guard_semantics": (
             "per-call delivery consumes one engine round per executed tool "
@@ -164,6 +165,7 @@ def execute_trial(
     experiment_id: str,
     task_id: str,
     max_rounds: Optional[int] = None,
+    route_mode: str = "route-v1",
 ) -> TrialResult:
     """Execute a single trial through the canonical path.
 
@@ -272,6 +274,9 @@ def execute_trial(
     core.set_execution_lineage(task_id=task_id, trial_id=trial_id)
     execution_gate.bind_identity(run_id=f"trial-{trial_id}", trial_id=trial_id)
 
+    # Experiment B seam: routing policy mode (default = frozen route-v1).
+    core.set_route_mode(route_mode)
+
     # 11. Construct official engine and derive its canonical schema.
     from evaluation.core.sandbox import ExecutionEngine
     engine = ExecutionEngine(
@@ -379,6 +384,7 @@ def execute_trial(
     result.control_events = execution_gate.control_events
     result.execution_provenance = _execution_provenance(
         engine_round_guard=budget.max_turns + budget.max_model_calls,
+        route_mode=route_mode,
     )
     result.public_tool_observations = [
         {

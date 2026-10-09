@@ -40,6 +40,16 @@ from typing import Any, Dict, List, Optional, Tuple
 
 ROUTE_POLICY_VERSION = "recovery-route-v1"
 
+# Experiment routing modes (Experiment B only — see eval protocol §2).
+# "route-v1" is the default and is the frozen behaviour under test as B1.
+# "baseline" (B0) disables exactly the Q3a/Q3b/Q3d enhancement rules so
+# the strategy's own proposal passes through; everything else (terminal
+# safety Q0/Q1, budget gate, execution authorization gate, normalizer,
+# event schema) is IDENTICAL.  The unique difference surface is the route
+# rule set, nothing else.
+ROUTE_MODE_V1 = "route-v1"
+ROUTE_MODE_BASELINE = "baseline"
+
 
 class RecoveryRoute(str, Enum):
     CONTINUE = "CONTINUE"
@@ -184,11 +194,24 @@ class RecoveryRouteDecider:
     Stateless with respect to budgets (they are inputs for recording
     only).  Tracks per-signature REPLAN counts so REPLAN is bounded and
     repeated permanent failures escalate instead of looping.
+
+    ``mode`` selects the experiment routing policy (Experiment B):
+    - ``route-v1`` (default, arm B1): full Q0–Q3 rule set.
+    - ``baseline`` (arm B0): Q0/Q1/Q2 identical; Q3 enhancement rules
+      (Q3a permanent→REPLAN, Q3b loop→STOP/REPLAN, Q3d change→RETRY_CHANGED)
+      are disabled and the strategy's proposal passes through unchanged.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, mode: str = ROUTE_MODE_V1):
+        if mode not in (ROUTE_MODE_V1, ROUTE_MODE_BASELINE):
+            raise ValueError(f"unknown route mode: {mode!r}")
+        self._mode = mode
         self._replan_counts: Dict[str, int] = {}
         self._decision_sequence: int = 0
+
+    @property
+    def mode(self) -> str:
+        return self._mode
 
     def reset(self) -> None:
         self._replan_counts.clear()
@@ -230,6 +253,24 @@ class RecoveryRouteDecider:
             )
 
         # Q3 — retry-family proposals judged against real evidence.
+        if self._mode == ROUTE_MODE_BASELINE:
+            # B0: proposal passthrough — the enhancement rules are the
+            # experiment variable and are disabled here.  Everything else
+            # (Q0/Q1/Q2, budget gate, authorization gate) is shared.
+            if inputs.proposed_action == "retry_with_context":
+                return self._decision(
+                    decision_id, RecoveryRoute.RETRY_CHANGED,
+                    "STRATEGY_CONTEXT_CHANGE",
+                    "policy strategy asked to retry with changed context "
+                    "(baseline passthrough)",
+                    inputs,
+                )
+            return self._decision(
+                decision_id, RecoveryRoute.RETRY_SAME, "STRATEGY_PASSTHROUGH",
+                "baseline route mode: strategy proposal passes through unchanged",
+                inputs,
+            )
+
         attempts = inputs.attempts
         loop = self._no_progress_loop(attempts)
 

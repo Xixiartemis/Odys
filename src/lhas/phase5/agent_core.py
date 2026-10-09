@@ -181,6 +181,15 @@ class Phase5AgentCore:
         """
         self._execution_gate = gate
 
+    def set_route_mode(self, mode: str) -> None:
+        """Select the experiment routing policy (Experiment B seam).
+
+        ``route-v1`` (default) is the frozen behaviour; ``baseline``
+        disables exactly the Q3a/Q3b/Q3d enhancement rules.  No other
+        component is affected.
+        """
+        self._route_decider = RecoveryRouteDecider(mode=mode)
+
     def set_execution_lineage(self, *, task_id: str, trial_id: str) -> None:
         """Record real task/trial identifiers for lineage (P2 fix).
 

@@ -186,3 +186,32 @@ Completion；Provider 请求、输入/输出 Token、工具执行数、恢复次
 2. 实验 A 的"安全门关闭"对照开关是否引入（当前无旁路，属安全设计）。
 3. 真实模型实验（实验 B）的启动授权。
 4. 样本量最终取值（30 资格线 vs 50–100 发表线）与重复运行次数。
+5. 终评任务清单确认（草案 manifest 2249614d… 的 20 任务抽取）。
+
+═══════════════════════════════════════════════════════════
+9. Readiness Gate 状态附录（2026-10-10，就绪审查后追加）
+═══════════════════════════════════════════════════════════
+
+离线资格审查已完成（docs/phase5/READINESS_GATE_REVIEW.md）：
+- G1/G2/G3/G6/G7/G8 = PASS；G4 = PASS（条件：终评须用新草案清单，
+  历史 pilot-003 因与开发集重叠 3 任务被阻断）；G5 = NEEDS_HUMAN_APPROVAL。
+- B0/B1 唯一差异面已离线验证（B0_B1_OFFLINE_VALIDATION_REPORT.md）：
+  唯一差异 = route_mode（Q3a/Q3b/Q3d 规则集），其余共享组件逐项对照相等。
+  B0 定义落地为 RecoveryRouteDecider(mode="baseline") 直通模式。
+- provider-free 资格 preflight 已通过（ROUTE_PREFLIGHT_REPORT.md），
+  manifest_hash 473a7701…；机器可读产物在 experiments/phase5/readiness/。
+- 数据集隔离证据（DATASET_ISOLATION_REPORT.md）：seed=42 冻结、
+  新抽取 20 任务零重叠、24 条文件指纹。
+- flaky 测试已按"根因+最小差异+回归测试"修复（FLAKY_TEST_REVIEW_REPORT.md），
+  断言未放宽、provenance.py 零改动。
+
+待人工批准事项更新为：
+1. §4 阈值候选选择（采用线/否定线/误拦截率目标）。
+2. 样本量终值与重复运行次数。
+3. 终评任务清单（草案 manifest 2249614d…）确认。
+4. 真实模型实验启动授权（含凭据环境提供方式）。
+5. （可选）实验 A "安全门关闭"对照开关。
+6. （可选）provenance 哈希口径修正（方案 B，独立任务评审）。
+
+真实模型请求：0。历史产物与冻结环境：零改动。本附录不修改 §1–§8 任何
+已冻结内容。
