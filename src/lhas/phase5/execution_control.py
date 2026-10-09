@@ -58,6 +58,17 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+from .recovery_route import (
+    AttemptEvidence,
+    EvidenceGrade,
+    StateChange,
+    evaluate_state_change,
+)
+
+# Version stamps recorded on every control event and in provenance.
+EXECUTION_CONTROL_VERSION = "execution-control-v1"
+EVENT_SCHEMA_VERSION = "phase5-control-events-v2"
+
 
 # ── Normalized result axes ───────────────────────────────────────────
 
@@ -273,6 +284,7 @@ class NormalizedToolResult:
     arguments_digest: str = ""
     result_digest: str = ""
     status_source: str = "none"
+    state_evidence_available: bool = False
 
     @property
     def is_success(self) -> bool:
@@ -341,6 +353,7 @@ class ToolResultNormalizer:
             arguments_digest=arguments_digest,
             result_digest=_digest(raw),
             status_source=status_source,
+            state_evidence_available=bool(evidence) or "status" in raw,
         )
 
     # ── axis helpers ─────────────────────────────────────────────────
@@ -437,6 +450,20 @@ class _AttemptRecord:
     retryable: str
     receipt_grants_repeat: bool
     normalized: NormalizedToolResult
+    affects_followups: bool
+    state_evidence_available: bool
+
+    def as_evidence(self) -> AttemptEvidence:
+        return AttemptEvidence(
+            step=self.step,
+            result_digest=self.result_digest,
+            state_digest=self.state_digest,
+            exec_status=self.exec_status,
+            ready_status=self.ready_status,
+            retryable=self.retryable,
+            affects_followups=self.affects_followups,
+            state_evidence_available=self.state_evidence_available,
+        )
 
 
 class ExecutionAuthorizationGate:
@@ -457,6 +484,14 @@ class ExecutionAuthorizationGate:
         self._terminal: bool = False
         self._terminal_reason: str = ""
         self._event_sequence: int = 0
+        # ── Experiment attribution identity (B2-1/B2-7) ──
+        self._run_id: Optional[str] = None
+        self._trial_id: Optional[str] = None
+
+    def bind_identity(self, *, run_id: str, trial_id: str) -> None:
+        """Bind the experiment identity stamped on every control event."""
+        self._run_id = run_id
+        self._trial_id = trial_id
 
     # ── lifecycle ────────────────────────────────────────────────────
 
@@ -495,7 +530,6 @@ class ExecutionAuthorizationGate:
             self._batch_unsafe = True
 
         key = self._attempt_key(tool_name, normalized.arguments_digest)
-        prior = self._attempts.get(key, [])
         self._attempts.setdefault(key, []).append(_AttemptRecord(
             step=step,
             arguments_digest=normalized.arguments_digest,
@@ -506,8 +540,9 @@ class ExecutionAuthorizationGate:
             retryable=normalized.retryable.value,
             receipt_grants_repeat=self._receipt_grants_repeat(normalized),
             normalized=normalized,
+            affects_followups=normalized.affects_followups,
+            state_evidence_available=normalized.state_evidence_available,
         ))
-        del prior
 
         self.record_event(
             ControlEventKind.EXECUTED,
@@ -662,11 +697,19 @@ class ExecutionAuthorizationGate:
             and attempts[-1].result_digest == attempts[-2].result_digest
             and attempts[-1].state_digest == attempts[-2].state_digest
             and not attempts[-1].normalized.transient_basis
+            and attempts[-1].affects_followups
         ):
+            # Honest claim: no NEW EVIDENCE and no credible progress.  This
+            # is NOT an assertion that the environment state is unchanged
+            # (that is recorded separately as StateChange).
+            state_change, _ = evaluate_state_change(
+                [attempt.as_evidence() for attempt in attempts]
+            )
             return AuthorizationDecision(
                 False,
                 "NO_PROGRESS_RETRY",
-                "identical arguments produced identical results with no state change — "
+                "identical arguments produced identical non-success results with "
+                f"no new evidence (state_change={state_change.value}) — "
                 "no-progress retry rejected",
                 terminal=True,
             )
@@ -730,10 +773,15 @@ class ExecutionAuthorizationGate:
             len(attempts) >= 2
             and attempts[-1].result_digest == attempts[-2].result_digest
             and attempts[-1].state_digest == attempts[-2].state_digest
+            and attempts[-1].affects_followups
         ):
+            state_change, _ = evaluate_state_change(
+                [attempt.as_evidence() for attempt in attempts]
+            )
             return AuthorizationDecision(
                 False, "NO_PROGRESS_RETRY",
-                "identical arguments produced identical results with no state change",
+                "identical arguments produced identical non-success results with "
+                f"no new evidence (state_change={state_change.value})",
                 terminal=True,
             )
         # One bounded verification retry is allowed after a non-identical
@@ -749,12 +797,34 @@ class ExecutionAuthorizationGate:
         event: Dict[str, Any] = {
             "event_id": self._event_sequence,
             "kind": kind.value if isinstance(kind, ControlEventKind) else str(kind),
+            "event_schema_version": EVENT_SCHEMA_VERSION,
+            "execution_control_version": EXECUTION_CONTROL_VERSION,
         }
+        if self._run_id is not None:
+            event["run_id"] = self._run_id
+        if self._trial_id is not None:
+            event["trial_id"] = self._trial_id
         for key, value in fields.items():
             if value is not None:
                 event[key] = value
         self._events.append(event)
         return event
+
+    # ── route-decision evidence (recovery_route layer) ───────────────
+
+    def route_attempts(self, tool_name: str, arguments: Any) -> List[AttemptEvidence]:
+        """Attempt history for one action signature, as route evidence."""
+        key = self._attempt_key(tool_name, _digest(_canonical_arguments(arguments)))
+        return [attempt.as_evidence() for attempt in self._attempts.get(key, [])]
+
+    def state_change_for(self, tool_name: str, arguments: Any) -> tuple[StateChange, EvidenceGrade]:
+        """Honest state-change judgment for one action signature."""
+        return evaluate_state_change(self.route_attempts(tool_name, arguments))
+
+    def last_normalized(self, tool_name: str, arguments: Any) -> Optional[Any]:
+        key = self._attempt_key(tool_name, _digest(_canonical_arguments(arguments)))
+        attempts = self._attempts.get(key)
+        return attempts[-1].normalized if attempts else None
 
     def mark_terminal(self, *, step: int, reason: str) -> None:
         self._terminal = True

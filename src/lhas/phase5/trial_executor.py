@@ -69,6 +69,7 @@ class TrialResult:
         self.firewall_report: Dict[str, Any] = {}
         self.runtime_tool_schema: list[dict[str, Any]] = []
         self.control_events: list = []  # execution-control audit events
+        self.execution_provenance: Dict[str, Any] = {}
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -97,6 +98,7 @@ class TrialResult:
             "blocked_calls_count": sum(
                 1 for e in self.control_events if e.get("kind") == "BLOCKED"
             ),
+            "execution_provenance": self.execution_provenance,
         }
 
 
@@ -129,6 +131,27 @@ def _provider_failure_termination_reason(exc: ProviderExecutionError) -> str:
     if failure_class.startswith("PROVIDER_PROTOCOL"):
         return "provider_protocol_failure"
     return "provider_transport_failure"
+
+
+def _execution_provenance(*, engine_round_guard: int) -> Dict[str, Any]:
+    """Versioned execution provenance for attribution (B2-7/B2-8)."""
+    from .execution_control import EXECUTION_CONTROL_VERSION, EVENT_SCHEMA_VERSION
+    from .recovery_route import ROUTE_POLICY_VERSION, route_policy_fingerprint
+    return {
+        "execution_path": "CANONICAL_TRIAL_EXECUTOR",
+        "included_in_canonical_analysis": True,
+        "execution_control_version": EXECUTION_CONTROL_VERSION,
+        "event_schema_version": EVENT_SCHEMA_VERSION,
+        "route_policy_version": ROUTE_POLICY_VERSION,
+        "route_policy_fingerprint": route_policy_fingerprint(),
+        "engine_round_guard": engine_round_guard,
+        "engine_round_guard_semantics": (
+            "per-call delivery consumes one engine round per executed tool "
+            "call; guard = root max_turns + max_model_calls; the authoritative "
+            "root budget remains BudgetedModelDriver "
+            "(max_turns / max_model_calls / token_budget)"
+        ),
+    }
 
 
 def execute_trial(
@@ -247,6 +270,7 @@ def execute_trial(
 
     # P2 lineage fix: real task/trial identifiers, never a description prefix.
     core.set_execution_lineage(task_id=task_id, trial_id=trial_id)
+    execution_gate.bind_identity(run_id=f"trial-{trial_id}", trial_id=trial_id)
 
     # 11. Construct official engine and derive its canonical schema.
     from evaluation.core.sandbox import ExecutionEngine
@@ -353,6 +377,9 @@ def execute_trial(
     # K: persist actual validator events
     result.validator_events = core.get_validator_events()
     result.control_events = execution_gate.control_events
+    result.execution_provenance = _execution_provenance(
+        engine_round_guard=budget.max_turns + budget.max_model_calls,
+    )
     result.public_tool_observations = [
         {
             "step": o.step,
