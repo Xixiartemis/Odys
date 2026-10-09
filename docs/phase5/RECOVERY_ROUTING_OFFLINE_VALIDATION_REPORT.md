@@ -3,6 +3,7 @@
 分支：`fix/phase5-recovery-routing-eval-01`
 基线冻结：分支起点 = `973a612a02d984fe8312401b08b3c394e5994649`
 （= 任务预期 HEAD ✓；其父 `04ebe293…` = 基线代码 SHA ✓）
+实现提交：`4956e91fbedc72c9fd6f747fe17eb16410c80979`（11 files, +2284/-140）
 日期：2026-10-09
 环境：Python 3.11.11（venv）、pydantic 2.13.4、uv 0.11.28、Windows 11
 

@@ -156,15 +156,22 @@ Completion；Provider 请求、输入/输出 Token、工具执行数、恢复次
 ═══════════════════════════════════════════════════════════
 
 - [x] 协议版本：recovery-route-eval-protocol-v1
-- [ ] 代码 SHA：（最终验证报告锁定后填入）
-- [ ] 路线策略版本：recovery-route-v1 + route_policy_fingerprint
-- [ ] 事件 Schema 版本：phase5-control-events-v2
-- [ ] 执行控制版本：execution-control-v1
-- [ ] 任务集哈希：ToolMaze dataset_digest（benchmark provenance）
-- [ ] Judge/evaluator 哈希：ToolMaze evaluator_digest
-- [ ] Provider 配置哈希：provider_config_hash（provider-lock.json）
-- [ ] 根预算与引擎轮次护栏语义（execution_provenance.engine_round_guard）
-- [ ] 实验臂定义与唯一差异面（§2）
+- [x] 代码 SHA：实现提交 `4956e91fbedc72c9fd6f747fe17eb16410c80979`
+  （分支 fix/phase5-recovery-routing-eval-01，父提交 973a612 = 冻结基线）
+- [x] 路线策略版本：recovery-route-v1 + route_policy_fingerprint `a056983f126c8963`
+- [x] 事件 Schema 版本：phase5-control-events-v2
+- [x] 执行控制版本：execution-control-v1
+- [x] 任务集哈希：ToolMaze dataset_digest
+  `9fcd7d7ec3c06afcee098877cca1ae8c29b87a1102be4b365a1055f824a76bc8`
+- [x] Judge/evaluator 哈希：ToolMaze evaluator_digest
+  `412f9c3615bfd997af903f6514f716be94a774140975b82c8ff2fd16b6547833`
+- [x] Provider 配置哈希：provider_config_hash
+  `4bffac88a0ab58a5e677a0d30f301fa61dd4cf48aca1aa1d567139efa140047b`
+  （provider-lock.json；真实模型实验时需重新核对）
+- [x] 根预算与引擎轮次护栏语义：见 §2 与
+  execution_provenance.engine_round_guard（max_turns+max_model_calls；
+  根预算权威 = BudgetedModelDriver）
+- [x] 实验臂定义与唯一差异面（§2：B0 基线恢复 vs B1 route-v1）
 - [ ] 人工批准记录（阈值 §4 与真实模型实验授权）
 
 历史产物兼容：旧运行（Canary-005/006 等）缺 control_events/route 字段，
