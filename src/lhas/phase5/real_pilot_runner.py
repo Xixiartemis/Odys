@@ -915,6 +915,64 @@ class RealPilotRunner:
 
     # -- Formal B0/B1 experiment (Experiment B) ------------------------
 
+    def _completed_trial_dir(self, trial_id: str) -> Optional[Path]:
+        """Locate a completed trial directory (base or any attempt).
+
+        Resume idempotence: a completed attempt directory counts as
+        completed even when the base directory has no COMPLETE marker,
+        so repeated resumes never re-execute a finished trial.
+        """
+        base = self._output_dir / trial_id
+        if (base / "COMPLETE").exists():
+            return base
+        attempts = sorted(
+            p for p in self._output_dir.iterdir()
+            if p.is_dir()
+            and p.name.startswith(trial_id + "__attempt-")
+            and (p / "COMPLETE").exists()
+        )
+        return attempts[0] if attempts else None
+
+    def _restore_completed_trial(
+        self, identity: TrialIdentity, trial_dir: Path
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Load a previously completed trial back into the aggregation.
+
+        A resumed run must not lose the skipped arm from the paired
+        records: every artifact is read from the completed directory
+        (create-only, never modified) and marked with its source.
+        """
+        def _load(name: str, default: Any) -> Any:
+            path = trial_dir / name
+            if not path.is_file():
+                return default
+            return json.loads(path.read_text(encoding="utf-8"))
+
+        invariants = _load("trial_manifest.json", {})
+        validity = _load("validity.json", {})
+        judgement = _load("native_judgement.json", {})
+        usage = _load("provider_usage.json", {})
+        decisions = _load("recovery_decisions.json", [])
+        trial = {
+            "trial_id": identity.trial_id,
+            "comparison_arm_id": identity.comparison_arm_id,
+            "route_mode": identity.route_mode,
+            "repetition_index": identity.repetition_index,
+            "validity": validity.get("validity"),
+            "termination_reason": validity.get("termination_reason"),
+            "grader_pass": (
+                judgement.get("pass") if isinstance(judgement, dict) else None
+            ),
+            "tsr": None,
+            "recovery_routes": [
+                d.get("route") if isinstance(d, dict) else getattr(d, "route", None)
+                for d in decisions
+            ],
+            "provider_usage": usage,
+            "restored_from": trial_dir.name,
+        }
+        return invariants, trial
+
     def _run_b0b1_experiment(
         self,
         *,
@@ -1023,13 +1081,19 @@ class RealPilotRunner:
             for identity in item["identities"]:
                 if stopped_reason is not None:
                     break
-                trial_dir = self._output_dir / identity.trial_id
-                if (trial_dir / "COMPLETE").exists():
+                completed_dir = self._completed_trial_dir(identity.trial_id)
+                if completed_dir is not None:
+                    restored_invariants, restored_trial = self._restore_completed_trial(
+                        identity, completed_dir
+                    )
+                    pair_invariants.append(restored_invariants)
+                    pair_trials.append(restored_trial)
                     executed.append({
                         "trial_id": identity.trial_id,
                         "comparison_arm_id": identity.comparison_arm_id,
                         "route_mode": identity.route_mode,
                         "status": "ALREADY_COMPLETE_SKIPPED",
+                        "restored_from": completed_dir.name,
                     })
                     continue
 
@@ -1238,6 +1302,10 @@ class RealPilotRunner:
         _write_json_once(trial_dir / "recovery_budget_ledger.json", trial_result.recovery_budget_ledger)
         _write_json_once(trial_dir / "validator_events.json", trial_result.validator_events)
         _write_json_once(trial_dir / "control_events.json", trial_result.control_events)
+        _write_json_once(
+            trial_dir / "execution_provenance.json",
+            trial_result.execution_provenance,
+        )
         _write_json_once(trial_dir / "public_tool_observations.json", trial_result.public_tool_observations)
         _write_json_once(trial_dir / "budget_ledger.json", trial_result.provider_usage)
         _write_json_once(trial_dir / "provider_usage.json", trial_result.provider_usage)

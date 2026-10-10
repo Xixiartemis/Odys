@@ -442,6 +442,18 @@ class TestPairedRun:
             }
             for d in decisions:
                 assert d.get("decision_id") in event_decision_ids or d.get("suppressed")
+            # execution provenance (strategy fingerprint, route mode,
+            # guard semantics) is persisted — not memory-only
+            provenance = json.loads(
+                (tdir / "execution_provenance.json").read_text(encoding="utf-8")
+            )
+            assert provenance["route_mode"] in ("baseline", "route-v1")
+            assert provenance["route_policy_version"] == "recovery-route-v1"
+            assert provenance["route_policy_fingerprint"]
+            assert provenance["comparison_arm_id"] in (
+                "B0_BASELINE_ROUTE", "B1_ROUTE_V1",
+            )
+            assert provenance["engine_round_guard_semantics"]
 
         # T14 part 1: provider request count is exactly the scripted count
         total_requests = sum(len(f.chat.completions.requests) for f in ALL_FAKE_CLIENTS)
@@ -521,6 +533,22 @@ class TestRepetitionAndResume:
             (tmp_path / "out" / b0_id / "trial_manifest.json").read_text(encoding="utf-8")
         )
         assert b0_manifest["comparison_arm_id"] == "B0_BASELINE_ROUTE"
+
+        # the second run's paired records keep BOTH arms — the skipped
+        # arm is restored from its completed artifacts, never lost
+        second_pairs = second["pair_records"]
+        assert len(second_pairs) == 1
+        assert second_pairs[0]["pairing_valid"] is True, second_pairs[0]
+        restored = [t for t in second_pairs[0]["trials"] if t.get("restored_from")]
+        assert [t["comparison_arm_id"] for t in restored] == ["B0_BASELINE_ROUTE"]
+        assert restored[0]["restored_from"] == b0_id
+
+        # third run: a completed ATTEMPT directory counts as complete —
+        # repeated resumes never re-execute a finished trial
+        third = _runner(tmp_path, path).run_pilot(offline_validation=True)
+        assert third["executed_trials"] == 0
+        assert third["skipped_complete"] == 2
+        assert third["all_pairings_valid"] is True
 
 
 # ══════════════════════════════════════════════════════════════════════

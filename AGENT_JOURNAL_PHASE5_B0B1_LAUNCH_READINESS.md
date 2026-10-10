@@ -291,3 +291,96 @@ ENGINEERING_READY=YES；PROVIDER_FREE_E2E_PASS=YES；
 DATASET_CANDIDATE_READY=YES（DRAFT）；STATS_APPROVAL_READY=YES；
 BUDGET_APPROVAL_READY=YES；HUMAN_G5_APPROVED=**NO**；
 REAL_MODEL_EXECUTION_AUTHORIZED=**NO**。
+
+## 阶段 D：独立工程审查（PR #38，2026-10-10）
+
+审查对象：本分支 15 files（+4307/−66）。审查方式：全库调用链检索 +
+逐点代码核对（非自述复述）。
+
+### D.1 第二执行路径审查（重点）
+
+执行入口全库清点（src/scripts 实际调用方）：
+- `trial_executor.execute_trial`（canonical）调用方仅 3 处：
+  canary_runner.py:788、real_pilot_runner.py:788（legacy）、:1045（B0B1）。
+- `AgentExecutionHarness.execute_trial`（control_arms.py:265）→
+  BenchmarkRuntimeBackend.run_tool = adapter.collect_public_observation
+  （合成观测，无模型无真实工具）——**provider-free dry-run 面**；
+  其封装 PilotRunner（pilot_runner.py）全库**零导入方**（死代码）。
+- `ToolMazeRuntimeBackend.execute(driver,…)`（runtime_backend.py）——
+  唯一带 ModelDriver 的替代循环面，但**仅测试引用**，且既有守卫测试
+  test_pilot_has_no_ToolMazeRuntimeBackend_import 断言 RealPilotRunner
+  不得导入它。
+结论：**B0/B1 无隐藏第二执行路径**；live 执行唯一经 canonical
+execute_trial（授权门/预算包装/Judge 同路）。观察项（非缺陷）：
+pilot_runner.py 为无调用方的遗留 dry-run，ToolMazeRuntimeBackend 为
+测试专用面——建议未来清理或加显式弃用标记。
+
+### D.2 双臂预算差异审查（重点）
+
+- BudgetConfig 逐 trial 从同一 self._budgets 构造（real_pilot_runner
+  实验循环），两臂无分支；
+- execute_trial 内 BudgetedModelDriver 包装唯一（拒绝预包装），
+  RecoveryBudgetGate 两臂同为 A3 → max_recovery_attempts=3；
+- engine_round_guard = max_turns + max_model_calls 两臂同值；
+- route_mode 无预算权威（recovery_route.py 文档契约 + 代码无预算字段）；
+- T12 30 项不变量含 root_model_call_budget/root_token_budget/
+  wall_deadline_budget 逐项相等；T7 双臂同预算耗尽语义。
+结论：**无双臂预算差异**。观察项：max_rounds 校验的缺省值 15 与
+BudgetConfig 缺省 30 不一致——实验模式下不可达（预算强制存在），
+legacy 路径不受影响。
+
+### D.3 归因丢失审查（重点）→ 发现 2 项并修复
+
+- **P1（已修）**：execution_provenance（route_policy_fingerprint/
+  route_mode/engine_round_guard/版本号）只存 TrialResult 内存，
+  legacy 与 B0B1 产物落盘清单均不含——归因链在产物层丢失策略指纹。
+  修复：_write_trial_artifacts 增写 execution_provenance.json
+  （create-only，双路径同享）；T13 增断言指纹/route_mode/护栏语义落盘。
+- **P2（已修）**：恢复语义两处缺口——(a) 完成判定只看 base 目录
+  COMPLETE，而中断重跑完成的 trial 落在 __attempt-* 目录，反复恢复
+  会重复执行已完成 trial；(b) 被跳过臂不进 pair_records，恢复运行的
+  配对聚合退化为 "< 2 trials"。修复：_completed_trial_dir（base+attempt
+  发现）+ _restore_completed_trial（从既有产物恢复不变量与配对记录，
+  标注 restored_from，只读不改）；T10 增断言三跑幂等（executed=0/
+  skipped=2）与恢复后 pairing_valid=True。
+
+### D.4 Trial 身份审查
+
+碰撞面：trial_id=exp/task/comparison/repetition 显式拼接，调度前置
+唯一性证明（collision raise）；attempt 目录 uuid4:12（碰撞可忽略）；
+repetition 两位补零对 ≥100 仍唯一。兼容：comparison 缺省=历史公式
+（单测）；execute_trial 交叉校验 identity↔arm↔route_mode。
+结论：无新问题（D.3-P2 即身份相关的恢复面缺口，已修）。
+
+### D.5 授权隔离审查
+
+offline_validation 与审批入口语义独立、不可互换；凭据存在拒绝
+（对抗性回归）；审批记录绑定 manifest_hash。**观察项（如实登记）**：
+authorization 由调用方提供，是程序性审计记录而非密码学边界——
+组织层面的"人工批准"是真正的门；本机制价值在 fail-closed 默认与
+审计痕迹。legacy 路径无审批门（历史兼容设计，行为未变）。
+
+### D.6 回归测试审查
+
+29 项新增测试覆盖 T1–T14 + 对抗性项；缺口（provenance 落盘、
+恢复幂等）即 D.3 两项，已补断言。断言强度复核：T12 逐字段不变量、
+T13 decision_id 回链、T14 网络阻断+请求载荷断言、T11 11 例 fail-closed。
+
+### D.7 审查后验证（真实输出）
+
+```
+$ uv run pytest tests/test_phase5_b0b1_e2e.py \
+    tests/test_phase5_canonical_path.py tests/test_phase5_route_experiment_readiness.py -q
+→ 52 passed (147.80s)
+（完整回归结果见下节补记）
+```
+
+### D.8 审查修复后完整回归（真实输出）
+
+```
+$ uv run pytest -q
+→ 1828 passed, 2 skipped, 6 warnings in 742.61s (0:12:22)，退出码 0
+```
+
+修复提交包含：execution_provenance.json 落盘、恢复幂等与配对恢复、
+T10/T13 扩展断言、本审查记录。推送到 PR #38 分支（不合并）。
