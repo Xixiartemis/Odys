@@ -42,6 +42,7 @@ from typing import Any, Callable, Optional, Sequence
 from .types import (
     BenchmarkName,
     BudgetConfig,
+    ComparisonArm,
     ControlArm,
     GenerationConfig,
     NativeResult,
@@ -49,6 +50,7 @@ from .types import (
     RuntimeTask,
     TaskDescriptor,
     TopologyClass,
+    TrialIdentity,
     TrialStatus,
 )
 from .toolmaze_adapter import ToolMazeAdapter
@@ -156,6 +158,8 @@ def select_20_tasks(
 # -- Pilot manifest schema --------------------------------------------
 
 PILOT_MANIFEST_SCHEMA_VERSION = "phase5-real-pilot-002"
+# Formal B0/B1 recovery-route experiment manifest (Experiment B).
+B0B1_MANIFEST_SCHEMA_VERSION = "phase5-b0b1-experiment-001"
 
 
 def build_pilot_manifest(
@@ -367,6 +371,27 @@ class RealPilotRunner:
         )
         self._seed = self._manifest.get("seed", self._manifest.get("selection_seed", 42))
 
+        # Experiment B (B0/B1) detection — explicit schema discrimination,
+        # never implicit field guessing.  Legacy pilot manifests keep the
+        # original behaviour unchanged.
+        self._route_arms: Optional[list[dict[str, Any]]] = None
+        self._repetitions = int(self._manifest.get("repetitions", 1))
+        if self._repetitions < 1:
+            raise ValueError("repetitions must be >= 1")
+        if self._manifest.get("schema_version") == B0B1_MANIFEST_SCHEMA_VERSION:
+            self._route_arms = self._resolve_route_arms()
+            if "budgets" not in self._manifest and "root_budget" not in self._manifest:
+                raise ValueError(
+                    "B0B1_MANIFEST_BUDGET_MISSING: the formal experiment "
+                    "requires a frozen root budget (budgets/root_budget)"
+                )
+        elif "route_arms" in self._manifest:
+            raise ValueError(
+                "manifest carries 'route_arms' but schema_version is "
+                f"{self._manifest.get('schema_version')!r}, expected "
+                f"{B0B1_MANIFEST_SCHEMA_VERSION!r} — refusing to guess"
+            )
+
         self._preflight = self._resolve_manifest_units()
 
         # Output directory
@@ -447,7 +472,11 @@ class RealPilotRunner:
             "mode_mismatches": sum(1 for m in mismatches if m["reason"] == "mode_mismatch"),
             "file_mismatches": sum(1 for m in mismatches if m["reason"] == "file_mismatch"),
             "mismatches": mismatches,
-            "PILOT_TASK_IDENTITY": "PROVEN" if len(resolved) == 20 and not mismatches else "FAILED",
+            "PILOT_TASK_IDENTITY": (
+                "PROVEN"
+                if len(resolved) == len(self._manifest_tasks) and not mismatches
+                else "FAILED"
+            ),
             "P0_P4_VARIANT_OVERWRITE": "IMPOSSIBLE",
         }
         if mismatches or len(resolved) != len(self._manifest_tasks):
@@ -463,6 +492,198 @@ class RealPilotRunner:
             raise ValueError("live driver must expose resolved_config for provider-lock parity")
         validate_resolved_config(actual, self._provider_lock)
 
+    def _resolve_route_arms(self) -> list[dict[str, Any]]:
+        """Validate and resolve the formal B0/B1 comparison arm definitions.
+
+        The formal experiment only allows B0_BASELINE_ROUTE and
+        B1_ROUTE_V1, both on A3_ODYS_FULL, with route_mode as the unique
+        pre-registered difference.  Any other combination fails closed.
+        """
+        raw = self._manifest.get("route_arms")
+        if not raw:
+            raise ValueError("B0/B1 manifest missing 'route_arms'")
+        seen: set[str] = set()
+        resolved: list[dict[str, Any]] = []
+        for entry in raw:
+            arm_id = str(entry.get("arm_id", ""))
+            route_mode = str(entry.get("route_mode", ""))
+            strategy_arm = str(entry.get("recovery_strategy_arm", ""))
+            try:
+                comparison = ComparisonArm(arm_id)
+            except ValueError as exc:
+                raise ValueError(f"unknown comparison arm: {arm_id!r}") from exc
+            if comparison.route_mode != route_mode:
+                raise ValueError(
+                    f"{arm_id} requires route_mode={comparison.route_mode!r}, "
+                    f"got {route_mode!r}"
+                )
+            if strategy_arm != ControlArm.A3_ODYS_FULL.value:
+                raise ValueError(
+                    "the formal B0/B1 experiment requires both arms to run "
+                    f"A3_ODYS_FULL, got {strategy_arm!r}"
+                )
+            if arm_id in seen:
+                raise ValueError(f"duplicate comparison arm: {arm_id}")
+            seen.add(arm_id)
+            resolved.append({
+                "arm_id": arm_id,
+                "route_mode": route_mode,
+                "recovery_strategy_arm": strategy_arm,
+            })
+        expected = {a.value for a in ComparisonArm}
+        if seen != expected:
+            raise ValueError(
+                f"B0/B1 manifest must define exactly {sorted(expected)}, "
+                f"got {sorted(seen)}"
+            )
+        return resolved
+
+    def _check_b0b1_authorization(
+        self,
+        authorization: Optional[dict[str, Any]],
+        offline_validation: bool,
+    ) -> dict[str, Any]:
+        """Fail-closed authorization gate for the formal experiment.
+
+        - ``offline_validation=True`` is the independent provider-free
+          entry used by tests and preflights.  It never fabricates a
+          human approval status; its results are permanently marked as
+          offline validation and can never enter confirmatory analysis.
+          Fail-closed against mislabeling: refused when a real API
+          credential is present in the environment (offline runs must
+          not be able to emit real traffic that would be recorded as
+          ``real_provider_executed=NO``).
+        - Real execution requires an explicit human approval record bound
+          to this exact manifest hash.  Anything else raises.
+        """
+        import os
+
+        if offline_validation:
+            if os.environ.get("ODYS_AGENT_API_KEY", "").strip():
+                raise PermissionError(
+                    "B0B1_OFFLINE_WITH_REAL_CREDENTIALS: offline validation "
+                    "refuses to run while a real API credential is present — "
+                    "real traffic must never be recorded as fake"
+                )
+            return {
+                "execution_mode": "OFFLINE_VALIDATION",
+                "included_in_confirmatory_analysis": False,
+                "real_provider_executed": "NO",
+            }
+        requires = bool(self._manifest.get("execution_requires_human_approval", True))
+        if requires:
+            if not isinstance(authorization, dict):
+                raise PermissionError(
+                    "B0B1_APPROVAL_REQUIRED: real execution is fail-closed "
+                    "until a human approval record bound to this manifest "
+                    "is provided"
+                )
+            if authorization.get("status") != "HUMAN_APPROVED":
+                raise PermissionError(
+                    "B0B1_APPROVAL_INVALID: authorization.status must be "
+                    "'HUMAN_APPROVED'"
+                )
+            approved_by = authorization.get("approved_by")
+            if not approved_by or not isinstance(approved_by, str):
+                raise PermissionError(
+                    "B0B1_APPROVAL_INVALID: authorization.approved_by is "
+                    "required"
+                )
+            if authorization.get("manifest_hash") != self._manifest.get("manifest_hash"):
+                raise PermissionError(
+                    "B0B1_APPROVAL_MANIFEST_MISMATCH: approval is bound to a "
+                    "different manifest hash"
+                )
+            return {
+                "execution_mode": "HUMAN_APPROVED_EXECUTION",
+                "included_in_confirmatory_analysis": True,
+                "real_provider_executed": "YES",
+                "approved_by": approved_by,
+                "approved_at": authorization.get("approved_at"),
+            }
+        return {
+            "execution_mode": "UNRESTRICTED_MANIFEST",
+            "included_in_confirmatory_analysis": True,
+            "real_provider_executed": "YES",
+        }
+
+    def _build_trial_invariants(
+        self,
+        *,
+        desc: TaskDescriptor,
+        raw_task: Optional[dict[str, Any]],
+        trial_result: TrialResult,
+        trial_id: str,
+        arm: ControlArm,
+    ) -> dict[str, Any]:
+        """Build pairing invariants from a canonical TrialResult.
+
+        Single source of truth shared by the legacy A0–A5 pilot path and
+        the formal B0/B1 experiment path.
+        """
+        runtime_task = self._adapter.build_runtime_task(desc)
+        # Test doubles and legacy adapters may return a mock or a
+        # partial runtime object.  Pairing hashes must remain
+        # structured JSON; never let a mock leak into provenance.
+        if isinstance(runtime_task, RuntimeTask):
+            environment_snapshot = runtime_task.environment_snapshot
+            if not isinstance(environment_snapshot, dict):
+                environment_snapshot = {}
+            runtime_task = runtime_task.model_copy(
+                update={
+                    "visible_tools": trial_result.runtime_tool_schema,
+                    "environment_snapshot": environment_snapshot,
+                }
+            )
+        else:
+            user_input = raw_task.get("user_input", {})
+            if not isinstance(user_input, dict):
+                user_input = {}
+            runtime_task = RuntimeTask(
+                task_id=desc.task_id,
+                objective=str(raw_task.get("task_description", "")),
+                visible_tools=trial_result.runtime_tool_schema,
+                prompt=str(
+                    user_input.get(
+                        "query",
+                        raw_task.get("task_description", ""),
+                    )
+                ),
+                constraints=[],
+                acceptance_criteria=["complete the task as described"],
+                environment_snapshot=user_input,
+                budget=BudgetConfig(
+                    max_turns=int(self._budgets.get("max_turns", 30)),
+                    max_model_calls=int(
+                        self._budgets.get("max_model_calls", 50)
+                    ),
+                    token_budget=self._budgets.get("token_budget"),
+                    deadline_seconds=self._budgets.get(
+                        "deadline_seconds"
+                    ),
+                ),
+            )
+        invariants = ExperimentPairValidator.compute_trial_invariants(
+            experiment_id=self._experiment_id,
+            trial_id=trial_id,
+            adapter=self._adapter,
+            task=runtime_task,
+            generation_config=self._gen_config,
+            arm=arm,
+            perturbation_mode=desc.perturbation_mode.value,
+            fault_source="BENCHMARK_NATIVE",
+            validator_identity=(
+                f"{VALIDATOR_ID}+{PublicEvidenceCompletionValidator().config_hash()}"
+            ),
+            offline_grader_identity="toolmaze-judge+metrics-v1+412f9c3615bfd997af903f6514f716be94a774140975b82c8ff2fd16b6547833",
+        )
+        invariants["seed"] = self._seed
+        invariants["provider_config_hash"] = self._provider_config_hash
+        invariants["environment_snapshot"] = runtime_task.environment_snapshot
+        invariants["strategy_config"] = trial_result.strategy_config
+        invariants["budget_accounting"] = trial_result.provider_usage
+        return invariants
+
     # -- Main execution ------------------------------------------------
 
     def run_pilot(
@@ -470,6 +691,8 @@ class RealPilotRunner:
         *,
         arms: Optional[list[ControlArm]] = None,
         max_rounds: Optional[int] = None,
+        authorization: Optional[dict[str, Any]] = None,
+        offline_validation: bool = False,
     ) -> dict[str, Any]:
         """Run the full pilot experiment.
 
@@ -483,9 +706,20 @@ class RealPilotRunner:
         Parameters
         ----------
         arms : list[ControlArm], optional
-            Arms to run.  Defaults to all six arms.
+            Arms to run.  Defaults to all six arms.  For formal B0/B1
+            manifests the comparison arms are fixed by the manifest and
+            only ``[A3_ODYS_FULL]`` (or None) is accepted.
         max_rounds : int
             Maximum reasoning rounds per trial.
+        authorization : dict, optional
+            Human approval record for the formal B0/B1 experiment
+            (``status="HUMAN_APPROVED"``, ``approved_by``, and the
+            approved ``manifest_hash``).  Fail-closed when absent.
+        offline_validation : bool
+            Independent provider-free entry for tests and preflights.
+            Never fabricates an approval status; results are permanently
+            marked OFFLINE_VALIDATION and excluded from confirmatory
+            analysis.
 
         Returns
         -------
@@ -493,6 +727,18 @@ class RealPilotRunner:
             Experiment summary with per-task results, pairing
             validation, and artifact paths.
         """
+        if self._route_arms is not None:
+            return self._run_b0b1_experiment(
+                arms=arms,
+                max_rounds=max_rounds,
+                authorization=authorization,
+                offline_validation=offline_validation,
+            )
+        if authorization is not None or offline_validation:
+            raise ValueError(
+                "authorization/offline_validation apply only to formal "
+                "B0/B1 experiment manifests"
+            )
         if arms is None:
             arms = list(ControlArm)
 
@@ -551,67 +797,13 @@ class RealPilotRunner:
                     )
 
                     # Build pairing invariants from TrialResult
-                    runtime_task = self._adapter.build_runtime_task(desc)
-                    # Test doubles and legacy adapters may return a mock or a
-                    # partial runtime object.  Pairing hashes must remain
-                    # structured JSON; never let a mock leak into provenance.
-                    if isinstance(runtime_task, RuntimeTask):
-                        environment_snapshot = runtime_task.environment_snapshot
-                        if not isinstance(environment_snapshot, dict):
-                            environment_snapshot = {}
-                        runtime_task = runtime_task.model_copy(
-                            update={
-                                "visible_tools": trial_result.runtime_tool_schema,
-                                "environment_snapshot": environment_snapshot,
-                            }
-                        )
-                    else:
-                        user_input = raw_task.get("user_input", {})
-                        if not isinstance(user_input, dict):
-                            user_input = {}
-                        runtime_task = RuntimeTask(
-                            task_id=desc.task_id,
-                            objective=str(raw_task.get("task_description", "")),
-                            visible_tools=trial_result.runtime_tool_schema,
-                            prompt=str(
-                                user_input.get(
-                                    "query",
-                                    raw_task.get("task_description", ""),
-                                )
-                            ),
-                            constraints=[],
-                            acceptance_criteria=["complete the task as described"],
-                            environment_snapshot=user_input,
-                            budget=BudgetConfig(
-                                max_turns=int(self._budgets.get("max_turns", 30)),
-                                max_model_calls=int(
-                                    self._budgets.get("max_model_calls", 50)
-                                ),
-                                token_budget=self._budgets.get("token_budget"),
-                                deadline_seconds=self._budgets.get(
-                                    "deadline_seconds"
-                                ),
-                            ),
-                        )
-                    invariants = ExperimentPairValidator.compute_trial_invariants(
-                        experiment_id=self._experiment_id,
+                    invariants = self._build_trial_invariants(
+                        desc=desc,
+                        raw_task=raw_task,
+                        trial_result=trial_result,
                         trial_id=trial_id,
-                        adapter=self._adapter,
-                        task=runtime_task,
-                        generation_config=self._gen_config,
                         arm=arm,
-                        perturbation_mode=desc.perturbation_mode.value,
-                        fault_source="BENCHMARK_NATIVE",
-                        validator_identity=(
-                            f"{VALIDATOR_ID}+{PublicEvidenceCompletionValidator().config_hash()}"
-                        ),
-                        offline_grader_identity="toolmaze-judge+metrics-v1+412f9c3615bfd997af903f6514f716be94a774140975b82c8ff2fd16b6547833",
                     )
-                    invariants["seed"] = self._seed
-                    invariants["provider_config_hash"] = self._provider_config_hash
-                    invariants["environment_snapshot"] = runtime_task.environment_snapshot
-                    invariants["strategy_config"] = trial_result.strategy_config
-                    invariants["budget_accounting"] = trial_result.provider_usage
                     trial_manifests.append(invariants)
 
                     arm_results[arm.value] = trial_result.to_dict()
@@ -721,6 +913,287 @@ class RealPilotRunner:
             "output_dir": str(self._output_dir),
         }
 
+    # -- Formal B0/B1 experiment (Experiment B) ------------------------
+
+    def _run_b0b1_experiment(
+        self,
+        *,
+        arms: Optional[list[ControlArm]],
+        max_rounds: Optional[int],
+        authorization: Optional[dict[str, Any]],
+        offline_validation: bool,
+    ) -> dict[str, Any]:
+        """Run the formal B0/B1 paired recovery-route experiment.
+
+        Data flow (single canonical execution path — no private runner):
+        frozen manifest → identity/preflight → deterministic paired
+        schedule → per-trial fresh ModelDriver → canonical
+        ``execute_trial()`` with explicit ``route_mode`` → shared
+        ExecutionAuthorizationGate → shared Judge/validity rules →
+        create-only per-trial artifacts → paired aggregation.
+
+        Both comparison arms run A3_ODYS_FULL with identical budgets and
+        environments; ``route_mode`` is the unique pre-registered policy
+        difference.
+        """
+        if arms is not None and arms != [ControlArm.A3_ODYS_FULL]:
+            raise ValueError(
+                "B0/B1 comparison arms are fixed by the manifest; ablation "
+                "arms must not be passed"
+            )
+        if max_rounds is not None and max_rounds != int(self._budgets.get("max_turns", 15)):
+            raise ValueError("run_pilot(max_rounds) must equal frozen max_turns")
+        execution_mode = self._check_b0b1_authorization(authorization, offline_validation)
+
+        # Deterministic paired schedule + identity uniqueness proof,
+        # computed BEFORE any execution.
+        plan: list[dict[str, Any]] = []
+        seen_trial_ids: set[str] = set()
+        for index, unit in enumerate(self._preflight["units"]):
+            entry = unit["entry"]
+            task_id = entry["task_id"]
+            for rep in range(1, self._repetitions + 1):
+                rotation = (self._seed + index + rep) % len(self._route_arms)
+                ordered = self._route_arms[rotation:] + self._route_arms[:rotation]
+                identities: list[TrialIdentity] = []
+                for arm_def in ordered:
+                    identity = TrialIdentity(
+                        experiment_id=self._experiment_id,
+                        task_id=task_id,
+                        recovery_strategy_arm=ControlArm(
+                            arm_def["recovery_strategy_arm"]
+                        ),
+                        comparison_arm_id=arm_def["arm_id"],
+                        route_mode=arm_def["route_mode"],
+                        repetition_index=rep,
+                    )
+                    if identity.trial_id in seen_trial_ids:
+                        raise ValueError(
+                            f"trial identity collision: {identity.trial_id}"
+                        )
+                    seen_trial_ids.add(identity.trial_id)
+                    identities.append(identity)
+                plan.append({
+                    "unit": unit,
+                    "repetition_index": rep,
+                    "identities": identities,
+                })
+
+        schedule_path = self._output_dir / "experiment_schedule.json"
+        if not schedule_path.exists():
+            _write_json_once(schedule_path, {
+                "seed": self._seed,
+                "repetitions": self._repetitions,
+                "execution_mode": execution_mode,
+                "schedule": [
+                    {
+                        "task_id": item["unit"]["entry"]["task_id"],
+                        "repetition_index": item["repetition_index"],
+                        "trial_ids": [i.trial_id for i in item["identities"]],
+                    }
+                    for item in plan
+                ],
+            })
+
+        # Experiment-level budget guard (fail-closed stop rule).
+        budget_guard = dict(self._manifest.get("experiment_budget") or {})
+        max_total_trials = budget_guard.get("max_total_trials")
+        planned_trials = len(plan) * len(self._route_arms)
+        if max_total_trials is not None and planned_trials > int(max_total_trials):
+            raise ValueError(
+                f"EXPERIMENT_BUDGET_EXCEEDED: planned trials {planned_trials} "
+                f"> max_total_trials {max_total_trials}"
+            )
+        max_total_model_calls = budget_guard.get("max_total_model_calls")
+
+        pair_records: list[dict[str, Any]] = []
+        executed: list[dict[str, Any]] = []
+        errors: list[dict[str, Any]] = []
+        cumulative_model_calls = 0
+        stopped_reason = None
+
+        for item in plan:
+            unit = item["unit"]
+            entry, desc, raw_task = unit["entry"], unit["descriptor"], unit["raw"]
+            task_id = entry["task_id"]
+            rep = item["repetition_index"]
+            pair_invariants: list[dict[str, Any]] = []
+            pair_trials: list[dict[str, Any]] = []
+
+            for identity in item["identities"]:
+                if stopped_reason is not None:
+                    break
+                trial_dir = self._output_dir / identity.trial_id
+                if (trial_dir / "COMPLETE").exists():
+                    executed.append({
+                        "trial_id": identity.trial_id,
+                        "comparison_arm_id": identity.comparison_arm_id,
+                        "route_mode": identity.route_mode,
+                        "status": "ALREADY_COMPLETE_SKIPPED",
+                    })
+                    continue
+
+                budget = BudgetConfig(
+                    max_turns=self._budgets.get("max_turns", 30),
+                    max_model_calls=self._budgets.get("max_model_calls", 50),
+                    token_budget=self._budgets.get("token_budget"),
+                    deadline_seconds=self._budgets.get("deadline_seconds"),
+                )
+                model_driver = self._model_driver_factory()
+                self._assert_provider_config(model_driver)
+                try:
+                    trial_result: TrialResult = execute_trial(
+                        arm=ControlArm(identity.recovery_strategy_arm.value),
+                        task_json=raw_task,
+                        tool_definitions=None,
+                        model_driver=model_driver,
+                        budget=budget,
+                        experiment_id=self._experiment_id,
+                        task_id=task_id,
+                        max_rounds=max_rounds,
+                        route_mode=identity.route_mode,
+                        identity=identity,
+                    )
+                    invariants = self._build_trial_invariants(
+                        desc=desc,
+                        raw_task=raw_task,
+                        trial_result=trial_result,
+                        trial_id=identity.trial_id,
+                        arm=ControlArm(identity.recovery_strategy_arm.value),
+                    )
+                    invariants["comparison_arm_id"] = identity.comparison_arm_id
+                    invariants["route_mode"] = identity.route_mode
+                    invariants["repetition_index"] = identity.repetition_index
+                    invariants["execution_mode"] = execution_mode["execution_mode"]
+                    pair_invariants.append(invariants)
+
+                    self._write_trial_artifacts(
+                        identity.trial_id, desc, invariants, trial_result,
+                        raw_task=raw_task,
+                    )
+
+                    judgement = trial_result.grader_result.get("judgement")
+                    metrics_summary = trial_result.grader_result.get("metrics_summary") or {}
+                    pair_trials.append({
+                        "trial_id": identity.trial_id,
+                        "comparison_arm_id": identity.comparison_arm_id,
+                        "route_mode": identity.route_mode,
+                        "repetition_index": identity.repetition_index,
+                        "validity": trial_result.validity,
+                        "termination_reason": trial_result.termination_reason,
+                        "grader_pass": (judgement or {}).get("pass") if judgement is not None else None,
+                        "tsr": metrics_summary.get("tsr"),
+                        "recovery_routes": [
+                            d.get("route") if isinstance(d, dict) else getattr(d, "route", None)
+                            for d in trial_result.recovery_decisions
+                        ],
+                        "provider_usage": trial_result.provider_usage,
+                    })
+                    calls_used = int(trial_result.provider_usage.get("model_calls_used", 0) or 0)
+                    cumulative_model_calls += calls_used
+                    executed.append({
+                        "trial_id": identity.trial_id,
+                        "comparison_arm_id": identity.comparison_arm_id,
+                        "route_mode": identity.route_mode,
+                        "status": "EXECUTED",
+                        "validity": trial_result.validity,
+                    })
+                    if (
+                        max_total_model_calls is not None
+                        and cumulative_model_calls >= int(max_total_model_calls)
+                    ):
+                        stopped_reason = "EXPERIMENT_BUDGET_EXHAUSTED"
+                except Exception as e:
+                    logger.exception(
+                        "B0/B1 trial failed: trial_id=%s", identity.trial_id
+                    )
+                    errors.append({"trial_id": identity.trial_id, "error": str(e)})
+                    pair_trials.append({
+                        "trial_id": identity.trial_id,
+                        "comparison_arm_id": identity.comparison_arm_id,
+                        "route_mode": identity.route_mode,
+                        "error": str(e),
+                    })
+
+            # Paired validation for this (task, repetition) pair.
+            if len(pair_invariants) >= 2:
+                pairing = self._pair_validator.validate(pair_invariants)
+                paired_manifest = self._pair_validator.generate_paired_manifest(
+                    self._experiment_id, task_id, pair_invariants,
+                )
+                paired_dir = self._output_dir / "paired_manifests"
+                paired_dir.mkdir(exist_ok=True)
+                paired_path = paired_dir / f"{task_id}_r{rep:02d}_paired.json"
+                if not paired_path.exists():
+                    self._artifacts._create_json(paired_path, paired_manifest)
+            else:
+                pairing = {"valid": False, "violations": ["< 2 trials"]}
+
+            pair_records.append({
+                "task_id": task_id,
+                "condition_id": entry.get("condition_id", task_id),
+                "cluster_id": entry.get("cluster_id", task_id.rsplit("_", 1)[0]),
+                "repetition_index": rep,
+                "trials": pair_trials,
+                "pairing_valid": pairing.get("valid", False),
+                "pairing_violations": pairing.get("violations", []),
+            })
+            if stopped_reason is not None:
+                break
+
+        summary = {
+            "schema_version": B0B1_MANIFEST_SCHEMA_VERSION,
+            "experiment_id": self._experiment_id,
+            "experiment_role": "B0B1_EXPERIMENT",
+            "execution_mode": execution_mode,
+            "manifest_hash": self._manifest.get("manifest_hash"),
+            "route_arms": self._route_arms,
+            "strategy_arm": "A3_ODYS_FULL",
+            "unique_difference_surface": "route_mode only (Q3a/Q3b/Q3d rule set)",
+            "repetitions": self._repetitions,
+            "task_count": len(self._task_ids),
+            "planned_trials": planned_trials,
+            "executed_trials": sum(1 for e in executed if e.get("status") == "EXECUTED"),
+            "skipped_complete": sum(
+                1 for e in executed if e.get("status") == "ALREADY_COMPLETE_SKIPPED"
+            ),
+            "errors": len(errors),
+            "stopped_reason": stopped_reason,
+            "cumulative_model_calls": cumulative_model_calls,
+            "pairing_summary": {
+                "pairs": len(pair_records),
+                "all_pairings_valid": all(r["pairing_valid"] for r in pair_records),
+                "total_violations": sum(len(r["pairing_violations"]) for r in pair_records),
+            },
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        manifest_path = self._output_dir / "experiment_manifest.json"
+        if not manifest_path.exists():
+            self._artifacts._create_json(manifest_path, summary)
+        records_path = self._output_dir / "pair_records.json"
+        if not records_path.exists():
+            self._artifacts._create_json(records_path, pair_records)
+        if errors:
+            errors_path = self._output_dir / "errors.json"
+            if not errors_path.exists():
+                self._artifacts._create_json(errors_path, errors)
+
+        return {
+            "experiment_id": self._experiment_id,
+            "execution_mode": execution_mode,
+            "task_count": len(self._task_ids),
+            "repetitions": self._repetitions,
+            "planned_trials": planned_trials,
+            "executed_trials": summary["executed_trials"],
+            "skipped_complete": summary["skipped_complete"],
+            "errors": len(errors),
+            "stopped_reason": stopped_reason,
+            "all_pairings_valid": summary["pairing_summary"]["all_pairings_valid"],
+            "total_violations": summary["pairing_summary"]["total_violations"],
+            "output_dir": str(self._output_dir),
+            "pair_records": pair_records,
+        }
+
     # -- Artifact writing ----------------------------------------------
 
     def _write_trial_artifacts(
@@ -786,8 +1259,13 @@ class RealPilotRunner:
         _write_json_once(trial_dir / "trial_manifest.json", manifest, allow_legacy_objects=True)
 
         # Native result for backward compat with ArtifactWriter
+        tsr_value = trial_result.grader_result.get("metrics_summary", {}).get("tsr")
+        if not isinstance(tsr_value, (int, float)) or isinstance(tsr_value, bool):
+            # Per-perturbation breakdown dicts belong in native_metrics;
+            # the scalar slot only accepts a number (or None).
+            tsr_value = None
         native = NativeResult(
-            tsr=trial_result.grader_result.get("metrics_summary", {}).get("tsr"),
+            tsr=tsr_value,
             raw_score=None,
             native_metrics=trial_result.grader_result.get("metrics_report") or {},
         )

@@ -241,6 +241,335 @@ def build_isolation_report() -> dict:
     }
 
 
+# ── Formal B0/B1 experiment manifest (Experiment B, create-only) ─────
+
+EVALUATOR_IDENTITY_VARIANTS = {
+    # Three recorded variants exist in the repository (see
+    # docs/phase5/B0B1_RUNNER_SOURCE_AUDIT.md P0-5).  None is replaced;
+    # the formal manifest records each with its scope.
+    "E1_legacy_recorded_benchmark_lock": (
+        "412f9c3615bfd997af903f6514f716be94a774140975b82c8ff2fd16b6547833"
+    ),
+    "E2_lf_normalized_canonical": (
+        "74958635c3794bdd1202ad2a35f2d31f9504221905f98b94173d8c87474be740"
+    ),
+    "E3_legacy_recorded_code_freeze": (
+        "412f9c3615bfd997af903f6514f716be94a7741f"
+    ),
+    "scope_note": (
+        "E2 = sha256 over LF-normalized judge.py+metrics.py+sandbox.py "
+        "bytes (canary_runner._hash_files); E1/E3 are historical frozen "
+        "records whose computing script is not in-repo"
+    ),
+}
+
+PREREGISTRATION_DEFAULT = {
+    "protocol_version": "recovery-route-eval-protocol-v1",
+    "primary_metric": "verified_completion_rate",
+    "primary_metric_definition": (
+        "external Judge-verified valid trials / valid trials"
+    ),
+    "judge": "FROZEN_TOOLMAZE (JudgeSystem + MetricsCalculator)",
+    "unique_difference_surface": "route_mode only (Q3a/Q3b/Q3d rule set)",
+    "approval_status": "PENDING_HUMAN_APPROVAL",
+}
+
+
+def build_formal_b0b1_manifest(
+    *,
+    experiment_id: str,
+    pairs: list[dict],
+    repetitions: int = 1,
+    seed: int = SELECTION_SEED,
+    execution_status: str = "PENDING_HUMAN_APPROVAL",
+    experiment_budget: dict | None = None,
+    preregistration: dict | None = None,
+    notes: list[str] | None = None,
+) -> dict:
+    """Build the formal, executable B0/B1 experiment manifest.
+
+    ``pairs`` are task-fault pair execution units, each a dict with at
+    least ``task_id`` (execution-unit id, base+mode), ``base_task_id``,
+    ``complexity``, ``perturbation_mode`` and ``file_path``.  Multiple
+    fault variants of one base task share ``cluster_id`` = base_task_id.
+
+    The manifest satisfies BOTH contracts:
+    - the canonical Runner fields (tasks / arm_definitions / arms /
+      budgets / root_budget / seed / generation_config);
+    - the Experiment B identity fields (route_arms / repetitions /
+      preregistration / evaluator identity variants).
+
+    Create-only: callers must refuse to overwrite existing files.
+    Unapproved runs fail closed at the Runner's authorization gate.
+    """
+    if repetitions < 1:
+        raise ValueError("repetitions must be >= 1")
+    if not pairs:
+        raise ValueError("pairs must not be empty")
+
+    from lhas.phase5.provenance import arm_definitions_snapshot
+
+    task_entries = []
+    seen_condition_ids = set()
+    for pair in pairs:
+        base_task_id = str(pair.get("base_task_id") or str(pair["task_id"]).rsplit("_", 1)[0])
+        mode = str(pair["perturbation_mode"])
+        condition_id = str(pair.get("condition_id") or f"{pair['task_id']}")
+        if condition_id in seen_condition_ids:
+            raise ValueError(f"duplicate task-fault pair identity: {condition_id}")
+        seen_condition_ids.add(condition_id)
+        task_entries.append({
+            "task_id": pair["task_id"],
+            "base_task_id": base_task_id,
+            "condition_id": condition_id,
+            "cluster_id": str(pair.get("cluster_id") or base_task_id),
+            "complexity": pair.get("complexity", ""),
+            "perturbation_mode": mode,
+            "file_path": pair.get("file_path", ""),
+            "task_sha256": pair.get("task_sha256"),
+        })
+
+    arm_defs = arm_definitions_snapshot()
+    manifest = {
+        "schema_version": "phase5-b0b1-experiment-001",
+        "experiment_id": experiment_id,
+        "experiment_role": "B0B1_EXPERIMENT",
+        "execution_status": execution_status,
+        "execution_requires_human_approval": True,
+        "real_provider_executed": "NO",
+        "benchmark": dict(BENCHMARK_IDENTITY),
+        "evaluator_identity_variants": dict(EVALUATOR_IDENTITY_VARIANTS),
+        "generation_config": dict(GENERATION_CONFIG),
+        "root_budget": dict(ROOT_BUDGET),
+        "budgets": dict(ROOT_BUDGET),
+        "route_arms": [dict(a) for a in ROUTE_ARMS],
+        "arms": ["A3_ODYS_FULL"],
+        "arm_definitions": {"A3_ODYS_FULL": arm_defs["A3_ODYS_FULL"]},
+        "strategy_arm": "A3_ODYS_FULL",
+        "unique_difference_surface": "route_mode only (Q3a/Q3b/Q3d rule set)",
+        "seed": seed,
+        "selection_seed": seed,
+        "repetitions": repetitions,
+        "tasks": task_entries,
+        "selected_task_ids": [t["task_id"] for t in task_entries],
+        "task_count": len(task_entries),
+        "paired_design": (
+            f"each task-fault pair runs B0 and B1 {repetitions} time(s)"
+        ),
+        "preregistration": dict(preregistration or PREREGISTRATION_DEFAULT),
+        "notes": list(notes or []),
+    }
+    if experiment_budget:
+        manifest["experiment_budget"] = dict(experiment_budget)
+    manifest["manifest_hash"] = manifest_hash(manifest)
+    return manifest
+
+
+# ── Candidate task-fault pair sampling (B1 stage) ────────────────────
+
+# Base-level dev exclusion: every P0–P4 variant of a base task whose
+# description/fixtures were exposed to development is contaminated at
+# the base level.  The 4 dev units belong to these 3 bases.
+DEV_BASE_TASK_IDS = ["C1_task_015", "C1_task_036", "C1_task_082"]
+FAULT_MODES = ["P1", "P2", "P3", "P4"]  # P0 = no perturbation, not a fault
+TOPOLOGIES = ["C1", "C2", "C3", "C4"]
+
+HISTORICAL_MANIFEST_FILES = (
+    "phase5-real-pilot-001.json",
+    "phase5-real-pilot-002.json",
+    "phase5-real-pilot-003.json",
+)
+
+
+def historical_manifest_bases() -> set[str]:
+    """Base task ids referenced by ANY historical dev manifest.
+
+    Strictest contamination reading: a task chosen for a historical dev
+    experiment (even if never executed) stays out of the final set.
+    """
+    manifests_dir = _ROOT / "experiments" / "phase5" / "manifests"
+    bases: set[str] = set()
+    for name in HISTORICAL_MANIFEST_FILES:
+        path = manifests_dir / name
+        if not path.is_file():
+            continue
+        data = json.loads(path.read_text(encoding="utf-8"))
+        for unit in data.get("selected_task_ids", []):
+            bases.add(str(unit).rsplit("_", 1)[0])
+    for path in manifests_dir.glob("phase5-real-canary-*.json"):
+        data = json.loads(path.read_text(encoding="utf-8"))
+        task = data.get("task") or {}
+        if isinstance(task, dict) and task.get("task_id"):
+            bases.add(str(task["task_id"]).rsplit("_", 1)[0])
+    return bases
+
+PERTURBATION_SEMANTICS = {
+    "P0": {"label": "NP (no perturbation)", "is_fault": False,
+           "fault_trigger_confirmable": False,
+           "note": "no fault injected; MUST NOT enter the fault-recovery denominator"},
+    "P1": {"label": "explicit-transient", "is_fault": True,
+           "fault_trigger_confirmable": True,
+           "note": "explicit transient failure evidence in tool results"},
+    "P2": {"label": "explicit-permanent", "is_fault": True,
+           "fault_trigger_confirmable": True,
+           "note": "explicit permanent failure evidence in tool results"},
+    "P3": {"label": "implicit-transient", "is_fault": True,
+           "fault_trigger_confirmable": True,
+           "note": "implicit fault; corruption_type + perturbation_point in task file"},
+    "P4": {"label": "implicit-permanent", "is_fault": True,
+           "fault_trigger_confirmable": True,
+           "note": "implicit fault; corruption_type + perturbation_point in task file"},
+}
+
+
+def candidate_pool() -> list[dict]:
+    """Dev-base- and history-base-excluded P1–P4 task-fault pair pool
+    (read-only over the frozen dataset)."""
+    from lhas.phase5.toolmaze_adapter import ToolMazeAdapter
+
+    excluded_bases = set(DEV_BASE_TASK_IDS) | historical_manifest_bases()
+    adapter = ToolMazeAdapter()
+    pool = []
+    for desc in adapter.enumerate_tasks():
+        mode = desc.perturbation_mode.value
+        if mode not in FAULT_MODES:
+            continue
+        base = desc.native_metadata.get("original_task_id") or desc.task_id.rsplit("_", 1)[0]
+        if base in excluded_bases:
+            continue
+        raw = adapter._find_task(desc.task_id) or {}
+        pool.append({
+            "task_id": desc.task_id,
+            "base_task_id": base,
+            "complexity": desc.complexity or "",
+            "perturbation_mode": mode,
+            "file_path": str(raw.get("_source_file", "")),
+            "corruption_type": str(raw.get("corruption_type", "")),
+            "perturbation_point": raw.get("perturbation_point"),
+        })
+    pool.sort(key=lambda p: p["task_id"])
+    return pool
+
+
+def sample_pairs(pool: list[dict], *, total: int, seed: int) -> dict:
+    """Deterministic stratified draw: C1–C4 × P1–P4 cells, one variant
+    per base task (cluster_id unique), fixed seed, auditable cell log."""
+    rng = random.Random(seed)
+    per_cell = max(1, total // (len(TOPOLOGIES) * len(FAULT_MODES)))
+    used_bases: set[str] = set()
+    cells: dict[str, list[dict]] = {}
+    for pair in pool:
+        cells.setdefault(f"{pair['complexity']}_{pair['perturbation_mode']}", []).append(pair)
+
+    selected: list[dict] = []
+    audit: list[dict] = []
+    for cell in sorted(cells):
+        available = [p for p in cells[cell] if p["base_task_id"] not in used_bases]
+        chosen: list[dict] = []
+        for _ in range(min(per_cell, len(available))):
+            pick = rng.choice(available)
+            available.remove(pick)
+            used_bases.add(pick["base_task_id"])
+            chosen.append(pick)
+        selected.extend(chosen)
+        audit.append({
+            "cell": cell,
+            "pool_size": len(cells[cell]),
+            "selected": [p["task_id"] for p in chosen],
+        })
+
+    extras_needed = total - len(selected)
+    order = sorted(cells)
+    rng.shuffle(order)
+    for cell in order:
+        if extras_needed <= 0:
+            break
+        available = [p for p in cells[cell] if p["base_task_id"] not in used_bases]
+        if not available:
+            continue
+        pick = rng.choice(available)
+        used_bases.add(pick["base_task_id"])
+        selected.append(pick)
+        for entry in audit:
+            if entry["cell"] == cell:
+                entry["selected"].append(pick["task_id"])
+        extras_needed -= 1
+
+    selected.sort(key=lambda p: p["task_id"])
+    return {
+        "selected": selected,
+        "cell_audit": audit,
+        "seed": seed,
+        "requested_total": total,
+        "selected_total": len(selected),
+        "distinct_base_tasks": len({p["base_task_id"] for p in selected}),
+    }
+
+
+def build_candidates_report(*, seed: int = SELECTION_SEED) -> dict:
+    """Feasibility for 30/50/100 task-fault pairs + the 50-pair draft."""
+    pool = candidate_pool()
+    draws = {n: sample_pairs(pool, total=n, seed=seed) for n in (30, 50, 100)}
+    return {
+        "schema_version": "phase5-b0b1-candidates-001",
+        "status": "DRAFT_NOT_APPROVED",
+        "selection_seed": seed,
+        "perturbation_semantics": PERTURBATION_SEMANTICS,
+        "exclusion_rules": [
+            "P0 pairs excluded (no fault — cannot enter fault-recovery denominator)",
+            f"base-task-level dev exclusion: {sorted(DEV_BASE_TASK_IDS)} (all P0-P4 variants)",
+            "base-task-level historical-manifest exclusion: every base listed in "
+            "pilot-001/002/003 or canary manifests (strictest reading — even "
+            "manifest-listed but never-executed tasks stay out)",
+            "at most one fault variant per base task (cluster_id unique)",
+        ],
+        "raw_pool_pairs": 2000,
+        "raw_pool_bases": 400,
+        "pool_after_exclusion_pairs": len(pool),
+        "pool_after_exclusion_bases": len({p["base_task_id"] for p in pool}),
+        "feasibility": {
+            str(n): {
+                "feasible": draws[n]["selected_total"] == n,
+                "selected_total": draws[n]["selected_total"],
+                "distinct_base_tasks": draws[n]["distinct_base_tasks"],
+                "cells_covered": sum(1 for a in draws[n]["cell_audit"] if a["selected"]),
+            }
+            for n in (30, 50, 100)
+        },
+        "candidate_50": draws[50],
+    }
+
+
+def build_candidate_manifest_50(*, report: dict) -> dict:
+    pairs = []
+    for pair in report["candidate_50"]["selected"]:
+        entry = dict(pair)
+        raw_path = (
+            _ROOT / "experiments" / "phase5" / "benchmarks" / "toolmaze"
+            / "data" / pair["file_path"]
+        )
+        entry["task_sha256"] = (
+            hashlib.sha256(raw_path.read_bytes()).hexdigest()
+            if raw_path.is_file() else None
+        )
+        entry["condition_id"] = pair["task_id"]
+        entry["cluster_id"] = pair["base_task_id"]
+        pairs.append(entry)
+    return build_formal_b0b1_manifest(
+        experiment_id="phase5-b0b1-candidates-50-draft-001",
+        pairs=pairs,
+        repetitions=1,
+        seed=report["selection_seed"],
+        execution_status="DRAFT_CANDIDATE_PENDING_APPROVAL",
+        notes=[
+            "DRAFT candidate set for G5 approval — NOT approved, NOT executed.",
+            "50 task-fault pairs over 50 distinct base tasks (cluster_id unique).",
+            "Fault-recovery success rate denominator counts P1-P4 pairs only;",
+            "per-trial fault trigger must be confirmed by evidence first.",
+        ],
+    )
+
+
 def build_experiment_manifest(*, isolation: dict) -> dict:
     selected = isolation["selected_task_ids"]
     overlap = isolation["dev_overlap"]
@@ -278,13 +607,39 @@ def build_experiment_manifest(*, isolation: dict) -> dict:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--mode", choices=["qualification", "experiment", "isolation"], required=True)
+    parser.add_argument(
+        "--mode",
+        choices=["qualification", "experiment", "isolation", "candidates"],
+        required=True,
+    )
     parser.add_argument("--task-id", default="C1_task_036_P4")
     args = parser.parse_args()
 
     manifests_dir = _ROOT / "experiments" / "phase5" / "manifests"
     readiness_dir = _ROOT / "experiments" / "phase5" / "readiness"
     readiness_dir.mkdir(parents=True, exist_ok=True)
+
+    if args.mode == "candidates":
+        report = build_candidates_report()
+        report_out = readiness_dir / "b0b1_candidates_feasibility.json"
+        if report_out.exists():
+            raise SystemExit(f"refusing to overwrite existing report: {report_out}")
+        report_out.write_text(
+            json.dumps(report, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+        manifest = build_candidate_manifest_50(report=report)
+        out = manifests_dir / f"{manifest['experiment_id']}.json"
+        if out.exists():
+            raise SystemExit(f"refusing to overwrite existing manifest: {out}")
+        out.write_text(
+            json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+        print(json.dumps({
+            "wrote": [str(report_out), str(out)],
+            "feasibility": report["feasibility"],
+            "manifest_hash": manifest["manifest_hash"],
+        }, sort_keys=True))
+        return
 
     if args.mode == "isolation":
         report = build_isolation_report()

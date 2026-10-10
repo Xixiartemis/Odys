@@ -836,8 +836,31 @@ class ExperimentPairValidator:
         violations: list[str] = []
 
         for i, trial in enumerate(trials[1:], 1):
-            # ── arm MUST differ ────────────────────────────────────
-            if trial.get("arm") == reference.get("arm"):
+            ref_cmp = reference.get("comparison_arm_id")
+            tri_cmp = trial.get("comparison_arm_id")
+            if ref_cmp is not None or tri_cmp is not None:
+                # ── Experiment B (B0/B1) pairing ────────────────
+                # Same recovery strategy arm by design; the
+                # pre-registered route_mode must be the unique policy
+                # difference and the comparison arms must differ.
+                if trial.get("arm") != reference.get("arm"):
+                    violations.append(
+                        f"trial {i}: recovery strategy arm must be identical "
+                        f"for B0/B1 pairs "
+                        f"({trial.get('arm')!r} != {reference.get('arm')!r})"
+                    )
+                if not ref_cmp or not tri_cmp or ref_cmp == tri_cmp:
+                    violations.append(
+                        f"trial {i}: comparison_arm_id must differ "
+                        f"({tri_cmp!r} vs {ref_cmp!r})"
+                    )
+                if trial.get("route_mode") == reference.get("route_mode"):
+                    violations.append(
+                        f"trial {i}: route_mode must be the unique policy "
+                        f"difference (both {trial.get('route_mode')!r})"
+                    )
+            # ── arm MUST differ (legacy A0–A5 pairing) ────────────
+            elif trial.get("arm") == reference.get("arm"):
                 violations.append(
                     f"trial {i}: arm must differ from reference "
                     f"(both {trial.get('arm')})"

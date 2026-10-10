@@ -1,0 +1,652 @@
+{
+  "schema_version": "phase5-b0b1-experiment-001",
+  "experiment_id": "phase5-b0b1-candidates-50-draft-001",
+  "experiment_role": "B0B1_EXPERIMENT",
+  "execution_status": "DRAFT_CANDIDATE_PENDING_APPROVAL",
+  "execution_requires_human_approval": true,
+  "real_provider_executed": "NO",
+  "benchmark": {
+    "name": "toolmaze",
+    "revision": "ef0798a",
+    "repository_url": "https://github.com/Zhudongsheng75/ToolMaze",
+    "commit_sha": "ef0798aa7f31ac9b33403254b1ef76e8673305fa",
+    "dataset_revision": "08b0239a98b0b07839d673f5bc0ef7d836db9296",
+    "dataset_digest": "9fcd7d7ec3c06afcee098877cca1ae8c29b87a1102be4b365a1055f824a76bc8",
+    "evaluator_digest": "74958635c3794bdd1202ad2a35f2d31f9504221905f98b94173d8c87474be740",
+    "dataset_hash_scope": "data/perturbed_tasks/**/*.json sorted by POSIX path, concatenated bytes"
+  },
+  "evaluator_identity_variants": {
+    "E1_legacy_recorded_benchmark_lock": "412f9c3615bfd997af903f6514f716be94a774140975b82c8ff2fd16b6547833",
+    "E2_lf_normalized_canonical": "74958635c3794bdd1202ad2a35f2d31f9504221905f98b94173d8c87474be740",
+    "E3_legacy_recorded_code_freeze": "412f9c3615bfd997af903f6514f716be94a7741f",
+    "scope_note": "E2 = sha256 over LF-normalized judge.py+metrics.py+sandbox.py bytes (canary_runner._hash_files); E1/E3 are historical frozen records whose computing script is not in-repo"
+  },
+  "generation_config": {
+    "model_id": "mimo-v2.5",
+    "provider": "mimo",
+    "thinking_enabled": true,
+    "effective_temperature": 1.0,
+    "effective_top_p": 0.95,
+    "sampling_parameters_sent": false,
+    "max_completion_tokens": 4096,
+    "request_timeout": 120,
+    "sdk_max_retries": 0,
+    "supports_tool_choice": false,
+    "supports_parallel_tool_calls": false
+  },
+  "root_budget": {
+    "max_model_calls": 50,
+    "max_turns": 15,
+    "max_tokens": 100000,
+    "token_budget": 100000
+  },
+  "budgets": {
+    "max_model_calls": 50,
+    "max_turns": 15,
+    "max_tokens": 100000,
+    "token_budget": 100000
+  },
+  "route_arms": [
+    {
+      "arm_id": "B0_BASELINE_ROUTE",
+      "route_mode": "baseline",
+      "recovery_strategy_arm": "A3_ODYS_FULL",
+      "description": "frozen baseline recovery routing (Q3a/Q3b/Q3d disabled)"
+    },
+    {
+      "arm_id": "B1_ROUTE_V1",
+      "route_mode": "route-v1",
+      "recovery_strategy_arm": "A3_ODYS_FULL",
+      "description": "recovery-route-v1 (full Q0-Q3 rule set)"
+    }
+  ],
+  "arms": [
+    "A3_ODYS_FULL"
+  ],
+  "arm_definitions": {
+    "A3_ODYS_FULL": {
+      "arm": "A3_ODYS_FULL",
+      "description": "Full Odys recovery + validation + observable progress.",
+      "recovery_enabled": true,
+      "validator_enabled": true,
+      "observable_progress_enabled": true,
+      "recovery_budget_policy_enabled": true
+    }
+  },
+  "strategy_arm": "A3_ODYS_FULL",
+  "unique_difference_surface": "route_mode only (Q3a/Q3b/Q3d rule set)",
+  "seed": 42,
+  "selection_seed": 42,
+  "repetitions": 1,
+  "tasks": [
+    {
+      "task_id": "C1_task_005_P1",
+      "base_task_id": "C1_task_005",
+      "condition_id": "C1_task_005_P1",
+      "cluster_id": "C1_task_005",
+      "complexity": "C1",
+      "perturbation_mode": "P1",
+      "file_path": "perturbed_tasks\\c1\\C1_task_005_P1.json",
+      "task_sha256": "8654774ab21f9b83910302c80c172c96f3ca8dba25f7c4bfee4dfc64be3d9f6e"
+    },
+    {
+      "task_id": "C1_task_014_P4",
+      "base_task_id": "C1_task_014",
+      "condition_id": "C1_task_014_P4",
+      "cluster_id": "C1_task_014",
+      "complexity": "C1",
+      "perturbation_mode": "P4",
+      "file_path": "perturbed_tasks\\c1\\C1_task_014_P4.json",
+      "task_sha256": "011d2e320283fb5ed901641e1699fa0908e5028227d48ff246aa97aa611b9ab0"
+    },
+    {
+      "task_id": "C1_task_017_P1",
+      "base_task_id": "C1_task_017",
+      "condition_id": "C1_task_017_P1",
+      "cluster_id": "C1_task_017",
+      "complexity": "C1",
+      "perturbation_mode": "P1",
+      "file_path": "perturbed_tasks\\c1\\C1_task_017_P1.json",
+      "task_sha256": "dba99e9c8737f10c741aa68001f7db046c31a0391b4fd58da22b3b4697acf7aa"
+    },
+    {
+      "task_id": "C1_task_018_P3",
+      "base_task_id": "C1_task_018",
+      "condition_id": "C1_task_018_P3",
+      "cluster_id": "C1_task_018",
+      "complexity": "C1",
+      "perturbation_mode": "P3",
+      "file_path": "perturbed_tasks\\c1\\C1_task_018_P3.json",
+      "task_sha256": "068f8535f365c3edb621d4fa09de0a7cc437b83ebf7d2f30799692f1fd3a7207"
+    },
+    {
+      "task_id": "C1_task_022_P3",
+      "base_task_id": "C1_task_022",
+      "condition_id": "C1_task_022_P3",
+      "cluster_id": "C1_task_022",
+      "complexity": "C1",
+      "perturbation_mode": "P3",
+      "file_path": "perturbed_tasks\\c1\\C1_task_022_P3.json",
+      "task_sha256": "325aee285695d849aea2b4decf6a9ad6dabfbd62bcc55ac2820c6967191818d3"
+    },
+    {
+      "task_id": "C1_task_033_P2",
+      "base_task_id": "C1_task_033",
+      "condition_id": "C1_task_033_P2",
+      "cluster_id": "C1_task_033",
+      "complexity": "C1",
+      "perturbation_mode": "P2",
+      "file_path": "perturbed_tasks\\c1\\C1_task_033_P2.json",
+      "task_sha256": "23dc1962753edf01d06671efaf6af819526cc29ec80594937285b350d5a2710e"
+    },
+    {
+      "task_id": "C1_task_037_P2",
+      "base_task_id": "C1_task_037",
+      "condition_id": "C1_task_037_P2",
+      "cluster_id": "C1_task_037",
+      "complexity": "C1",
+      "perturbation_mode": "P2",
+      "file_path": "perturbed_tasks\\c1\\C1_task_037_P2.json",
+      "task_sha256": "22a53b16e29fa66e3eed0f73b32b1c8e6340af98b80ac0bc5320aa629b130cc4"
+    },
+    {
+      "task_id": "C1_task_040_P3",
+      "base_task_id": "C1_task_040",
+      "condition_id": "C1_task_040_P3",
+      "cluster_id": "C1_task_040",
+      "complexity": "C1",
+      "perturbation_mode": "P3",
+      "file_path": "perturbed_tasks\\c1\\C1_task_040_P3.json",
+      "task_sha256": "83a0565598ba19f6271c130084e4ccbd77c1f3165fae30f6c2804bbcdbcbf02e"
+    },
+    {
+      "task_id": "C1_task_041_P2",
+      "base_task_id": "C1_task_041",
+      "condition_id": "C1_task_041_P2",
+      "cluster_id": "C1_task_041",
+      "complexity": "C1",
+      "perturbation_mode": "P2",
+      "file_path": "perturbed_tasks\\c1\\C1_task_041_P2.json",
+      "task_sha256": "8dced082af048d58c0bb6fdab010adf8f9325941bb4133011a0f889a4f14301a"
+    },
+    {
+      "task_id": "C1_task_080_P4",
+      "base_task_id": "C1_task_080",
+      "condition_id": "C1_task_080_P4",
+      "cluster_id": "C1_task_080",
+      "complexity": "C1",
+      "perturbation_mode": "P4",
+      "file_path": "perturbed_tasks\\c1\\C1_task_080_P4.json",
+      "task_sha256": "bc7ed80a58c4172607bc6ead4359f9490703225fee84f53514cce5dc10118c3a"
+    },
+    {
+      "task_id": "C1_task_086_P1",
+      "base_task_id": "C1_task_086",
+      "condition_id": "C1_task_086_P1",
+      "cluster_id": "C1_task_086",
+      "complexity": "C1",
+      "perturbation_mode": "P1",
+      "file_path": "perturbed_tasks\\c1\\C1_task_086_P1.json",
+      "task_sha256": "72c4ee6c6df5c241b87b5066b4bf07e9fb909abb40399be3347ab2cffefbe1bd"
+    },
+    {
+      "task_id": "C1_task_090_P4",
+      "base_task_id": "C1_task_090",
+      "condition_id": "C1_task_090_P4",
+      "cluster_id": "C1_task_090",
+      "complexity": "C1",
+      "perturbation_mode": "P4",
+      "file_path": "perturbed_tasks\\c1\\C1_task_090_P4.json",
+      "task_sha256": "bcc3f0e8b82ae023630d9945f6fa9232db3ca2f1b78232e5ed19a1e1bbc920b1"
+    },
+    {
+      "task_id": "C1_task_100_P3",
+      "base_task_id": "C1_task_100",
+      "condition_id": "C1_task_100_P3",
+      "cluster_id": "C1_task_100",
+      "complexity": "C1",
+      "perturbation_mode": "P3",
+      "file_path": "perturbed_tasks\\c1\\C1_task_100_P3.json",
+      "task_sha256": "38460f68848f60da6251acd5b25946443d942265675bc92e2536b669206bb3b9"
+    },
+    {
+      "task_id": "C2_task_004_P1",
+      "base_task_id": "C2_task_004",
+      "condition_id": "C2_task_004_P1",
+      "cluster_id": "C2_task_004",
+      "complexity": "C2",
+      "perturbation_mode": "P1",
+      "file_path": "perturbed_tasks\\c2\\C2_task_004_P1.json",
+      "task_sha256": "7090d132225e234f524b0f4557dcdfe3e20bdd6e2fdd14b7fba3f69abfe9f20b"
+    },
+    {
+      "task_id": "C2_task_005_P1",
+      "base_task_id": "C2_task_005",
+      "condition_id": "C2_task_005_P1",
+      "cluster_id": "C2_task_005",
+      "complexity": "C2",
+      "perturbation_mode": "P1",
+      "file_path": "perturbed_tasks\\c2\\C2_task_005_P1.json",
+      "task_sha256": "e1576343a303cd707e073c19ecbbf3750835b9f389a7c6afc21aa9afc51c5b98"
+    },
+    {
+      "task_id": "C2_task_006_P3",
+      "base_task_id": "C2_task_006",
+      "condition_id": "C2_task_006_P3",
+      "cluster_id": "C2_task_006",
+      "complexity": "C2",
+      "perturbation_mode": "P3",
+      "file_path": "perturbed_tasks\\c2\\C2_task_006_P3.json",
+      "task_sha256": "ba84d54d85b38169d4595928fb3c4f75720758c19a6006406aac69b9a58703e3"
+    },
+    {
+      "task_id": "C2_task_015_P2",
+      "base_task_id": "C2_task_015",
+      "condition_id": "C2_task_015_P2",
+      "cluster_id": "C2_task_015",
+      "complexity": "C2",
+      "perturbation_mode": "P2",
+      "file_path": "perturbed_tasks\\c2\\C2_task_015_P2.json",
+      "task_sha256": "38807e2f5f8120ca6ef153390bc1b3b3f9cd3d6596dd4431aa6eafe637e63257"
+    },
+    {
+      "task_id": "C2_task_034_P4",
+      "base_task_id": "C2_task_034",
+      "condition_id": "C2_task_034_P4",
+      "cluster_id": "C2_task_034",
+      "complexity": "C2",
+      "perturbation_mode": "P4",
+      "file_path": "perturbed_tasks\\c2\\C2_task_034_P4.json",
+      "task_sha256": "52f28d640e28f10c57344bbcc2c5e9f5514e1c550b45713baa79a56d34a08e91"
+    },
+    {
+      "task_id": "C2_task_035_P2",
+      "base_task_id": "C2_task_035",
+      "condition_id": "C2_task_035_P2",
+      "cluster_id": "C2_task_035",
+      "complexity": "C2",
+      "perturbation_mode": "P2",
+      "file_path": "perturbed_tasks\\c2\\C2_task_035_P2.json",
+      "task_sha256": "8b6568a3f02eed04d3d3c092b5cbfedefdf0c3d7ddfb1e9a7c11f53973384577"
+    },
+    {
+      "task_id": "C2_task_038_P2",
+      "base_task_id": "C2_task_038",
+      "condition_id": "C2_task_038_P2",
+      "cluster_id": "C2_task_038",
+      "complexity": "C2",
+      "perturbation_mode": "P2",
+      "file_path": "perturbed_tasks\\c2\\C2_task_038_P2.json",
+      "task_sha256": "c9e0312f52c68727304c9a0fe848a353532d3d677049630d643358096255110b"
+    },
+    {
+      "task_id": "C2_task_059_P1",
+      "base_task_id": "C2_task_059",
+      "condition_id": "C2_task_059_P1",
+      "cluster_id": "C2_task_059",
+      "complexity": "C2",
+      "perturbation_mode": "P1",
+      "file_path": "perturbed_tasks\\c2\\C2_task_059_P1.json",
+      "task_sha256": "ffe8598573ad9280e07c7aadceb0cd74b428dd3859e62613bfe1264e73cc1df2"
+    },
+    {
+      "task_id": "C2_task_075_P3",
+      "base_task_id": "C2_task_075",
+      "condition_id": "C2_task_075_P3",
+      "cluster_id": "C2_task_075",
+      "complexity": "C2",
+      "perturbation_mode": "P3",
+      "file_path": "perturbed_tasks\\c2\\C2_task_075_P3.json",
+      "task_sha256": "ac2ad2983452fe442abbac5b59346134dfbbfc43d3d3ae4f5cb9c0a4a903a371"
+    },
+    {
+      "task_id": "C2_task_084_P4",
+      "base_task_id": "C2_task_084",
+      "condition_id": "C2_task_084_P4",
+      "cluster_id": "C2_task_084",
+      "complexity": "C2",
+      "perturbation_mode": "P4",
+      "file_path": "perturbed_tasks\\c2\\C2_task_084_P4.json",
+      "task_sha256": "ca68602030b20e6df1dfd27bc920f4e1babcfa09df885ba322a197de2988ddcd"
+    },
+    {
+      "task_id": "C2_task_089_P3",
+      "base_task_id": "C2_task_089",
+      "condition_id": "C2_task_089_P3",
+      "cluster_id": "C2_task_089",
+      "complexity": "C2",
+      "perturbation_mode": "P3",
+      "file_path": "perturbed_tasks\\c2\\C2_task_089_P3.json",
+      "task_sha256": "74e8008894095f09d20376c2df20e7e61a1a4bf9059f6015bb789ee138d20c55"
+    },
+    {
+      "task_id": "C2_task_100_P4",
+      "base_task_id": "C2_task_100",
+      "condition_id": "C2_task_100_P4",
+      "cluster_id": "C2_task_100",
+      "complexity": "C2",
+      "perturbation_mode": "P4",
+      "file_path": "perturbed_tasks\\c2\\C2_task_100_P4.json",
+      "task_sha256": "257d8b2322b43238ea06fcbc0a1a41eb1f91fe87829e4f2c8bca670ab0a552e5"
+    },
+    {
+      "task_id": "C3_task_001_P3",
+      "base_task_id": "C3_task_001",
+      "condition_id": "C3_task_001_P3",
+      "cluster_id": "C3_task_001",
+      "complexity": "C3",
+      "perturbation_mode": "P3",
+      "file_path": "perturbed_tasks\\c3\\C3_task_001_P3.json",
+      "task_sha256": "61841aefc12a3d90be8f7923ca8978611c067df1cbefb77be445ccb238cb1eac"
+    },
+    {
+      "task_id": "C3_task_015_P2",
+      "base_task_id": "C3_task_015",
+      "condition_id": "C3_task_015_P2",
+      "cluster_id": "C3_task_015",
+      "complexity": "C3",
+      "perturbation_mode": "P2",
+      "file_path": "perturbed_tasks\\c3\\C3_task_015_P2.json",
+      "task_sha256": "255c6748dba5e9d49a42c50c369df8ec4a51951adcbe50796c45dc8dc41706a3"
+    },
+    {
+      "task_id": "C3_task_023_P3",
+      "base_task_id": "C3_task_023",
+      "condition_id": "C3_task_023_P3",
+      "cluster_id": "C3_task_023",
+      "complexity": "C3",
+      "perturbation_mode": "P3",
+      "file_path": "perturbed_tasks\\c3\\C3_task_023_P3.json",
+      "task_sha256": "827f2a35f767100f126e8ef8ac52c6b325b3e16e9deb552f3017adc1660282ea"
+    },
+    {
+      "task_id": "C3_task_030_P2",
+      "base_task_id": "C3_task_030",
+      "condition_id": "C3_task_030_P2",
+      "cluster_id": "C3_task_030",
+      "complexity": "C3",
+      "perturbation_mode": "P2",
+      "file_path": "perturbed_tasks\\c3\\C3_task_030_P2.json",
+      "task_sha256": "bcef2df8d5686fbff243a04bc64b465891bac0f4dc5d5be918b5ea06eb6916b1"
+    },
+    {
+      "task_id": "C3_task_038_P3",
+      "base_task_id": "C3_task_038",
+      "condition_id": "C3_task_038_P3",
+      "cluster_id": "C3_task_038",
+      "complexity": "C3",
+      "perturbation_mode": "P3",
+      "file_path": "perturbed_tasks\\c3\\C3_task_038_P3.json",
+      "task_sha256": "95fc936e1927596b713a1152ee08612a57210ed9e9ff14869c751798b9fba84c"
+    },
+    {
+      "task_id": "C3_task_041_P4",
+      "base_task_id": "C3_task_041",
+      "condition_id": "C3_task_041_P4",
+      "cluster_id": "C3_task_041",
+      "complexity": "C3",
+      "perturbation_mode": "P4",
+      "file_path": "perturbed_tasks\\c3\\C3_task_041_P4.json",
+      "task_sha256": "2dbfdf1d365c675b51c32dcd9b1f2d9701c90da61ac0e021cec05f33c959cce9"
+    },
+    {
+      "task_id": "C3_task_049_P4",
+      "base_task_id": "C3_task_049",
+      "condition_id": "C3_task_049_P4",
+      "cluster_id": "C3_task_049",
+      "complexity": "C3",
+      "perturbation_mode": "P4",
+      "file_path": "perturbed_tasks\\c3\\C3_task_049_P4.json",
+      "task_sha256": "03a26f36811d9078ea3ba6d6058e35d2e5c9f282a89255b0725c80e05f5ebefe"
+    },
+    {
+      "task_id": "C3_task_055_P1",
+      "base_task_id": "C3_task_055",
+      "condition_id": "C3_task_055_P1",
+      "cluster_id": "C3_task_055",
+      "complexity": "C3",
+      "perturbation_mode": "P1",
+      "file_path": "perturbed_tasks\\c3\\C3_task_055_P1.json",
+      "task_sha256": "76fd8a92e22bbecdd07d05c2747555f8982cbfcc474e4ccf12af01bb87cb036c"
+    },
+    {
+      "task_id": "C3_task_061_P2",
+      "base_task_id": "C3_task_061",
+      "condition_id": "C3_task_061_P2",
+      "cluster_id": "C3_task_061",
+      "complexity": "C3",
+      "perturbation_mode": "P2",
+      "file_path": "perturbed_tasks\\c3\\C3_task_061_P2.json",
+      "task_sha256": "11e87e0689ff3e1b286d2c1ab82bcf03c3f06b0969e5ff8b09fde97f4bec87e7"
+    },
+    {
+      "task_id": "C3_task_062_P4",
+      "base_task_id": "C3_task_062",
+      "condition_id": "C3_task_062_P4",
+      "cluster_id": "C3_task_062",
+      "complexity": "C3",
+      "perturbation_mode": "P4",
+      "file_path": "perturbed_tasks\\c3\\C3_task_062_P4.json",
+      "task_sha256": "2b14dab7c7db068d512694aae2633e58e7125eb591fb9665a83ec9a02868b5e1"
+    },
+    {
+      "task_id": "C3_task_072_P1",
+      "base_task_id": "C3_task_072",
+      "condition_id": "C3_task_072_P1",
+      "cluster_id": "C3_task_072",
+      "complexity": "C3",
+      "perturbation_mode": "P1",
+      "file_path": "perturbed_tasks\\c3\\C3_task_072_P1.json",
+      "task_sha256": "b72459702af97b4cbd03a37e99f89ad85c4e14f605005c6f17e28be32636e471"
+    },
+    {
+      "task_id": "C3_task_083_P2",
+      "base_task_id": "C3_task_083",
+      "condition_id": "C3_task_083_P2",
+      "cluster_id": "C3_task_083",
+      "complexity": "C3",
+      "perturbation_mode": "P2",
+      "file_path": "perturbed_tasks\\c3\\C3_task_083_P2.json",
+      "task_sha256": "7240f8ecb76fa24cbd331087b9611e29386d9ec08434f86cc76042c99d0334ad"
+    },
+    {
+      "task_id": "C3_task_094_P1",
+      "base_task_id": "C3_task_094",
+      "condition_id": "C3_task_094_P1",
+      "cluster_id": "C3_task_094",
+      "complexity": "C3",
+      "perturbation_mode": "P1",
+      "file_path": "perturbed_tasks\\c3\\C3_task_094_P1.json",
+      "task_sha256": "2f17fac1c63c94e56e6b69ac54b735b3f80f8286922c44332674e98cf9ab2652"
+    },
+    {
+      "task_id": "C4_task_008_P4",
+      "base_task_id": "C4_task_008",
+      "condition_id": "C4_task_008_P4",
+      "cluster_id": "C4_task_008",
+      "complexity": "C4",
+      "perturbation_mode": "P4",
+      "file_path": "perturbed_tasks\\c4\\C4_task_008_P4.json",
+      "task_sha256": "b65f0903711366871e9c9d54371daa904e0963a4681ba889cbc2b71624f0ddd4"
+    },
+    {
+      "task_id": "C4_task_015_P2",
+      "base_task_id": "C4_task_015",
+      "condition_id": "C4_task_015_P2",
+      "cluster_id": "C4_task_015",
+      "complexity": "C4",
+      "perturbation_mode": "P2",
+      "file_path": "perturbed_tasks\\c4\\C4_task_015_P2.json",
+      "task_sha256": "7ee3c56cbc2c3ad40d0787b48957b0962247818bd69503036d8686f3ed018ef4"
+    },
+    {
+      "task_id": "C4_task_017_P2",
+      "base_task_id": "C4_task_017",
+      "condition_id": "C4_task_017_P2",
+      "cluster_id": "C4_task_017",
+      "complexity": "C4",
+      "perturbation_mode": "P2",
+      "file_path": "perturbed_tasks\\c4\\C4_task_017_P2.json",
+      "task_sha256": "a73d57da8662e00a40102823f60e884bf5bac9736c7b48aaeb06a1c668ec632e"
+    },
+    {
+      "task_id": "C4_task_018_P3",
+      "base_task_id": "C4_task_018",
+      "condition_id": "C4_task_018_P3",
+      "cluster_id": "C4_task_018",
+      "complexity": "C4",
+      "perturbation_mode": "P3",
+      "file_path": "perturbed_tasks\\c4\\C4_task_018_P3.json",
+      "task_sha256": "9a8abb8dcacaa5bec40f65f53eb8cc8df99633f8f910982325050a931c06ef1f"
+    },
+    {
+      "task_id": "C4_task_023_P1",
+      "base_task_id": "C4_task_023",
+      "condition_id": "C4_task_023_P1",
+      "cluster_id": "C4_task_023",
+      "complexity": "C4",
+      "perturbation_mode": "P1",
+      "file_path": "perturbed_tasks\\c4\\C4_task_023_P1.json",
+      "task_sha256": "eecdd5fbbaaf7e5cfbfcd85f9c9a96a85d150d627edcb64c5cc16b74410cda9f"
+    },
+    {
+      "task_id": "C4_task_033_P1",
+      "base_task_id": "C4_task_033",
+      "condition_id": "C4_task_033_P1",
+      "cluster_id": "C4_task_033",
+      "complexity": "C4",
+      "perturbation_mode": "P1",
+      "file_path": "perturbed_tasks\\c4\\C4_task_033_P1.json",
+      "task_sha256": "c8a4ebe88b212a505bda67885048ca5c2887c402cb5b776b5765eb6bc66e7b99"
+    },
+    {
+      "task_id": "C4_task_043_P4",
+      "base_task_id": "C4_task_043",
+      "condition_id": "C4_task_043_P4",
+      "cluster_id": "C4_task_043",
+      "complexity": "C4",
+      "perturbation_mode": "P4",
+      "file_path": "perturbed_tasks\\c4\\C4_task_043_P4.json",
+      "task_sha256": "accdc66151eba593a4d5b673655aa44730be47fd8a81c37b0cb129921f9ffd73"
+    },
+    {
+      "task_id": "C4_task_050_P1",
+      "base_task_id": "C4_task_050",
+      "condition_id": "C4_task_050_P1",
+      "cluster_id": "C4_task_050",
+      "complexity": "C4",
+      "perturbation_mode": "P1",
+      "file_path": "perturbed_tasks\\c4\\C4_task_050_P1.json",
+      "task_sha256": "06646cf6635f41d60173f8a082917acf557eb1ddbd70346abf71e517560d2bb4"
+    },
+    {
+      "task_id": "C4_task_056_P3",
+      "base_task_id": "C4_task_056",
+      "condition_id": "C4_task_056_P3",
+      "cluster_id": "C4_task_056",
+      "complexity": "C4",
+      "perturbation_mode": "P3",
+      "file_path": "perturbed_tasks\\c4\\C4_task_056_P3.json",
+      "task_sha256": "45ca87334b223483e963d2860ee8415f0f1294d503710b06e565d7a5dd3a89da"
+    },
+    {
+      "task_id": "C4_task_057_P3",
+      "base_task_id": "C4_task_057",
+      "condition_id": "C4_task_057_P3",
+      "cluster_id": "C4_task_057",
+      "complexity": "C4",
+      "perturbation_mode": "P3",
+      "file_path": "perturbed_tasks\\c4\\C4_task_057_P3.json",
+      "task_sha256": "24b2a7da2bf9010d842d4af4ade0b14733019e3f19e8c7f210ae6294e77f9403"
+    },
+    {
+      "task_id": "C4_task_059_P2",
+      "base_task_id": "C4_task_059",
+      "condition_id": "C4_task_059_P2",
+      "cluster_id": "C4_task_059",
+      "complexity": "C4",
+      "perturbation_mode": "P2",
+      "file_path": "perturbed_tasks\\c4\\C4_task_059_P2.json",
+      "task_sha256": "2448debba0911600100f4a21ad88e723614b8f8818a833d6abc9221bbac0de6f"
+    },
+    {
+      "task_id": "C4_task_092_P4",
+      "base_task_id": "C4_task_092",
+      "condition_id": "C4_task_092_P4",
+      "cluster_id": "C4_task_092",
+      "complexity": "C4",
+      "perturbation_mode": "P4",
+      "file_path": "perturbed_tasks\\c4\\C4_task_092_P4.json",
+      "task_sha256": "dc711c3be739aa2aba88af5ebb3df4b2425fa3c499d9338672a0e6bee39830c5"
+    }
+  ],
+  "selected_task_ids": [
+    "C1_task_005_P1",
+    "C1_task_014_P4",
+    "C1_task_017_P1",
+    "C1_task_018_P3",
+    "C1_task_022_P3",
+    "C1_task_033_P2",
+    "C1_task_037_P2",
+    "C1_task_040_P3",
+    "C1_task_041_P2",
+    "C1_task_080_P4",
+    "C1_task_086_P1",
+    "C1_task_090_P4",
+    "C1_task_100_P3",
+    "C2_task_004_P1",
+    "C2_task_005_P1",
+    "C2_task_006_P3",
+    "C2_task_015_P2",
+    "C2_task_034_P4",
+    "C2_task_035_P2",
+    "C2_task_038_P2",
+    "C2_task_059_P1",
+    "C2_task_075_P3",
+    "C2_task_084_P4",
+    "C2_task_089_P3",
+    "C2_task_100_P4",
+    "C3_task_001_P3",
+    "C3_task_015_P2",
+    "C3_task_023_P3",
+    "C3_task_030_P2",
+    "C3_task_038_P3",
+    "C3_task_041_P4",
+    "C3_task_049_P4",
+    "C3_task_055_P1",
+    "C3_task_061_P2",
+    "C3_task_062_P4",
+    "C3_task_072_P1",
+    "C3_task_083_P2",
+    "C3_task_094_P1",
+    "C4_task_008_P4",
+    "C4_task_015_P2",
+    "C4_task_017_P2",
+    "C4_task_018_P3",
+    "C4_task_023_P1",
+    "C4_task_033_P1",
+    "C4_task_043_P4",
+    "C4_task_050_P1",
+    "C4_task_056_P3",
+    "C4_task_057_P3",
+    "C4_task_059_P2",
+    "C4_task_092_P4"
+  ],
+  "task_count": 50,
+  "paired_design": "each task-fault pair runs B0 and B1 1 time(s)",
+  "preregistration": {
+    "protocol_version": "recovery-route-eval-protocol-v1",
+    "primary_metric": "verified_completion_rate",
+    "primary_metric_definition": "external Judge-verified valid trials / valid trials",
+    "judge": "FROZEN_TOOLMAZE (JudgeSystem + MetricsCalculator)",
+    "unique_difference_surface": "route_mode only (Q3a/Q3b/Q3d rule set)",
+    "approval_status": "PENDING_HUMAN_APPROVAL"
+  },
+  "notes": [
+    "DRAFT candidate set for G5 approval — NOT approved, NOT executed.",
+    "50 task-fault pairs over 50 distinct base tasks (cluster_id unique).",
+    "Fault-recovery success rate denominator counts P1-P4 pairs only;",
+    "per-trial fault trigger must be confirmed by evidence first."
+  ],
+  "manifest_hash": "5c1c5a45fd1a0bf621f0b97b0b262f86636e08cd584c1c8f5fb45013c83bd51b"
+}
