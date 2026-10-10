@@ -36,6 +36,7 @@ from .types import (
     PolicyExecutionError,
     ProgressObserverExecutionError,
     RuntimeValidatorExecutionError,
+    TrialIdentity,
 )
 from .firewall import FirewallViolation, OfflineGraderFirewall
 
@@ -166,6 +167,7 @@ def execute_trial(
     task_id: str,
     max_rounds: Optional[int] = None,
     route_mode: str = "route-v1",
+    identity: Optional[TrialIdentity] = None,
 ) -> TrialResult:
     """Execute a single trial through the canonical path.
 
@@ -177,8 +179,27 @@ def execute_trial(
     - Wraps it with BudgetedModelDriver HERE (single canonical owner)
     - Enforces max_model_calls, max_turns
     - Enforces token_budget and deadline_seconds when configured
+
+    ``identity`` is the explicit experiment identity seam (Experiment B):
+    when provided, the trial/run identifiers are derived from it and
+    cross-checked against ``arm``/``route_mode``; when omitted the
+    historical identifier formula is kept unchanged.
     """
-    trial_id = f"{experiment_id}_{task_id}_{arm.value}"
+    if identity is not None:
+        if identity.recovery_strategy_arm != arm:
+            raise ValueError(
+                f"identity.recovery_strategy_arm "
+                f"{identity.recovery_strategy_arm.value} disagrees with "
+                f"arm {arm.value}"
+            )
+        if identity.route_mode != route_mode:
+            raise ValueError(
+                f"identity.route_mode {identity.route_mode!r} disagrees "
+                f"with route_mode {route_mode!r}"
+            )
+        trial_id = identity.trial_id
+    else:
+        trial_id = f"{experiment_id}_{task_id}_{arm.value}"
     result = TrialResult(trial_id=trial_id, task_id=task_id, arm=arm.value)
 
     # ── Canonical root-budget wrapping ──
@@ -386,6 +407,9 @@ def execute_trial(
         engine_round_guard=budget.max_turns + budget.max_model_calls,
         route_mode=route_mode,
     )
+    if identity is not None:
+        result.execution_provenance["comparison_arm_id"] = identity.comparison_arm_id
+        result.execution_provenance["repetition_index"] = identity.repetition_index
     result.public_tool_observations = [
         {
             "step": o.step,

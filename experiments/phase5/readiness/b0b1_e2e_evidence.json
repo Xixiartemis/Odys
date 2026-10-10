@@ -1,0 +1,39 @@
+{
+  "schema_version": "phase5-b0b1-e2e-evidence-001",
+  "generated_at": "2026-10-10",
+  "branch": "feat/phase5-b0b1-experiment-readiness",
+  "test_file": "tests/test_phase5_b0b1_e2e.py",
+  "command": "uv run pytest tests/test_phase5_b0b1_e2e.py -q",
+  "exit_code": 0,
+  "passed": 28,
+  "failed": 0,
+  "skipped": 0,
+  "duration_seconds": 130.55,
+  "real_provider_requests": 0,
+  "network_block": "non-loopback connect/create_connection denied (T14)",
+  "dataset_scope": "dev-set task C1_task_036_P4 only; final candidate set never run",
+  "frozen_assets_modified": false,
+  "scenarios": [
+    {"id": "T1", "name": "plain_success", "test": "TestPairedRun::test_t1_t8_t12_t13_paired_run", "result": "PASS", "notes": "both arms VALID/completed, 0 recovery decisions, identical judge results, 2 fake provider requests per trial"},
+    {"id": "T2", "name": "transient_failure", "test": "TestRecoveryRouteScenarios::test_t2_transient_failure_bounded_legal_retry + test_t2_transient_basis_retries_same_action", "result": "PASS", "notes": "legal bounded retry family both arms, identical budget accounting; RETRY_SAME/TRANSIENT_BASIS verified at frozen decision layer (finding F1)"},
+    {"id": "T3", "name": "permanent_failure", "test": "TestRecoveryRouteScenarios::test_t3_permanent_failure_replan_only_in_b1", "result": "PASS", "notes": "B1 REPLAN (Q3a), B0 passthrough, no REPLAN; decision ids traceable into control events"},
+    {"id": "T4", "name": "no_progress_loop", "test": "TestRecoveryRouteScenarios::test_t4_no_progress_loop_bounded_in_both_arms", "result": "PASS", "notes": "B1 Q3b enhancement fired; B0 bounded by shared gate NO_PROGRESS_RETRY; <=4 recovery decisions both arms"},
+    {"id": "T5", "name": "state_change", "test": "TestRecoveryRouteScenarios::test_t5_observed_state_change_recorded_and_honest + test_t5_q3d_route_semantics_at_decision_layer", "result": "PASS", "notes": "OBSERVED_CHANGE grounded and recorded; Q3d route semantics at frozen decision layer (finding F1)"},
+    {"id": "T6", "name": "unmet_precondition", "test": "TestSharedGateAndBudget::test_t6_unmet_precondition_blocks_confirm", "result": "PASS", "notes": "booking_ready=false: confirm not executed; identical DEPENDENCY_PRECONDITION_UNRESOLVED interception both arms"},
+    {"id": "T7", "name": "budget_exhaustion", "test": "TestSharedGateAndBudget::test_t7_root_budget_hard_limit_shared", "result": "PASS", "notes": "MODEL_CALL_BUDGET_EXHAUSTED and VALID both arms; root budget never exceeded"},
+    {"id": "T8", "name": "identity_isolation", "test": "TestPairedRun::test_t1_t8_t12_t13_paired_run", "result": "PASS", "notes": "distinct trial_id/run_id/dirs for B0/B1 of same task"},
+    {"id": "T9", "name": "repetitions", "test": "TestRepetitionAndResume::test_t9_repetitions_get_distinct_identities", "result": "PASS", "notes": "repetitions=2 -> 4 unique identities, paired manifests split per repetition"},
+    {"id": "T10", "name": "interrupt_resume", "test": "TestRepetitionAndResume::test_t10_interrupt_and_resume_no_double_count", "result": "PASS", "notes": "completed arm skipped, interrupted arm re-executed once into a NEW attempt dir; no double count; no cross-arm attribution"},
+    {"id": "T11", "name": "invalid_manifest", "test": "TestInvalidManifests (8) + TestAuthorization (3)", "result": "PASS", "notes": "all fail-closed: schema/route_mode/arm/budget/hash/duplicate/fingerprint/missing route_arms/approval"},
+    {"id": "T12", "name": "unique_difference", "test": "TestPairedRun::test_t1_t8_t12_t13_paired_run", "result": "PASS", "notes": "all ExperimentPairValidator invariant fields equal; difference limited to route_mode + comparison identity"},
+    {"id": "T13", "name": "attribution_chain", "test": "TestPairedRun::test_t1_t8_t12_t13_paired_run", "result": "PASS", "notes": "manifest_hash -> pair -> trial -> decision_id -> control events -> judge -> provider usage"},
+    {"id": "T14", "name": "zero_provider_requests", "test": "TestZeroRealRequests::test_t14_no_network_escape", "result": "PASS", "notes": "0 non-loopback connection attempts; only counted fake-client traffic; no temperature/top_p/seed in request payloads"}
+  ],
+  "findings": [
+    {"id": "F1", "severity": "SCOPE", "summary": "rule c (retry_with_context passthrough/honour) preempts Q3c/Q3d for A3 proposals; Q3a/Q3b are the observable B0/B1 route differences in the A3 pipeline"},
+    {"id": "F2", "severity": "BUG_FIXED", "summary": "_write_trial_artifacts crashed on dict-valued tsr from the frozen metrics report; scalar slot now None for non-numeric, full dict kept in native_metrics"},
+    {"id": "F3", "severity": "INFO", "summary": "re-run of an incomplete trial lands in a new __attempt-* dir (create-only), never rewriting the base dir"},
+    {"id": "F4", "severity": "INFO", "summary": "Windows asyncio socketpair fallback connects loopback; network blocks must allow loopback"},
+    {"id": "F5", "severity": "INFO", "summary": "A3 completion validator requires positive public evidence (explicit success/SIDE_EFFECT_CONFIRMED) to ACCEPT"}
+  ]
+}

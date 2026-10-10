@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Optional, Protocol, Sequence, runtime_checkable
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 # ── Enums ────────────────────────────────────────────────────────────
@@ -48,6 +48,26 @@ class ControlArm(str, Enum):
     A3_ODYS_FULL = "A3_ODYS_FULL"
     A4_ODYS_MINUS_OBSERVABLE_PROGRESS = "A4_ODYS_MINUS_OBSERVABLE_PROGRESS"
     A5_ODYS_MINUS_RECOVERY_BUDGET_POLICY = "A5_ODYS_MINUS_RECOVERY_BUDGET_POLICY"
+
+
+class ComparisonArm(str, Enum):
+    """Experiment B comparison arms (recovery-route experiment only).
+
+    Both arms run the SAME recovery strategy (A3_ODYS_FULL).  The only
+    pre-registered difference is the ``route_mode`` (the Q3a/Q3b/Q3d
+    rule set): B0 passes the strategy proposal through unchanged, B1 is
+    the frozen route-v1 behaviour.  These are NOT ablation arms and must
+    never be expressed as A0–A5 variants.
+    """
+    B0_BASELINE_ROUTE = "B0_BASELINE_ROUTE"
+    B1_ROUTE_V1 = "B1_ROUTE_V1"
+
+    @property
+    def route_mode(self) -> str:
+        return {
+            ComparisonArm.B0_BASELINE_ROUTE: "baseline",
+            ComparisonArm.B1_ROUTE_V1: "route-v1",
+        }[self]
 
 
 class FaultSource(str, Enum):
@@ -109,6 +129,72 @@ class BudgetConfig(BaseModel):
     max_model_calls: int = Field(ge=1)
     token_budget: Optional[int] = None
     deadline_seconds: Optional[float] = None
+
+
+class TrialIdentity(BaseModel):
+    """Explicit experiment identity of a single trial execution unit.
+
+    Identity is derived from explicit parameters — never from implicit
+    string guessing.  Backward compatibility: when ``comparison_arm_id``
+    is None the derived ``trial_id`` equals the historical formula
+    ``{experiment_id}_{task_id}_{recovery_strategy_arm}`` used by
+    CanaryRunner and the A0–A5 pilots, so legacy trials keep their
+    exact identifiers and artifact layout.
+
+    For Experiment B (B0/B1) the identity additionally carries the
+    comparison arm and the repetition index so that:
+    - B0 and B1 of the same task never share a trial_id / run_id;
+    - repetitions never overwrite earlier runs;
+    - events, recovery decisions and Judge results of one execution
+      carry one consistent identity.
+    """
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    experiment_id: str
+    task_id: str
+    recovery_strategy_arm: ControlArm
+    comparison_arm_id: Optional[str] = None
+    route_mode: str = "route-v1"
+    repetition_index: int = Field(default=1, ge=1)
+
+    @field_validator("route_mode")
+    @classmethod
+    def _check_route_mode(cls, value: str) -> str:
+        if value not in ("route-v1", "baseline"):
+            raise ValueError(f"unknown route mode: {value!r}")
+        return value
+
+    @model_validator(mode="after")
+    def _check_comparison_consistency(self) -> "TrialIdentity":
+        if self.comparison_arm_id is not None:
+            try:
+                expected = ComparisonArm(self.comparison_arm_id).route_mode
+            except ValueError as exc:
+                raise ValueError(
+                    f"unknown comparison arm: {self.comparison_arm_id!r}"
+                ) from exc
+            if expected != self.route_mode:
+                raise ValueError(
+                    f"comparison arm {self.comparison_arm_id} requires "
+                    f"route_mode={expected!r}, got {self.route_mode!r}"
+                )
+        return self
+
+    @property
+    def trial_id(self) -> str:
+        if self.comparison_arm_id is None:
+            return (
+                f"{self.experiment_id}_{self.task_id}_"
+                f"{self.recovery_strategy_arm.value}"
+            )
+        return (
+            f"{self.experiment_id}_{self.task_id}_"
+            f"{self.comparison_arm_id}_r{self.repetition_index:02d}"
+        )
+
+    @property
+    def run_id(self) -> str:
+        return f"trial-{self.trial_id}"
 
 
 class RuntimeTask(BaseModel):

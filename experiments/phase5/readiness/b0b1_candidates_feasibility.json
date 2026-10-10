@@ -1,0 +1,673 @@
+{
+  "schema_version": "phase5-b0b1-candidates-001",
+  "status": "DRAFT_NOT_APPROVED",
+  "selection_seed": 42,
+  "perturbation_semantics": {
+    "P0": {
+      "label": "NP (no perturbation)",
+      "is_fault": false,
+      "fault_trigger_confirmable": false,
+      "note": "no fault injected; MUST NOT enter the fault-recovery denominator"
+    },
+    "P1": {
+      "label": "explicit-transient",
+      "is_fault": true,
+      "fault_trigger_confirmable": true,
+      "note": "explicit transient failure evidence in tool results"
+    },
+    "P2": {
+      "label": "explicit-permanent",
+      "is_fault": true,
+      "fault_trigger_confirmable": true,
+      "note": "explicit permanent failure evidence in tool results"
+    },
+    "P3": {
+      "label": "implicit-transient",
+      "is_fault": true,
+      "fault_trigger_confirmable": true,
+      "note": "implicit fault; corruption_type + perturbation_point in task file"
+    },
+    "P4": {
+      "label": "implicit-permanent",
+      "is_fault": true,
+      "fault_trigger_confirmable": true,
+      "note": "implicit fault; corruption_type + perturbation_point in task file"
+    }
+  },
+  "exclusion_rules": [
+    "P0 pairs excluded (no fault — cannot enter fault-recovery denominator)",
+    "base-task-level dev exclusion: ['C1_task_015', 'C1_task_036', 'C1_task_082'] (all P0-P4 variants)",
+    "base-task-level historical-manifest exclusion: every base listed in pilot-001/002/003 or canary manifests (strictest reading — even manifest-listed but never-executed tasks stay out)",
+    "at most one fault variant per base task (cluster_id unique)"
+  ],
+  "raw_pool_pairs": 2000,
+  "raw_pool_bases": 400,
+  "pool_after_exclusion_pairs": 1520,
+  "pool_after_exclusion_bases": 380,
+  "feasibility": {
+    "30": {
+      "feasible": true,
+      "selected_total": 30,
+      "distinct_base_tasks": 30,
+      "cells_covered": 16
+    },
+    "50": {
+      "feasible": true,
+      "selected_total": 50,
+      "distinct_base_tasks": 50,
+      "cells_covered": 16
+    },
+    "100": {
+      "feasible": true,
+      "selected_total": 100,
+      "distinct_base_tasks": 100,
+      "cells_covered": 16
+    }
+  },
+  "candidate_50": {
+    "selected": [
+      {
+        "task_id": "C1_task_005_P1",
+        "base_task_id": "C1_task_005",
+        "complexity": "C1",
+        "perturbation_mode": "P1",
+        "file_path": "perturbed_tasks\\c1\\C1_task_005_P1.json",
+        "corruption_type": "",
+        "perturbation_point": 3
+      },
+      {
+        "task_id": "C1_task_014_P4",
+        "base_task_id": "C1_task_014",
+        "complexity": "C1",
+        "perturbation_mode": "P4",
+        "file_path": "perturbed_tasks\\c1\\C1_task_014_P4.json",
+        "corruption_type": "internal_contradiction",
+        "perturbation_point": 4
+      },
+      {
+        "task_id": "C1_task_017_P1",
+        "base_task_id": "C1_task_017",
+        "complexity": "C1",
+        "perturbation_mode": "P1",
+        "file_path": "perturbed_tasks\\c1\\C1_task_017_P1.json",
+        "corruption_type": "",
+        "perturbation_point": 2
+      },
+      {
+        "task_id": "C1_task_018_P3",
+        "base_task_id": "C1_task_018",
+        "complexity": "C1",
+        "perturbation_mode": "P3",
+        "file_path": "perturbed_tasks\\c1\\C1_task_018_P3.json",
+        "corruption_type": "internal_contradiction",
+        "perturbation_point": 4
+      },
+      {
+        "task_id": "C1_task_022_P3",
+        "base_task_id": "C1_task_022",
+        "complexity": "C1",
+        "perturbation_mode": "P3",
+        "file_path": "perturbed_tasks\\c1\\C1_task_022_P3.json",
+        "corruption_type": "missing_required_fields",
+        "perturbation_point": 3
+      },
+      {
+        "task_id": "C1_task_033_P2",
+        "base_task_id": "C1_task_033",
+        "complexity": "C1",
+        "perturbation_mode": "P2",
+        "file_path": "perturbed_tasks\\c1\\C1_task_033_P2.json",
+        "corruption_type": "",
+        "perturbation_point": 3
+      },
+      {
+        "task_id": "C1_task_037_P2",
+        "base_task_id": "C1_task_037",
+        "complexity": "C1",
+        "perturbation_mode": "P2",
+        "file_path": "perturbed_tasks\\c1\\C1_task_037_P2.json",
+        "corruption_type": "",
+        "perturbation_point": 4
+      },
+      {
+        "task_id": "C1_task_040_P3",
+        "base_task_id": "C1_task_040",
+        "complexity": "C1",
+        "perturbation_mode": "P3",
+        "file_path": "perturbed_tasks\\c1\\C1_task_040_P3.json",
+        "corruption_type": "irrelevant_response",
+        "perturbation_point": 2
+      },
+      {
+        "task_id": "C1_task_041_P2",
+        "base_task_id": "C1_task_041",
+        "complexity": "C1",
+        "perturbation_mode": "P2",
+        "file_path": "perturbed_tasks\\c1\\C1_task_041_P2.json",
+        "corruption_type": "",
+        "perturbation_point": 3
+      },
+      {
+        "task_id": "C1_task_080_P4",
+        "base_task_id": "C1_task_080",
+        "complexity": "C1",
+        "perturbation_mode": "P4",
+        "file_path": "perturbed_tasks\\c1\\C1_task_080_P4.json",
+        "corruption_type": "logic_violation",
+        "perturbation_point": 3
+      },
+      {
+        "task_id": "C1_task_086_P1",
+        "base_task_id": "C1_task_086",
+        "complexity": "C1",
+        "perturbation_mode": "P1",
+        "file_path": "perturbed_tasks\\c1\\C1_task_086_P1.json",
+        "corruption_type": "",
+        "perturbation_point": 3
+      },
+      {
+        "task_id": "C1_task_090_P4",
+        "base_task_id": "C1_task_090",
+        "complexity": "C1",
+        "perturbation_mode": "P4",
+        "file_path": "perturbed_tasks\\c1\\C1_task_090_P4.json",
+        "corruption_type": "tool_leakage",
+        "perturbation_point": 2
+      },
+      {
+        "task_id": "C1_task_100_P3",
+        "base_task_id": "C1_task_100",
+        "complexity": "C1",
+        "perturbation_mode": "P3",
+        "file_path": "perturbed_tasks\\c1\\C1_task_100_P3.json",
+        "corruption_type": "logic_violation",
+        "perturbation_point": 3
+      },
+      {
+        "task_id": "C2_task_004_P1",
+        "base_task_id": "C2_task_004",
+        "complexity": "C2",
+        "perturbation_mode": "P1",
+        "file_path": "perturbed_tasks\\c2\\C2_task_004_P1.json",
+        "corruption_type": "",
+        "perturbation_point": 1
+      },
+      {
+        "task_id": "C2_task_005_P1",
+        "base_task_id": "C2_task_005",
+        "complexity": "C2",
+        "perturbation_mode": "P1",
+        "file_path": "perturbed_tasks\\c2\\C2_task_005_P1.json",
+        "corruption_type": "",
+        "perturbation_point": 1
+      },
+      {
+        "task_id": "C2_task_006_P3",
+        "base_task_id": "C2_task_006",
+        "complexity": "C2",
+        "perturbation_mode": "P3",
+        "file_path": "perturbed_tasks\\c2\\C2_task_006_P3.json",
+        "corruption_type": "logic_violation",
+        "perturbation_point": 2
+      },
+      {
+        "task_id": "C2_task_015_P2",
+        "base_task_id": "C2_task_015",
+        "complexity": "C2",
+        "perturbation_mode": "P2",
+        "file_path": "perturbed_tasks\\c2\\C2_task_015_P2.json",
+        "corruption_type": "",
+        "perturbation_point": 2
+      },
+      {
+        "task_id": "C2_task_034_P4",
+        "base_task_id": "C2_task_034",
+        "complexity": "C2",
+        "perturbation_mode": "P4",
+        "file_path": "perturbed_tasks\\c2\\C2_task_034_P4.json",
+        "corruption_type": "fact_contradiction",
+        "perturbation_point": 1
+      },
+      {
+        "task_id": "C2_task_035_P2",
+        "base_task_id": "C2_task_035",
+        "complexity": "C2",
+        "perturbation_mode": "P2",
+        "file_path": "perturbed_tasks\\c2\\C2_task_035_P2.json",
+        "corruption_type": "",
+        "perturbation_point": 3
+      },
+      {
+        "task_id": "C2_task_038_P2",
+        "base_task_id": "C2_task_038",
+        "complexity": "C2",
+        "perturbation_mode": "P2",
+        "file_path": "perturbed_tasks\\c2\\C2_task_038_P2.json",
+        "corruption_type": "",
+        "perturbation_point": 1
+      },
+      {
+        "task_id": "C2_task_059_P1",
+        "base_task_id": "C2_task_059",
+        "complexity": "C2",
+        "perturbation_mode": "P1",
+        "file_path": "perturbed_tasks\\c2\\C2_task_059_P1.json",
+        "corruption_type": "",
+        "perturbation_point": 2
+      },
+      {
+        "task_id": "C2_task_075_P3",
+        "base_task_id": "C2_task_075",
+        "complexity": "C2",
+        "perturbation_mode": "P3",
+        "file_path": "perturbed_tasks\\c2\\C2_task_075_P3.json",
+        "corruption_type": "irrelevant_response",
+        "perturbation_point": 2
+      },
+      {
+        "task_id": "C2_task_084_P4",
+        "base_task_id": "C2_task_084",
+        "complexity": "C2",
+        "perturbation_mode": "P4",
+        "file_path": "perturbed_tasks\\c2\\C2_task_084_P4.json",
+        "corruption_type": "irrelevant_response",
+        "perturbation_point": 3
+      },
+      {
+        "task_id": "C2_task_089_P3",
+        "base_task_id": "C2_task_089",
+        "complexity": "C2",
+        "perturbation_mode": "P3",
+        "file_path": "perturbed_tasks\\c2\\C2_task_089_P3.json",
+        "corruption_type": "internal_contradiction",
+        "perturbation_point": 3
+      },
+      {
+        "task_id": "C2_task_100_P4",
+        "base_task_id": "C2_task_100",
+        "complexity": "C2",
+        "perturbation_mode": "P4",
+        "file_path": "perturbed_tasks\\c2\\C2_task_100_P4.json",
+        "corruption_type": "internal_contradiction",
+        "perturbation_point": 2
+      },
+      {
+        "task_id": "C3_task_001_P3",
+        "base_task_id": "C3_task_001",
+        "complexity": "C3",
+        "perturbation_mode": "P3",
+        "file_path": "perturbed_tasks\\c3\\C3_task_001_P3.json",
+        "corruption_type": "tool_leakage",
+        "perturbation_point": 2
+      },
+      {
+        "task_id": "C3_task_015_P2",
+        "base_task_id": "C3_task_015",
+        "complexity": "C3",
+        "perturbation_mode": "P2",
+        "file_path": "perturbed_tasks\\c3\\C3_task_015_P2.json",
+        "corruption_type": "",
+        "perturbation_point": 1
+      },
+      {
+        "task_id": "C3_task_023_P3",
+        "base_task_id": "C3_task_023",
+        "complexity": "C3",
+        "perturbation_mode": "P3",
+        "file_path": "perturbed_tasks\\c3\\C3_task_023_P3.json",
+        "corruption_type": "temporal_contradiction",
+        "perturbation_point": 3
+      },
+      {
+        "task_id": "C3_task_030_P2",
+        "base_task_id": "C3_task_030",
+        "complexity": "C3",
+        "perturbation_mode": "P2",
+        "file_path": "perturbed_tasks\\c3\\C3_task_030_P2.json",
+        "corruption_type": "",
+        "perturbation_point": 2
+      },
+      {
+        "task_id": "C3_task_038_P3",
+        "base_task_id": "C3_task_038",
+        "complexity": "C3",
+        "perturbation_mode": "P3",
+        "file_path": "perturbed_tasks\\c3\\C3_task_038_P3.json",
+        "corruption_type": "logic_violation",
+        "perturbation_point": 3
+      },
+      {
+        "task_id": "C3_task_041_P4",
+        "base_task_id": "C3_task_041",
+        "complexity": "C3",
+        "perturbation_mode": "P4",
+        "file_path": "perturbed_tasks\\c3\\C3_task_041_P4.json",
+        "corruption_type": "physics_violation",
+        "perturbation_point": 2
+      },
+      {
+        "task_id": "C3_task_049_P4",
+        "base_task_id": "C3_task_049",
+        "complexity": "C3",
+        "perturbation_mode": "P4",
+        "file_path": "perturbed_tasks\\c3\\C3_task_049_P4.json",
+        "corruption_type": "logic_violation",
+        "perturbation_point": 2
+      },
+      {
+        "task_id": "C3_task_055_P1",
+        "base_task_id": "C3_task_055",
+        "complexity": "C3",
+        "perturbation_mode": "P1",
+        "file_path": "perturbed_tasks\\c3\\C3_task_055_P1.json",
+        "corruption_type": "",
+        "perturbation_point": 3
+      },
+      {
+        "task_id": "C3_task_061_P2",
+        "base_task_id": "C3_task_061",
+        "complexity": "C3",
+        "perturbation_mode": "P2",
+        "file_path": "perturbed_tasks\\c3\\C3_task_061_P2.json",
+        "corruption_type": "",
+        "perturbation_point": 2
+      },
+      {
+        "task_id": "C3_task_062_P4",
+        "base_task_id": "C3_task_062",
+        "complexity": "C3",
+        "perturbation_mode": "P4",
+        "file_path": "perturbed_tasks\\c3\\C3_task_062_P4.json",
+        "corruption_type": "missing_required_fields",
+        "perturbation_point": 1
+      },
+      {
+        "task_id": "C3_task_072_P1",
+        "base_task_id": "C3_task_072",
+        "complexity": "C3",
+        "perturbation_mode": "P1",
+        "file_path": "perturbed_tasks\\c3\\C3_task_072_P1.json",
+        "corruption_type": "",
+        "perturbation_point": 2
+      },
+      {
+        "task_id": "C3_task_083_P2",
+        "base_task_id": "C3_task_083",
+        "complexity": "C3",
+        "perturbation_mode": "P2",
+        "file_path": "perturbed_tasks\\c3\\C3_task_083_P2.json",
+        "corruption_type": "",
+        "perturbation_point": 2
+      },
+      {
+        "task_id": "C3_task_094_P1",
+        "base_task_id": "C3_task_094",
+        "complexity": "C3",
+        "perturbation_mode": "P1",
+        "file_path": "perturbed_tasks\\c3\\C3_task_094_P1.json",
+        "corruption_type": "",
+        "perturbation_point": 2
+      },
+      {
+        "task_id": "C4_task_008_P4",
+        "base_task_id": "C4_task_008",
+        "complexity": "C4",
+        "perturbation_mode": "P4",
+        "file_path": "perturbed_tasks\\c4\\C4_task_008_P4.json",
+        "corruption_type": "fact_contradiction",
+        "perturbation_point": null
+      },
+      {
+        "task_id": "C4_task_015_P2",
+        "base_task_id": "C4_task_015",
+        "complexity": "C4",
+        "perturbation_mode": "P2",
+        "file_path": "perturbed_tasks\\c4\\C4_task_015_P2.json",
+        "corruption_type": "",
+        "perturbation_point": null
+      },
+      {
+        "task_id": "C4_task_017_P2",
+        "base_task_id": "C4_task_017",
+        "complexity": "C4",
+        "perturbation_mode": "P2",
+        "file_path": "perturbed_tasks\\c4\\C4_task_017_P2.json",
+        "corruption_type": "",
+        "perturbation_point": null
+      },
+      {
+        "task_id": "C4_task_018_P3",
+        "base_task_id": "C4_task_018",
+        "complexity": "C4",
+        "perturbation_mode": "P3",
+        "file_path": "perturbed_tasks\\c4\\C4_task_018_P3.json",
+        "corruption_type": "statistical_inconsistency",
+        "perturbation_point": null
+      },
+      {
+        "task_id": "C4_task_023_P1",
+        "base_task_id": "C4_task_023",
+        "complexity": "C4",
+        "perturbation_mode": "P1",
+        "file_path": "perturbed_tasks\\c4\\C4_task_023_P1.json",
+        "corruption_type": "",
+        "perturbation_point": null
+      },
+      {
+        "task_id": "C4_task_033_P1",
+        "base_task_id": "C4_task_033",
+        "complexity": "C4",
+        "perturbation_mode": "P1",
+        "file_path": "perturbed_tasks\\c4\\C4_task_033_P1.json",
+        "corruption_type": "",
+        "perturbation_point": null
+      },
+      {
+        "task_id": "C4_task_043_P4",
+        "base_task_id": "C4_task_043",
+        "complexity": "C4",
+        "perturbation_mode": "P4",
+        "file_path": "perturbed_tasks\\c4\\C4_task_043_P4.json",
+        "corruption_type": "missing_required_fields",
+        "perturbation_point": null
+      },
+      {
+        "task_id": "C4_task_050_P1",
+        "base_task_id": "C4_task_050",
+        "complexity": "C4",
+        "perturbation_mode": "P1",
+        "file_path": "perturbed_tasks\\c4\\C4_task_050_P1.json",
+        "corruption_type": "",
+        "perturbation_point": null
+      },
+      {
+        "task_id": "C4_task_056_P3",
+        "base_task_id": "C4_task_056",
+        "complexity": "C4",
+        "perturbation_mode": "P3",
+        "file_path": "perturbed_tasks\\c4\\C4_task_056_P3.json",
+        "corruption_type": "physics_violation",
+        "perturbation_point": null
+      },
+      {
+        "task_id": "C4_task_057_P3",
+        "base_task_id": "C4_task_057",
+        "complexity": "C4",
+        "perturbation_mode": "P3",
+        "file_path": "perturbed_tasks\\c4\\C4_task_057_P3.json",
+        "corruption_type": "irrelevant_response",
+        "perturbation_point": null
+      },
+      {
+        "task_id": "C4_task_059_P2",
+        "base_task_id": "C4_task_059",
+        "complexity": "C4",
+        "perturbation_mode": "P2",
+        "file_path": "perturbed_tasks\\c4\\C4_task_059_P2.json",
+        "corruption_type": "",
+        "perturbation_point": null
+      },
+      {
+        "task_id": "C4_task_092_P4",
+        "base_task_id": "C4_task_092",
+        "complexity": "C4",
+        "perturbation_mode": "P4",
+        "file_path": "perturbed_tasks\\c4\\C4_task_092_P4.json",
+        "corruption_type": "internal_contradiction",
+        "perturbation_point": null
+      }
+    ],
+    "cell_audit": [
+      {
+        "cell": "C1_P1",
+        "pool_size": 95,
+        "selected": [
+          "C1_task_086_P1",
+          "C1_task_017_P1",
+          "C1_task_005_P1"
+        ]
+      },
+      {
+        "cell": "C1_P2",
+        "pool_size": 95,
+        "selected": [
+          "C1_task_041_P2",
+          "C1_task_037_P2",
+          "C1_task_033_P2"
+        ]
+      },
+      {
+        "cell": "C1_P3",
+        "pool_size": 95,
+        "selected": [
+          "C1_task_022_P3",
+          "C1_task_018_P3",
+          "C1_task_100_P3",
+          "C1_task_040_P3"
+        ]
+      },
+      {
+        "cell": "C1_P4",
+        "pool_size": 95,
+        "selected": [
+          "C1_task_080_P4",
+          "C1_task_014_P4",
+          "C1_task_090_P4"
+        ]
+      },
+      {
+        "cell": "C2_P1",
+        "pool_size": 95,
+        "selected": [
+          "C2_task_059_P1",
+          "C2_task_005_P1",
+          "C2_task_004_P1"
+        ]
+      },
+      {
+        "cell": "C2_P2",
+        "pool_size": 95,
+        "selected": [
+          "C2_task_015_P2",
+          "C2_task_035_P2",
+          "C2_task_038_P2"
+        ]
+      },
+      {
+        "cell": "C2_P3",
+        "pool_size": 95,
+        "selected": [
+          "C2_task_075_P3",
+          "C2_task_089_P3",
+          "C2_task_006_P3"
+        ]
+      },
+      {
+        "cell": "C2_P4",
+        "pool_size": 95,
+        "selected": [
+          "C2_task_084_P4",
+          "C2_task_034_P4",
+          "C2_task_100_P4"
+        ]
+      },
+      {
+        "cell": "C3_P1",
+        "pool_size": 95,
+        "selected": [
+          "C3_task_094_P1",
+          "C3_task_072_P1",
+          "C3_task_055_P1"
+        ]
+      },
+      {
+        "cell": "C3_P2",
+        "pool_size": 95,
+        "selected": [
+          "C3_task_030_P2",
+          "C3_task_061_P2",
+          "C3_task_083_P2",
+          "C3_task_015_P2"
+        ]
+      },
+      {
+        "cell": "C3_P3",
+        "pool_size": 95,
+        "selected": [
+          "C3_task_038_P3",
+          "C3_task_001_P3",
+          "C3_task_023_P3"
+        ]
+      },
+      {
+        "cell": "C3_P4",
+        "pool_size": 95,
+        "selected": [
+          "C3_task_062_P4",
+          "C3_task_049_P4",
+          "C3_task_041_P4"
+        ]
+      },
+      {
+        "cell": "C4_P1",
+        "pool_size": 95,
+        "selected": [
+          "C4_task_023_P1",
+          "C4_task_033_P1",
+          "C4_task_050_P1"
+        ]
+      },
+      {
+        "cell": "C4_P2",
+        "pool_size": 95,
+        "selected": [
+          "C4_task_017_P2",
+          "C4_task_015_P2",
+          "C4_task_059_P2"
+        ]
+      },
+      {
+        "cell": "C4_P3",
+        "pool_size": 95,
+        "selected": [
+          "C4_task_018_P3",
+          "C4_task_057_P3",
+          "C4_task_056_P3"
+        ]
+      },
+      {
+        "cell": "C4_P4",
+        "pool_size": 95,
+        "selected": [
+          "C4_task_092_P4",
+          "C4_task_043_P4",
+          "C4_task_008_P4"
+        ]
+      }
+    ],
+    "seed": 42,
+    "requested_total": 50,
+    "selected_total": 50,
+    "distinct_base_tasks": 50
+  }
+}
