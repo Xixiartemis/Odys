@@ -243,3 +243,51 @@ experiments/phase5/manifests/phase5-b0b1-candidates-50-draft-001.json
 | 测试模式意外真实请求 | 不存在 | T14 非环回 connect 全阻断 + fake 计数 |
 
 发现 P1×1（真实调用错标）已修复并通过回归（17 passed 含新测试）。
+
+## 阶段 C：完整回归、CI 同口径检查与提交（2026-10-10）
+
+### C.1 完整回归（真实输出）
+
+```
+$ uv run pytest -q --junitxml=...\b0b1_full_regression.xml
+→ 1828 passed, 2 skipped, 6 warnings in 701.34s (0:11:14)
+  退出码 0（FULL_GREEN；基线 1799 passed/2 skipped → +29 新测试，零回归）
+```
+
+新测试 29 = tests/test_phase5_b0b1_e2e.py 28 项（T1–T14）+
+对抗性回归 test_offline_validation_refuses_real_credentials。
+既有断言零改动（F2 为崩溃修复非放宽）。
+
+### C.2 CI 同口径 canary preflight（真实输出，3/3 PASS）
+
+```
+$ ODYS_AGENT_BASE_URL=https://token-plan-cn.xiaomimimo.com/v1 \
+  uv run python -m lhas.phase5.canary_runner --manifest ...004-r3/005-r2/006-r2.json --preflight-only
+→ preflight_status=PASS ×3；provider_requests=0；provider_executed=NO；
+  credential_present=false；output=NOT_TOUCHED（LIVE_EXECUTION_OUTPUT）
+```
+
+### C.3 冻结资产核验（git diff 实证）
+
+- experiments/phase5/benchmarks、runs/、历史 canary/pilot manifest、
+  benchmark-lock/provider-lock、20 对草案：**零 diff**（相对
+  PR #37 冻结基线 94dde69a）。
+- recovery_route.py / execution_control.py / recovery_budget.py /
+  firewall.py / runtime_validator.py / model_driver.py / canary_runner.py
+  / provenance.py / evals/：**零 diff**（route-v1 决策语义、安全门、
+  预算门、Judge、Metrics 未触碰）。
+- 工作区干净；p25 执行派生文件按既定口径还原未入库。
+
+### C.4 提交
+
+- BASE_SHA = eb6a53c92c0ec082e5f9f6662f5f18b82e49fe28（origin/main = PR #37 merge）
+- CODE_SHA = 8777d3934d5a3f03485edf9733dcfd7536fb4dfb（15 files）
+- FINAL_SHA = 本 Journal 补记提交（见最终汇报）
+- 未推送远程、未建 PR、未合并、未启动真实模型实验。
+
+### C.5 Gate 结论（详见最终汇报 §13）
+
+ENGINEERING_READY=YES；PROVIDER_FREE_E2E_PASS=YES；
+DATASET_CANDIDATE_READY=YES（DRAFT）；STATS_APPROVAL_READY=YES；
+BUDGET_APPROVAL_READY=YES；HUMAN_G5_APPROVED=**NO**；
+REAL_MODEL_EXECUTION_AUTHORIZED=**NO**。
