@@ -220,3 +220,62 @@ $ uv run pytest （批2 12 套）-q
 
 十项 Gate 全部通过，详见最终报告 §8。真实模型请求 = 0。
 待人工批准：协议阈值、样本量终值、真实模型实验授权、安全门对照开关。
+
+## 阶段 H：PR #37 合并前修复 — Windows CRLF 误报（2026-10-10）
+
+### H.1 问题与根因（真实证据）
+
+PR #37 推送前的 Windows 全量 pytest 出现 1 个失败：
+`tests/test_phase4_live_no_progress_escalation.py::test_preflight_is_provider_free_and_does_not_create_output`
+（断言 `report["experiment_01_unchanged"] is True`）。
+
+根因：`_frozen_experiment_01_unchanged`（scripts/phase4_live_no_progress_escalation.py）
+用**字节级比较** `git show HEAD:<path>`（LF blob）与工作区文件。本机
+core.autocrlf=true，工作区为 CRLF，逐字节必然不等 → 干净工作区被误报为
+已修改。实证（2026-10-10）：
+
+```
+$ git show HEAD:scripts/phase4_live_controlled_experiment.py > blob; wc -c blob 工作区文件
+47361 blob / 48435 工作区（差 1074 = 行数，纯 CRLF 增量）
+$ 去 \r 后 cmp → CONTENT-IDENTICAL（两文件均内容逐字节相同）
+```
+
+同一文件内 `_committed_file_unchanged` 的注释早已记录该坑（"Git's
+comparison honors the repository's line-ending attributes; a
+byte-for-byte comparison would falsely flag a clean CRLF worktree"），
+但 `_frozen_experiment_01_unchanged` 未复用该口径。ubuntu CI 为 LF 检出
+不受影响；windows CI 专项集原本不含该测试文件。
+
+### H.2 修复（最小差异，BASE=94dde69a51490317acc9e43dd39422e186113744）
+
+提交 **bb3c20faed9982a143bafebbb66e21525b02533e**（3 files, +126/-4）：
+
+1. `scripts/phase4_live_no_progress_escalation.py`（+8/-4）：
+   `_frozen_experiment_01_unchanged` 保留 `git show` 的"必须已提交"校验，
+   比较部分改为复用 `_committed_file_unchanged` 的 git diff 口径。
+   fail-closed 语义不变：未提交路径 / 文件缺失 / git 错误均返回 False。
+   不引入新的文件哈希规则。
+2. `tests/test_phase4_live_no_progress_escalation.py`（+118）：8 个回归
+   测试 — LF 一致、干净 CRLF（本修复的目标场景）、真实内容修改、暂存
+   修改、文件缺失、未提交路径、diff 错误、show 错误（后两者 fail-closed）。
+   全部在 tmp_path 一次性 fixture git 仓库执行（monkeypatch
+   REPO_ROOT/EXPERIMENT_01_PATHS），真实冻结实验文件零接触。
+3. `.github/workflows/test.yml`（+1）：将
+   tests/test_phase4_live_no_progress_escalation.py 加入 windows CI 专项集合。
+
+未触碰：recovery_route.py 决策语义、安全门、预算门、Judge、历史 Canary、
+ToolMaze（benchmark-lock.json 冻结身份 ef0798a 未动）、冻结实验内容。
+零真实模型请求。
+
+### H.3 测试证据（真实输出 2026-10-10）
+
+```
+$ uv run pytest tests/test_phase4_live_no_progress_escalation.py -q
+→ 14 passed in 9.72s（6 既有 + 8 新增）
+
+$ uv run pytest -q   （Windows 全量）
+→ 1799 passed, 2 skipped, 6 warnings in 550.53s (0:09:10)
+  （基线 1790 passed / 2 skipped / 1 failed → 修复后 0 failed，+8 新增测试）
+```
+
+ubuntu 全量 CI 与 windows CI 于推送后在 PR #37 验证（结果见 PR checks）。
