@@ -1,0 +1,29 @@
+{
+  "schema_version": "phase5-live-canary-002",
+  "experiment_id": "phase5-real-canary-006",
+  "experiment_role": "INFRA_CANARY",
+  "included_in_pilot_analysis": false,
+  "included_in_confirmatory_analysis": false,
+  "supersedes": "phase5-real-canary-006.json",
+  "superseded_before_live": true,
+  "real_provider_executed": "NO",
+  "correction_reason": "provider effective-config and wire-protocol correction",
+  "base_exact_head": "db8832f9011978dc60eff0b50ac7549663efdf32",
+  "source_pilot_manifest": "phase5-real-pilot-003.json",
+  "source_pilot_manifest_hash": "525cf5ffb89b4dd3569c4901023701054a898162bbaff61412e40f54a2b9db87",
+  "task": {"task_id":"C1_task_036_P4","complexity":"C1","perturbation_mode":"P4","file_path":"perturbed_tasks/c1/C1_task_036_P4.json"},
+  "arms": ["A0_BARE"],
+  "root_budget": {"max_model_calls":50,"max_turns":15,"max_tokens":100000,"token_budget":100000},
+  "benchmark": {
+    "name":"toolmaze","revision":"ef0798a","repository_url":"https://github.com/Zhudongsheng75/ToolMaze",
+    "commit_sha":"ef0798aa7f31ac9b33403254b1ef76e8673305fa","dataset_revision":"08b0239a98b0b07839d673f5bc0ef7d836db9296",
+    "dataset_digest":"9fcd7d7ec3c06afcee098877cca1ae8c29b87a1102be4b365a1055f824a76bc8","evaluator_digest":"74958635c3794bdd1202ad2a35f2d31f9504221905f98b94173d8c87474be740",
+    "dataset_hash_scope":"data/perturbed_tasks/**/*.json sorted by POSIX path, concatenated bytes"
+  },
+  "generation_config": {
+    "model_id":"mimo-v2.5","provider":"mimo","thinking_enabled":true,"effective_temperature":1.0,"effective_top_p":0.95,"sampling_parameters_sent":false,
+    "max_completion_tokens":4096,"request_timeout":120,"sdk_max_retries":0,"supports_tool_choice":false,"supports_parallel_tool_calls":false
+  },
+  "output_dir":"experiments/phase5/runs/phase5-real-canary-006-r2",
+  "manifest_hash":"6beab8b7d7e851b5e4add91cfeab608a0758e4ded131b2c825dd893fcc57cc8b"
+}

@@ -6,12 +6,15 @@ These tests never construct a provider and never execute a benchmark run.
 from __future__ import annotations
 
 import inspect
+import subprocess
+from pathlib import Path
 
 from evals.reliability.p45_executor import P45BenchmarkExecutor
 from evals.reliability.run_phase4 import ProtocolSnapshot
 from evals.reliability.runtime_factory.recovery import OfficialOdysRecoveryCoordinator
 from lhas.recovery_control import RecoveryController, RecoveryDecision
 
+from scripts import phase4_live_no_progress_escalation as escalation
 from scripts.phase4_live_no_progress_escalation import (
     ARMS,
     DEFAULT_OUTPUT,
@@ -126,3 +129,119 @@ def test_task_projection_has_frozen_fault_and_experiment_alternate_strategy():
         "route": "alternate",
         "state_status": "verified",
     }
+
+
+# --- Frozen-file guard comparison semantics (CRLF regression) ---
+#
+# _frozen_experiment_01_unchanged must delegate its comparison to the Git
+# diff logic in _committed_file_unchanged.  The historical byte-for-byte
+# comparison against `git show HEAD:<path>` (LF blob) falsely flagged a clean
+# CRLF worktree on Windows (core.autocrlf=true).  Every case below runs
+# against a disposable fixture repository; the real frozen Experiment 01
+# files are never modified or reset.
+
+_GUARD_PATHS = ("scripts/experiment_01.py", "docs/evidence/experiment_01.md")
+_GUARD_LF = b"line one\nline two\n"
+
+
+def _guard_repo(tmp_path: Path, monkeypatch) -> Path:
+    root = tmp_path / "guard-repo"
+    root.mkdir()
+    for args in (
+        ["init", "-q"],
+        ["config", "user.email", "guard-test@example.com"],
+        ["config", "user.name", "Guard Test"],
+        ["config", "core.autocrlf", "true"],
+    ):
+        subprocess.run(["git", "-C", str(root), *args], check=True, capture_output=True)
+    for relative in _GUARD_PATHS:
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(_GUARD_LF)
+    subprocess.run(["git", "-C", str(root), "add", "-A"], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(root), "commit", "-qm", "frozen baseline"],
+        check=True,
+        capture_output=True,
+    )
+    monkeypatch.setattr(escalation, "REPO_ROOT", root)
+    monkeypatch.setattr(escalation, "EXPERIMENT_01_PATHS", _GUARD_PATHS)
+    return root
+
+
+def _write_crlf(root: Path, relative: str) -> None:
+    crlf = bytes([13, 10])
+    (root / relative).write_bytes(_GUARD_LF.replace(bytes([10]), crlf))
+
+
+def test_guard_accepts_identical_lf_worktree(tmp_path, monkeypatch):
+    _guard_repo(tmp_path, monkeypatch)
+    assert escalation._frozen_experiment_01_unchanged() is True
+
+
+def test_guard_accepts_clean_crlf_worktree(tmp_path, monkeypatch):
+    root = _guard_repo(tmp_path, monkeypatch)
+    for relative in _GUARD_PATHS:
+        _write_crlf(root, relative)
+    assert escalation._frozen_experiment_01_unchanged() is True
+
+
+def test_guard_rejects_real_content_change(tmp_path, monkeypatch):
+    root = _guard_repo(tmp_path, monkeypatch)
+    (root / _GUARD_PATHS[0]).write_bytes(b"tampered content\n")
+    assert escalation._frozen_experiment_01_unchanged() is False
+
+
+def test_guard_rejects_staged_change(tmp_path, monkeypatch):
+    root = _guard_repo(tmp_path, monkeypatch)
+    (root / _GUARD_PATHS[1]).write_bytes(b"staged tamper\n")
+    subprocess.run(
+        ["git", "-C", str(root), "add", "--", _GUARD_PATHS[1]],
+        check=True,
+        capture_output=True,
+    )
+    assert escalation._frozen_experiment_01_unchanged() is False
+
+
+def test_guard_rejects_missing_file(tmp_path, monkeypatch):
+    root = _guard_repo(tmp_path, monkeypatch)
+    (root / _GUARD_PATHS[0]).unlink()
+    assert escalation._frozen_experiment_01_unchanged() is False
+
+
+def test_guard_rejects_uncommitted_path(tmp_path, monkeypatch):
+    root = _guard_repo(tmp_path, monkeypatch)
+    extra = root / "docs/evidence/extra.md"
+    extra.parent.mkdir(parents=True, exist_ok=True)
+    extra.write_bytes(b"untracked\n")
+    monkeypatch.setattr(escalation, "EXPERIMENT_01_PATHS", ("docs/evidence/extra.md",))
+    assert escalation._frozen_experiment_01_unchanged() is False
+
+
+def test_guard_fails_closed_on_diff_error(tmp_path, monkeypatch):
+    _guard_repo(tmp_path, monkeypatch)
+    real_run = subprocess.run
+
+    def failing_diff(*args, **kwargs):
+        command = list(args[0]) if args else list(kwargs["args"])
+        if "diff" in command:
+            return subprocess.CompletedProcess(command, 128, stdout=b"", stderr=b"git error")
+        return real_run(*args, **kwargs)
+
+    monkeypatch.setattr(escalation.subprocess, "run", failing_diff)
+    assert escalation._frozen_experiment_01_unchanged() is False
+
+
+def test_guard_fails_closed_on_show_error(tmp_path, monkeypatch):
+    _guard_repo(tmp_path, monkeypatch)
+    real_run = subprocess.run
+
+    def failing_show(*args, **kwargs):
+        command = list(args[0]) if args else list(kwargs["args"])
+        if "show" in command:
+            raise subprocess.CalledProcessError(returncode=128, cmd=command)
+        return real_run(*args, **kwargs)
+
+    monkeypatch.setattr(escalation.subprocess, "run", failing_show)
+    assert escalation._frozen_experiment_01_unchanged() is False
+

@@ -366,6 +366,18 @@ class ToolMazeRuntimeBackend:
         }
         artifact["strategy_config"] = strategy_config
 
+        # ── Attribution boundary (B2-6) ──────────────────────────────
+        # This path is NOT the canonical experiment execution path.  It is
+        # explicitly excluded from canonical experiment statistics; the
+        # canonical path is trial_executor.execute_trial.
+        artifact["execution_path"] = "NON_CANONICAL_RUNTIME_BACKEND"
+        artifact["included_in_canonical_analysis"] = False
+        artifact["canonical_analysis_exclusion_reason"] = (
+            "runtime_backend.execute is a non-canonical execution path and is "
+            "excluded from Phase5 experiment statistics; only "
+            "trial_executor.execute_trial runs are attributable"
+        )
+
         return artifact
 
     # ── Trace finalization ────────────────────────────────────────────

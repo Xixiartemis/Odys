@@ -864,7 +864,7 @@ class TestT20_NonPolicyIdentityHashMatch:
     def test_provenance_freeze_idempotent(
         self, provenance_dir, gen_config, toolmaze_adapter,
     ):
-        """Freeze detects identical content on repeat call (no drift)."""
+        """Freeze detects and rejects content drift for one experiment_id."""
         freeze = ProvenanceFreeze(provenance_dir)
         identity = toolmaze_adapter.benchmark_identity
         task_ids = sorted(t.task_id for t in toolmaze_adapter.enumerate_tasks())
@@ -877,13 +877,26 @@ class TestT20_NonPolicyIdentityHashMatch:
             budgets={"max_turns": 30},
         )
         m1 = freeze.freeze(**kwargs)
-        # The second call has a different frozen_at timestamp, so the
-        # hash will differ. ProvenanceFreeze.freeze() raises ValueError
-        # on drift — this is the expected behavior for same experiment_id
-        # with different content.  We verify that the freeze method
-        # correctly detects and rejects the timestamp-based drift.
+        # The drift being verified must be deterministic: change one content
+        # field (budgets) for the second call.  Relying only on the frozen_at
+        # timestamp made this assertion clock-resolution dependent (the
+        # timestamp is part of manifest_hash, so two calls landing inside one
+        # Windows clock tick produce identical hashes and no drift).
+        drifted = dict(kwargs, budgets={"max_turns": 31})
         with pytest.raises(ValueError, match="[Pp]rovenance drift"):
-            freeze.freeze(**kwargs)
+            freeze.freeze(**drifted)
+
+    def test_manifest_hash_covers_frozen_at(self):
+        """Root-cause guard: frozen_at participates in manifest_hash.
+
+        This semantic is frozen: changing it would invalidate historical
+        provenance files.  It is also the reason drift assertions must use
+        explicit content differences instead of timestamp luck.
+        """
+        from lhas.phase5.provenance import compute_manifest_hash
+        early = {"experiment_id": "EXP-HASH", "frozen_at": "2026-01-01T00:00:00+00:00"}
+        later = {"experiment_id": "EXP-HASH", "frozen_at": "2026-01-01T00:00:01+00:00"}
+        assert compute_manifest_hash(early) != compute_manifest_hash(later)
 
 
 # ══════════════════════════════════════════════════════════════════════

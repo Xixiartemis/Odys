@@ -1,0 +1,338 @@
+{
+  "schema_version": "phase5-route-dataset-isolation-001",
+  "generated_at": "2026-10-09T16:15:09.266280+00:00",
+  "selection_seed": 42,
+  "selection_algorithm": "real_pilot_runner.select_20_tasks semantics (stratified random.Random(seed).choice over C1..C4 x P0..P4 cells) with DEV_TASK_IDS removed from each cell BEFORE the draw",
+  "dev_task_ids": [
+    "C1_task_015_P1",
+    "C1_task_036_P4",
+    "C1_task_082_P0",
+    "C1_task_082_P1"
+  ],
+  "dev_set_definition": "every real ToolMaze task referenced by tests, dev scripts or development canary runs up to and including 4956e91f",
+  "selected_task_ids": [
+    "C1_task_004_P2",
+    "C1_task_016_P1",
+    "C1_task_037_P4",
+    "C1_task_083_P0",
+    "C1_task_095_P3",
+    "C2_task_014_P4",
+    "C2_task_018_P2",
+    "C2_task_029_P1",
+    "C2_task_032_P0",
+    "C2_task_095_P3",
+    "C3_task_012_P3",
+    "C3_task_070_P2",
+    "C3_task_076_P4",
+    "C3_task_087_P0",
+    "C3_task_095_P1",
+    "C4_task_004_P2",
+    "C4_task_005_P1",
+    "C4_task_012_P3",
+    "C4_task_028_P4",
+    "C4_task_055_P0"
+  ],
+  "selected_task_count": 20,
+  "dev_overlap": [],
+  "dev_overlap_check": "PASS",
+  "historical_pilot_003_selected_task_ids": [
+    "C1_task_004_P2",
+    "C1_task_015_P1",
+    "C1_task_036_P4",
+    "C1_task_082_P0",
+    "C1_task_095_P3",
+    "C2_task_014_P4",
+    "C2_task_018_P2",
+    "C2_task_029_P1",
+    "C2_task_032_P0",
+    "C2_task_095_P3",
+    "C3_task_012_P3",
+    "C3_task_070_P2",
+    "C3_task_076_P4",
+    "C3_task_087_P0",
+    "C3_task_095_P1",
+    "C4_task_004_P2",
+    "C4_task_005_P1",
+    "C4_task_012_P3",
+    "C4_task_028_P4",
+    "C4_task_055_P0"
+  ],
+  "historical_pilot_003_dev_overlap": [
+    "C1_task_015_P1",
+    "C1_task_036_P4",
+    "C1_task_082_P0"
+  ],
+  "historical_pilot_003_usable_as_final_eval_set": false,
+  "task_fingerprints": [
+    {
+      "task_id": "C1_task_004_P2",
+      "source_file": "perturbed_tasks\\c1\\C1_task_004_P2.json",
+      "sha256": "9b8da84ae372476a2ba16b9060546025c68c9354b880e9b582bead88166699a7"
+    },
+    {
+      "task_id": "C1_task_015_P1",
+      "source_file": "perturbed_tasks\\c1\\C1_task_015_P1.json",
+      "sha256": "57ccfed442db8e1c76873733aa8104cdb3b16ca1f0e995ddd6ae1602b76fdda2"
+    },
+    {
+      "task_id": "C1_task_016_P1",
+      "source_file": "perturbed_tasks\\c1\\C1_task_016_P1.json",
+      "sha256": "4b5b1d42020fec40ed1ba2e3e4cc845c13d4dccd9ceed726e271adb1b8877043"
+    },
+    {
+      "task_id": "C1_task_036_P4",
+      "source_file": "perturbed_tasks\\c1\\C1_task_036_P4.json",
+      "sha256": "5aab3927bee198ad8b636783d9586b7ccf6975e6d1be7e618d834e1d5616a2dd"
+    },
+    {
+      "task_id": "C1_task_037_P4",
+      "source_file": "perturbed_tasks\\c1\\C1_task_037_P4.json",
+      "sha256": "062b920ca9777e14bb7bc32508800b4596ff783bb2b3f8ea4e99a2ff1f8ea2cf"
+    },
+    {
+      "task_id": "C1_task_082_P0",
+      "source_file": "perturbed_tasks\\c1\\C1_task_082_P0.json",
+      "sha256": "422847a2c6a81b9396c73f55ee1d043cacc765ccbba6958ac7a863339ecae7d6"
+    },
+    {
+      "task_id": "C1_task_082_P1",
+      "source_file": "perturbed_tasks\\c1\\C1_task_082_P1.json",
+      "sha256": "3a28323b57e67799520fcb9f28434773777d8dbc2571df5a93b89e8a3aaa5235"
+    },
+    {
+      "task_id": "C1_task_083_P0",
+      "source_file": "perturbed_tasks\\c1\\C1_task_083_P0.json",
+      "sha256": "b682837a692e216f82ad1dc08d39ef3ab76d9cdecf900ac3a9b2a62d7fd311f7"
+    },
+    {
+      "task_id": "C1_task_095_P3",
+      "source_file": "perturbed_tasks\\c1\\C1_task_095_P3.json",
+      "sha256": "abd262a0b5dd4d48bfa7b8d1d3b43b6792a22187a42a43b9e17218f1d2ac63ef"
+    },
+    {
+      "task_id": "C2_task_014_P4",
+      "source_file": "perturbed_tasks\\c2\\C2_task_014_P4.json",
+      "sha256": "a6e6d46619f73eaf6fc9bf06154b7068f4659373c762f3ac9e72ec063279a913"
+    },
+    {
+      "task_id": "C2_task_018_P2",
+      "source_file": "perturbed_tasks\\c2\\C2_task_018_P2.json",
+      "sha256": "8fa73f9ee4d47036f0531406fee304590bb9ecea8915a32dff041751f6bdf0b6"
+    },
+    {
+      "task_id": "C2_task_029_P1",
+      "source_file": "perturbed_tasks\\c2\\C2_task_029_P1.json",
+      "sha256": "969054760d5a851fc660a780df3a5f8f2cfeb38370a4d082279e80cc996b3578"
+    },
+    {
+      "task_id": "C2_task_032_P0",
+      "source_file": "perturbed_tasks\\c2\\C2_task_032_P0.json",
+      "sha256": "8e2c4840093382e29835705f452735c996480f43a2d012228c8df180867c2314"
+    },
+    {
+      "task_id": "C2_task_095_P3",
+      "source_file": "perturbed_tasks\\c2\\C2_task_095_P3.json",
+      "sha256": "b5788a9107982864b5946247eb07170152be95dc9ca5a8eeec13ce413891180a"
+    },
+    {
+      "task_id": "C3_task_012_P3",
+      "source_file": "perturbed_tasks\\c3\\C3_task_012_P3.json",
+      "sha256": "c999c0ed0bdcf60045dea03357508309893cc27b335fe3d439ffad61b4d65b67"
+    },
+    {
+      "task_id": "C3_task_070_P2",
+      "source_file": "perturbed_tasks\\c3\\C3_task_070_P2.json",
+      "sha256": "c486d021d26acc4afa31da8c0d95ca2b9dcce53256663254d0fb61465d82d8ff"
+    },
+    {
+      "task_id": "C3_task_076_P4",
+      "source_file": "perturbed_tasks\\c3\\C3_task_076_P4.json",
+      "sha256": "a44e4704012a5c6b850005214b633c25aac57268703dc3c3b5bae51c3c2be3fb"
+    },
+    {
+      "task_id": "C3_task_087_P0",
+      "source_file": "perturbed_tasks\\c3\\C3_task_087_P0.json",
+      "sha256": "00a396cc5b39dc1b5df70d43e662ac16762344b29dd9f6eca14d1acdff168af6"
+    },
+    {
+      "task_id": "C3_task_095_P1",
+      "source_file": "perturbed_tasks\\c3\\C3_task_095_P1.json",
+      "sha256": "632f2180caad29c3d6cba20f63ea4dbc5ab4114a8989f492b521ff83b861c958"
+    },
+    {
+      "task_id": "C4_task_004_P2",
+      "source_file": "perturbed_tasks\\c4\\C4_task_004_P2.json",
+      "sha256": "24c89860193b0fd478dee2746743834c85fd3be86db36234e500dee2ffb95fbb"
+    },
+    {
+      "task_id": "C4_task_005_P1",
+      "source_file": "perturbed_tasks\\c4\\C4_task_005_P1.json",
+      "sha256": "e79ff81957fb82032785d8aa1c2e5b8bfd7eb8891b7d38f3783fad7aa7631d33"
+    },
+    {
+      "task_id": "C4_task_012_P3",
+      "source_file": "perturbed_tasks\\c4\\C4_task_012_P3.json",
+      "sha256": "5c89245d3c07ee7459dffd85c95182e00eac8e2405fbcf9b1edce4d03589ed0f"
+    },
+    {
+      "task_id": "C4_task_028_P4",
+      "source_file": "perturbed_tasks\\c4\\C4_task_028_P4.json",
+      "sha256": "6cfde9a751a07918b4171e0bb532881bbc27205e02c75b27baf852ae6efea103"
+    },
+    {
+      "task_id": "C4_task_055_P0",
+      "source_file": "perturbed_tasks\\c4\\C4_task_055_P0.json",
+      "sha256": "7686a7027e93b2f4ce16083a7dbaa7bde87f48a257482a4d39075d6b66b36be6"
+    }
+  ],
+  "cell_audit": [
+    {
+      "cell": "C1_P0",
+      "candidate_count": 100,
+      "pool_count_after_exclusion": 99,
+      "excluded_dev_ids": [
+        "C1_task_082_P0"
+      ],
+      "selected_task_id": "C1_task_083_P0"
+    },
+    {
+      "cell": "C1_P1",
+      "candidate_count": 100,
+      "pool_count_after_exclusion": 98,
+      "excluded_dev_ids": [
+        "C1_task_015_P1",
+        "C1_task_082_P1"
+      ],
+      "selected_task_id": "C1_task_016_P1"
+    },
+    {
+      "cell": "C1_P2",
+      "candidate_count": 100,
+      "pool_count_after_exclusion": 100,
+      "excluded_dev_ids": [],
+      "selected_task_id": "C1_task_004_P2"
+    },
+    {
+      "cell": "C1_P3",
+      "candidate_count": 100,
+      "pool_count_after_exclusion": 100,
+      "excluded_dev_ids": [],
+      "selected_task_id": "C1_task_095_P3"
+    },
+    {
+      "cell": "C1_P4",
+      "candidate_count": 100,
+      "pool_count_after_exclusion": 99,
+      "excluded_dev_ids": [
+        "C1_task_036_P4"
+      ],
+      "selected_task_id": "C1_task_037_P4"
+    },
+    {
+      "cell": "C2_P0",
+      "candidate_count": 100,
+      "pool_count_after_exclusion": 100,
+      "excluded_dev_ids": [],
+      "selected_task_id": "C2_task_032_P0"
+    },
+    {
+      "cell": "C2_P1",
+      "candidate_count": 100,
+      "pool_count_after_exclusion": 100,
+      "excluded_dev_ids": [],
+      "selected_task_id": "C2_task_029_P1"
+    },
+    {
+      "cell": "C2_P2",
+      "candidate_count": 100,
+      "pool_count_after_exclusion": 100,
+      "excluded_dev_ids": [],
+      "selected_task_id": "C2_task_018_P2"
+    },
+    {
+      "cell": "C2_P3",
+      "candidate_count": 100,
+      "pool_count_after_exclusion": 100,
+      "excluded_dev_ids": [],
+      "selected_task_id": "C2_task_095_P3"
+    },
+    {
+      "cell": "C2_P4",
+      "candidate_count": 100,
+      "pool_count_after_exclusion": 100,
+      "excluded_dev_ids": [],
+      "selected_task_id": "C2_task_014_P4"
+    },
+    {
+      "cell": "C3_P0",
+      "candidate_count": 100,
+      "pool_count_after_exclusion": 100,
+      "excluded_dev_ids": [],
+      "selected_task_id": "C3_task_087_P0"
+    },
+    {
+      "cell": "C3_P1",
+      "candidate_count": 100,
+      "pool_count_after_exclusion": 100,
+      "excluded_dev_ids": [],
+      "selected_task_id": "C3_task_095_P1"
+    },
+    {
+      "cell": "C3_P2",
+      "candidate_count": 100,
+      "pool_count_after_exclusion": 100,
+      "excluded_dev_ids": [],
+      "selected_task_id": "C3_task_070_P2"
+    },
+    {
+      "cell": "C3_P3",
+      "candidate_count": 100,
+      "pool_count_after_exclusion": 100,
+      "excluded_dev_ids": [],
+      "selected_task_id": "C3_task_012_P3"
+    },
+    {
+      "cell": "C3_P4",
+      "candidate_count": 100,
+      "pool_count_after_exclusion": 100,
+      "excluded_dev_ids": [],
+      "selected_task_id": "C3_task_076_P4"
+    },
+    {
+      "cell": "C4_P0",
+      "candidate_count": 100,
+      "pool_count_after_exclusion": 100,
+      "excluded_dev_ids": [],
+      "selected_task_id": "C4_task_055_P0"
+    },
+    {
+      "cell": "C4_P1",
+      "candidate_count": 100,
+      "pool_count_after_exclusion": 100,
+      "excluded_dev_ids": [],
+      "selected_task_id": "C4_task_005_P1"
+    },
+    {
+      "cell": "C4_P2",
+      "candidate_count": 100,
+      "pool_count_after_exclusion": 100,
+      "excluded_dev_ids": [],
+      "selected_task_id": "C4_task_004_P2"
+    },
+    {
+      "cell": "C4_P3",
+      "candidate_count": 100,
+      "pool_count_after_exclusion": 100,
+      "excluded_dev_ids": [],
+      "selected_task_id": "C4_task_012_P3"
+    },
+    {
+      "cell": "C4_P4",
+      "candidate_count": 100,
+      "pool_count_after_exclusion": 100,
+      "excluded_dev_ids": [],
+      "selected_task_id": "C4_task_028_P4"
+    }
+  ],
+  "route_policy_fingerprint": "a056983f126c8963"
+}

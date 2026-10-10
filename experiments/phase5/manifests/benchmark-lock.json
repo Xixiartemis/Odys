@@ -8,7 +8,9 @@
       "commit_sha": "ef0798aa7f31ac9b33403254b1ef76e8673305fa",
       "release": "latest (no tags)",
       "dataset_source": "https://huggingface.co/datasets/dongsheng/ToolMaze",
+      "dataset_revision": "08b0239a98b0b07839d673f5bc0ef7d836db9296",
       "dataset_hash": "9fcd7d7ec3c06afcee098877cca1ae8c29b87a1102be4b365a1055f824a76bc8",
+      "dataset_hash_scope": "data/perturbed_tasks/**/*.json sorted by POSIX path, concatenated bytes",
       "dataset_file_count": 2000,
       "dataset_task_counts": {
         "c1": 500,

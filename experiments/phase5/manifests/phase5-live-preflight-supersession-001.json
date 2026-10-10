@@ -1,0 +1,18 @@
+{
+  "schema_version": "phase5-live-preflight-supersession-001",
+  "superseded_before_live": "YES",
+  "real_provider_executed": "NO",
+  "reason": "provider effective-config and wire-protocol correction",
+  "preservation_contract": "Existing manifest bytes are historical evidence and must not be overwritten.",
+  "old_manifests": [
+    {"path":"phase5-real-canary-004.json","manifest_hash":"cd351ee0c54bf304c2aee84e59b3b66c9b138411e332b7d63f403d869fc94191"},
+    {"path":"phase5-real-canary-005.json","manifest_hash":"99b10528c100a03709bbcc0204d98559ee51c70ca43dbbc5613c108f8af84e73"},
+    {"path":"phase5-real-canary-006.json","manifest_hash":"342f33a4dee9c47e84e81cf6cfd1e9d25b4267db3729e1c99e48dfd9ea97350b"}
+  ],
+  "corrected_pilot": {"path":"phase5-real-pilot-003.json","manifest_hash":"6fe2bfaf8a9dd276267c55fa5aee9d1387c3c14edbdb97e09dc7d01147570cda"},
+  "r2_manifests": [
+    {"path":"phase5-real-canary-004-r2.json","experiment_id":"phase5-real-canary-004"},
+    {"path":"phase5-real-canary-005-r2.json","experiment_id":"phase5-real-canary-005"},
+    {"path":"phase5-real-canary-006-r2.json","experiment_id":"phase5-real-canary-006"}
+  ]
+}

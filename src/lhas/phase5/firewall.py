@@ -52,6 +52,8 @@ class OfflineGraderFirewall:
         "offline_native_evaluate",
         "get_target_milestones",
         "derive_progress_metrics",
+        "official_judge",
+        "official_metrics",
     })
 
     def __init__(self):

@@ -93,7 +93,10 @@ class ToolMazeAdapter:
 
         # Load all tasks from official data
         self._tasks: list[dict[str, Any]] = []
-        self._task_index: dict[str, dict[str, Any]] = {}
+        # Raw ToolMaze task_id is a base id shared by P0-P4 variants. The
+        # execution unit is therefore always the composite (base, mode).
+        self._task_index: dict[tuple[str, str], dict[str, Any]] = {}
+        self._execution_unit_index: dict[str, dict[str, Any]] = {}
         self._load_tasks()
 
         # Hidden state cache for offline evaluation
@@ -116,7 +119,14 @@ class ToolMazeAdapter:
                     task = json.loads(task_file.read_text(encoding="utf-8"))
                     task["_source_file"] = str(task_file.relative_to(self._data_dir))
                     self._tasks.append(task)
-                    self._task_index[task["task_id"]] = task
+                    mode = str(task.get("perturbation_mode", "P0"))
+                    base_id = str(task["task_id"])
+                    execution_unit_id = f"{base_id}_{mode}"
+                    key = (base_id, mode)
+                    if key in self._task_index:
+                        raise ValueError(f"duplicate ToolMaze execution unit: {execution_unit_id}")
+                    self._task_index[key] = task
+                    self._execution_unit_index[execution_unit_id] = task
                 except (json.JSONDecodeError, KeyError) as e:
                     print(f"Warning: skipping {task_file}: {e}", file=sys.stderr)
 
@@ -130,6 +140,11 @@ class ToolMazeAdapter:
             dataset_digest=self._dataset_hash,
             evaluator_digest=self._evaluator_hash,
         )
+
+    @property
+    def full_benchmark_sha(self) -> str:
+        """Full frozen ToolMaze commit used for final pairing provenance."""
+        return "ef0798aa7f31ac9b33403254b1ef76e8673305fa"
 
     def enumerate_tasks(self) -> Sequence[TaskDescriptor]:
         """Enumerate all loaded tasks as descriptors."""
@@ -176,18 +191,13 @@ class ToolMazeAdapter:
 
     def _find_task(self, task_id: str) -> Optional[dict[str, Any]]:
         """Find the raw task by composite task_id (original_id_mode)."""
-        # Try direct lookup first
-        if task_id in self._task_index:
-            return self._task_index[task_id]
-
-        # Try composite key: original_id + mode
+        # Only exact composite execution-unit lookup is permitted. A base id
+        # without P0-P4 is intentionally ambiguous and must not resolve.
         parts = task_id.rsplit("_", 1)
         if len(parts) == 2:
             original_id = parts[0]
             mode = parts[1]
-            for task in self._tasks:
-                if task["task_id"] == original_id and task.get("perturbation_mode") == mode:
-                    return task
+            return self._task_index.get((original_id, mode))
 
         return None
 
@@ -203,7 +213,9 @@ class ToolMazeAdapter:
         return RuntimeTask(
             task_id=descriptor.task_id,
             objective=raw.get("task_description", ""),
-            visible_tools=self._extract_visible_tools(raw),
+            # Tool definitions are selected by the official ExecutionEngine
+            # in TrialExecutor. Do not derive a second schema here.
+            visible_tools=[],
             prompt=raw.get("user_input", {}).get("query", raw.get("task_description", "")),
             constraints=[],
             acceptance_criteria=["complete the task as described"],
@@ -212,58 +224,8 @@ class ToolMazeAdapter:
         )
 
     def _extract_visible_tools(self, task: dict[str, Any]) -> list[dict[str, Any]]:
-        """Extract tool definitions visible to the runtime agent.
-
-        Tools are loaded from official YAML definitions via ToolLoader.
-        This replaces the previous oracle-leaking implementation that
-        read tool names from ``execution_trace`` and
-        ``alternative_tools`` (hidden fields).
-        """
-        import sys as _sys
-        repo_str = str(self._repo_dir)
-        if repo_str not in _sys.path:
-            _sys.path.insert(0, repo_str)
-        try:
-            from tools.loader import ToolLoader
-
-            definitions_dir = self._repo_dir / "tools" / "definitions"
-            loader = ToolLoader(str(definitions_dir))
-
-            # Collect all tool names that appear in this task's
-            # execution_trace (name only — no outputs or arguments).
-            trace_tool_names: set[str] = set()
-            for step in task.get("execution_trace", []):
-                tn = step.get("tool_name")
-                if tn:
-                    trace_tool_names.add(tn)
-
-            # Build skeletons from YAML definitions
-            tools: list[dict[str, Any]] = []
-            for tool_name in sorted(trace_tool_names):
-                tool_def = loader.get_tool_by_name(tool_name)
-                if tool_def:
-                    paradigms = tool_def.get("paradigms", {})
-                    fc = paradigms.get("function_call", {})
-                    spec = fc.get("spec", {})
-                    tools.append({
-                        "name": tool_name,
-                        "description": tool_def.get("description", ""),
-                        "parameters": spec.get("parameters", {}),
-                        "category": tool_def.get("category", ""),
-                        "domain": tool_def.get("domain", ""),
-                    })
-                else:
-                    # Fallback for tools not in YAML definitions
-                    tools.append({
-                        "name": tool_name,
-                        "description": f"Tool: {tool_name}",
-                        "parameters": {},
-                    })
-
-            return tools
-        finally:
-            if repo_str in _sys.path:
-                _sys.path.remove(repo_str)
+        """Compatibility shim: schema selection belongs to ExecutionEngine."""
+        return []
 
     async def reset_environment(self, task: RuntimeTask) -> None:
         """Reset environment for a new trial."""
