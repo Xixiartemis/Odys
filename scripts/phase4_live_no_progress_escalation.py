@@ -98,16 +98,18 @@ def _credential_present() -> bool:
 
 def _frozen_experiment_01_unchanged() -> bool:
     for relative in EXPERIMENT_01_PATHS:
-        current = REPO_ROOT / relative
         try:
-            committed = subprocess.run(
+            subprocess.run(
                 ["git", "-C", str(REPO_ROOT), "show", f"HEAD:{relative}"],
                 check=True,
                 capture_output=True,
-            ).stdout
+            )
         except subprocess.CalledProcessError:
             return False
-        if not current.exists() or current.read_bytes() != committed:
+        # Comparison delegates to _committed_file_unchanged: Git's diff
+        # honors the repository's line-ending attributes, while a
+        # byte-for-byte comparison would falsely flag a clean CRLF worktree.
+        if not _committed_file_unchanged(relative):
             return False
     return True
 

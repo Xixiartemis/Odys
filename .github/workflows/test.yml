@@ -58,6 +58,7 @@ jobs:
           tests/test_phase4_live_no_progress_final.py
           tests/test_phase4_live_no_progress_02h.py
           tests/test_phase4_live_no_progress_parity.py
+          tests/test_phase4_live_no_progress_escalation.py
           tests/test_phase4_live_effect_policy_parity.py
           tests/test_phase4_final_live_infrastructure.py
           tests/test_p48_provider_identity.py
